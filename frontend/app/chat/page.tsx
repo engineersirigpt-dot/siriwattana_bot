@@ -1,0 +1,1056 @@
+"use client";
+
+import { useEffect, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
+import {
+  Bookmark,
+  BookmarkCheck,
+  ChevronDown,
+  ChevronRight,
+  Download,
+  Eye,
+  FileText,
+  Folder,
+  FolderOpen,
+  ImageIcon,
+  LogOut,
+  MessageSquare,
+  Paperclip,
+  Pencil,
+  Plus,
+  Search,
+  Send,
+  Settings,
+  Trash2,
+  Users,
+  X,
+} from "lucide-react";
+import {
+  API_BASE,
+  api,
+  clearAuth,
+  fetchAttachmentBlobUrl,
+  getRole,
+  getToken,
+  getUsername,
+  sendChat,
+} from "@/lib/api";
+import { AlertModal, ConfirmModal, PromptModal } from "@/components/Modal";
+
+type Attachment = {
+  id: number;
+  filename: string;
+  content_type: string;
+  size_bytes: number;
+};
+
+type Msg = {
+  role: "user" | "bot";
+  text: string;
+  source?: string;
+  attachments?: Attachment[];
+};
+
+type Session = {
+  id: number;
+  title: string;
+  created_at: string;
+  updated_at: string;
+  message_count: number;
+  last_preview: string | null;
+  is_saved: number;
+};
+
+type TeamSession = {
+  id: number;
+  title: string;
+  user_id: number;
+  username: string;
+  created_at: string;
+  updated_at: string;
+  message_count: number;
+};
+
+type SearchHit = {
+  id: number;
+  session_id: number;
+  session_title: string;
+  question: string;
+  answer: string;
+  asked_at: string;
+};
+
+const OFFICE_MIMES = new Set([
+  "application/pdf",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+]);
+
+const TEXT_EXTS = new Set([
+  ".txt", ".md", ".markdown", ".csv", ".tsv", ".json", ".log",
+  ".ini", ".env", ".cfg", ".conf", ".toml",
+  ".py", ".js", ".mjs", ".ts", ".tsx", ".jsx",
+  ".html", ".htm", ".css", ".scss", ".sass",
+  ".sql", ".yaml", ".yml", ".xml",
+  ".sh", ".bash", ".zsh", ".ps1", ".bat", ".cmd",
+  ".java", ".c", ".h", ".cpp", ".hpp", ".cs", ".go", ".rs",
+  ".rb", ".php", ".kt", ".swift", ".dart", ".lua", ".r", ".scala",
+  ".vue", ".svelte", ".gradle", ".pl", ".pm",
+]);
+
+const FILE_ACCEPT_ATTR = [
+  "image/*",
+  ".pdf", ".docx", ".xlsx", ".pptx",
+  ...Array.from(TEXT_EXTS),
+].join(",");
+
+function fileExtension(name: string): string {
+  const i = name.lastIndexOf(".");
+  return i >= 0 ? name.slice(i).toLowerCase() : "";
+}
+
+function isAcceptedFile(f: File): boolean {
+  if (f.type.startsWith("image/")) return true;
+  if (OFFICE_MIMES.has(f.type)) return true;
+  return TEXT_EXTS.has(fileExtension(f.name));
+}
+
+function groupBySaved(sessions: Session[]) {
+  const groups: Record<string, Session[]> = {
+    บันทึกไว้: [],
+    ล่าสุด: [],
+  };
+  for (const s of sessions) {
+    if (s.is_saved) groups["บันทึกไว้"].push(s);
+    else groups["ล่าสุด"].push(s);
+  }
+  return groups;
+}
+
+function groupByUser(sessions: TeamSession[]) {
+  const groups: Record<string, TeamSession[]> = {};
+  for (const s of sessions) {
+    if (!groups[s.username]) groups[s.username] = [];
+    groups[s.username].push(s);
+  }
+  return groups;
+}
+
+export default function ChatPage() {
+  const router = useRouter();
+  const [sessions, setSessions] = useState<Session[]>([]);
+  const [teamSessions, setTeamSessions] = useState<TeamSession[]>([]);
+  const [currentSid, setCurrentSid] = useState<number | null>(null);
+  const [messages, setMessages] = useState<Msg[]>([]);
+  const [input, setInput] = useState("");
+  const [sending, setSending] = useState(false);
+  const [role, setRole] = useState<string | null>(null);
+  const [username, setUsername] = useState<string | null>(null);
+  const [search, setSearch] = useState("");
+  const [searchResults, setSearchResults] = useState<SearchHit[] | null>(null);
+  const [renameTarget, setRenameTarget] = useState<Session | null>(null);
+  const [deleteTargetId, setDeleteTargetId] = useState<number | null>(null);
+  const [alertMsg, setAlertMsg] = useState<string | null>(null);
+  const [teamExpanded, setTeamExpanded] = useState(false);
+  const [folderOpen, setFolderOpen] = useState<Record<string, boolean>>({
+    บันทึกไว้: true,
+    ล่าสุด: true,
+  });
+  const [readOnlyOwner, setReadOnlyOwner] = useState<string | null>(null);
+  const [pendingFiles, setPendingFiles] = useState<File[]>([]);
+  const [typingIndex, setTypingIndex] = useState<number | null>(null);
+  const [typedChars, setTypedChars] = useState(0);
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (!getToken()) {
+      router.replace("/login");
+      return;
+    }
+    setRole(getRole());
+    setUsername(getUsername());
+    refreshSessions();
+  }, [router]);
+
+  useEffect(() => {
+    if (role === "admin") refreshTeamSessions();
+  }, [role]);
+
+  useEffect(() => {
+    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
+  }, [messages, typedChars, sending]);
+
+  // Typewriter effect — only animates the currently-streaming bot message.
+  useEffect(() => {
+    if (typingIndex === null) return;
+    const msg = messages[typingIndex];
+    if (!msg || msg.role !== "bot") {
+      setTypingIndex(null);
+      return;
+    }
+    if (typedChars >= msg.text.length) {
+      setTypingIndex(null);
+      return;
+    }
+    // Chunk size scales with message length so long answers don't take forever.
+    const step = msg.text.length > 400 ? 4 : msg.text.length > 150 ? 2 : 1;
+    const timer = setTimeout(() => {
+      setTypedChars((c) => Math.min(c + step, msg.text.length));
+    }, 14);
+    return () => clearTimeout(timer);
+  }, [typingIndex, typedChars, messages]);
+
+  async function refreshSessions() {
+    try {
+      const list = await api<Session[]>("/chat/sessions");
+      setSessions(list);
+    } catch {
+      // ignore
+    }
+  }
+
+  async function refreshTeamSessions() {
+    try {
+      const list = await api<TeamSession[]>("/admin/chat-history");
+      setTeamSessions(list);
+    } catch {
+      // ignore
+    }
+  }
+
+  type LoadedMessage = {
+    question: string;
+    answer: string;
+    source: string;
+    attachments?: Attachment[];
+  };
+
+  function hydrateMessages(loaded: LoadedMessage[]): Msg[] {
+    const result: Msg[] = [];
+    for (const m of loaded) {
+      result.push({ role: "user", text: m.question, attachments: m.attachments ?? [] });
+      result.push({ role: "bot", text: m.answer, source: m.source });
+    }
+    return result;
+  }
+
+  async function loadSession(sid: number) {
+    setCurrentSid(sid);
+    setSearchResults(null);
+    setReadOnlyOwner(null);
+    setTypingIndex(null);
+    try {
+      const data = await api<{ messages: LoadedMessage[] }>(`/chat/sessions/${sid}`);
+      setMessages(hydrateMessages(data.messages));
+    } catch {
+      setMessages([]);
+    }
+  }
+
+  async function loadTeamSession(sid: number, owner: string) {
+    setCurrentSid(sid);
+    setSearchResults(null);
+    setReadOnlyOwner(owner);
+    setTypingIndex(null);
+    try {
+      const data = await api<{ messages: LoadedMessage[] }>(`/admin/chat-history/${sid}`);
+      setMessages(hydrateMessages(data.messages));
+    } catch {
+      setMessages([]);
+    }
+  }
+
+  function newChat() {
+    setCurrentSid(null);
+    setMessages([]);
+    setSearchResults(null);
+    setReadOnlyOwner(null);
+    setInput("");
+    setPendingFiles([]);
+    setTypingIndex(null);
+  }
+
+  function handleFilePick(e: React.ChangeEvent<HTMLInputElement>) {
+    const files = Array.from(e.target.files ?? []);
+    const valid: File[] = [];
+    for (const f of files) {
+      if (f.size > 10 * 1024 * 1024) {
+        setAlertMsg(`ไฟล์ "${f.name}" ใหญ่เกิน 10MB`);
+        continue;
+      }
+      if (!isAcceptedFile(f)) {
+        setAlertMsg(`ไฟล์ "${f.name}" ไม่รองรับ`);
+        continue;
+      }
+      valid.push(f);
+    }
+    setPendingFiles((prev) => [...prev, ...valid].slice(0, 5));
+    if (fileInputRef.current) fileInputRef.current.value = "";
+  }
+
+  function removePendingFile(idx: number) {
+    setPendingFiles((prev) => prev.filter((_, i) => i !== idx));
+  }
+
+  function exitReadOnly() {
+    setReadOnlyOwner(null);
+    setCurrentSid(null);
+    setMessages([]);
+  }
+
+  async function send(e: React.FormEvent) {
+    e.preventDefault();
+    const text = input.trim();
+    if ((!text && pendingFiles.length === 0) || sending || readOnlyOwner) return;
+
+    const filesToSend = pendingFiles;
+    const optimisticAtts: Attachment[] = filesToSend.map((f, i) => ({
+      id: -(i + 1),
+      filename: f.name,
+      content_type: f.type,
+      size_bytes: f.size,
+    }));
+    setMessages((m) => [
+      ...m,
+      { role: "user", text: text || "[ไฟล์แนบ]", attachments: optimisticAtts },
+    ]);
+    setInput("");
+    setPendingFiles([]);
+    setSending(true);
+    try {
+      const res = await sendChat({
+        message: text,
+        sessionId: currentSid,
+        files: filesToSend,
+      });
+      let newBotIdx = 0;
+      setMessages((m) => {
+        const copy = [...m];
+        const lastUserIdx = copy.length - 1;
+        if (copy[lastUserIdx]?.role === "user") {
+          copy[lastUserIdx] = { ...copy[lastUserIdx], attachments: res.attachments };
+        }
+        copy.push({ role: "bot", text: res.answer, source: res.source });
+        newBotIdx = copy.length - 1;
+        return copy;
+      });
+      setTypedChars(0);
+      setTypingIndex(newBotIdx);
+      setCurrentSid(res.session_id);
+      refreshSessions();
+      if (role === "admin") refreshTeamSessions();
+    } catch (e: unknown) {
+      setMessages((m) => [
+        ...m,
+        { role: "bot", text: `เกิดข้อผิดพลาด: ${e instanceof Error ? e.message : ""}` },
+      ]);
+    } finally {
+      setSending(false);
+    }
+  }
+
+  async function performRename(sid: number, newTitle: string) {
+    try {
+      await api(`/chat/sessions/${sid}`, {
+        method: "PATCH",
+        body: JSON.stringify({ title: newTitle }),
+      });
+      refreshSessions();
+    } catch (e: unknown) {
+      setAlertMsg("เปลี่ยนชื่อไม่สำเร็จ: " + (e instanceof Error ? e.message : ""));
+    }
+  }
+
+  async function performDelete(sid: number) {
+    try {
+      await api(`/chat/sessions/${sid}`, { method: "DELETE" });
+      if (sid === currentSid) newChat();
+      refreshSessions();
+    } catch (e: unknown) {
+      setAlertMsg("ลบไม่สำเร็จ: " + (e instanceof Error ? e.message : ""));
+    }
+  }
+
+  async function performToggleSave(sid: number, currentSaved: boolean) {
+    try {
+      await api(`/chat/sessions/${sid}/save`, {
+        method: "PATCH",
+        body: JSON.stringify({ is_saved: !currentSaved }),
+      });
+      refreshSessions();
+    } catch (e: unknown) {
+      setAlertMsg("บันทึกไม่สำเร็จ: " + (e instanceof Error ? e.message : ""));
+    }
+  }
+
+  function exportSession(sid: number) {
+    const token = getToken();
+    fetch(`${API_BASE}/chat/sessions/${sid}/export`, {
+      headers: { Authorization: `Bearer ${token}` },
+    })
+      .then((r) => r.blob())
+      .then((b) => {
+        const a = document.createElement("a");
+        a.href = URL.createObjectURL(b);
+        a.download = `session-${sid}.csv`;
+        a.click();
+      });
+  }
+
+  async function runSearch(e: React.FormEvent) {
+    e.preventDefault();
+    const q = search.trim();
+    if (!q) {
+      setSearchResults(null);
+      return;
+    }
+    try {
+      const hits = await api<SearchHit[]>(`/chat/search?q=${encodeURIComponent(q)}`);
+      setSearchResults(hits);
+    } catch {
+      setSearchResults([]);
+    }
+  }
+
+  function logout() {
+    clearAuth();
+    router.replace("/login");
+  }
+
+  const groups = groupBySaved(sessions);
+  const teamByUser = groupByUser(teamSessions);
+  const currentTitle = currentSid
+    ? readOnlyOwner
+      ? teamSessions.find((s) => s.id === currentSid)?.title ?? "บทสนทนา"
+      : sessions.find((s) => s.id === currentSid)?.title ?? "แชท"
+    : "แชทใหม่";
+  const avatarLetter = (username ?? "?").charAt(0).toUpperCase();
+
+  return (
+    <div className="flex h-screen w-full bg-gray-50">
+      {/* Sidebar */}
+      <aside className="w-80 bg-gradient-to-b from-purple-500 via-purple-600 to-purple-700 flex flex-col shadow-2xl">
+        <div className="p-4">
+          <button
+            onClick={newChat}
+            className="w-full flex items-center justify-center gap-2 bg-white/10 hover:bg-white/20 text-white py-3 px-4 rounded-xl transition-all backdrop-blur-sm border border-white/20 shadow-lg"
+          >
+            <Plus size={20} />
+            <span>แชทใหม่</span>
+          </button>
+        </div>
+
+        <form onSubmit={runSearch} className="px-4 pb-3">
+          <div className="relative">
+            <Search
+              className="absolute left-3 top-1/2 -translate-y-1/2 text-white/85"
+              size={18}
+            />
+            <input
+              type="text"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="ค้นหาในประวัติ…"
+              className="w-full pl-10 pr-4 py-2.5 bg-white/10 border border-white/20 rounded-lg text-white placeholder-white/70 focus:outline-none focus:ring-2 focus:ring-white/30 transition-all backdrop-blur-sm text-sm"
+            />
+          </div>
+        </form>
+
+        {/* Team chat — admin only */}
+        {role === "admin" && (
+          <div className="px-4 pb-3">
+            <button
+              onClick={() => setTeamExpanded(!teamExpanded)}
+              className="w-full flex items-center justify-between gap-2 bg-white/5 hover:bg-white/10 text-white hover:text-white py-2.5 px-3 rounded-lg transition-all border border-white/10"
+            >
+              <span className="flex items-center gap-2 text-sm">
+                <Users size={16} />
+                แชทของทีม
+                <span className="bg-white/20 text-white text-xs px-1.5 py-0.5 rounded-full">
+                  {teamSessions.length}
+                </span>
+              </span>
+              {teamExpanded ? (
+                <ChevronDown size={16} />
+              ) : (
+                <ChevronRight size={16} />
+              )}
+            </button>
+
+            {teamExpanded && (
+              <div className="mt-2 max-h-64 overflow-y-auto space-y-2 bg-black/20 rounded-lg p-2">
+                {Object.entries(teamByUser).length === 0 && (
+                  <p className="text-white/85 text-xs text-center py-3">
+                    ยังไม่มีบทสนทนา
+                  </p>
+                )}
+                {Object.entries(teamByUser).map(([uname, list]) => (
+                  <div key={uname}>
+                    <div className="text-white/85 text-xs px-2 py-1 flex items-center justify-between">
+                      <span className="font-medium">{uname}</span>
+                      <span className="bg-white/10 text-white text-[10px] px-1.5 rounded">
+                        {list.length}
+                      </span>
+                    </div>
+                    {list.map((s) => {
+                      const active = s.id === currentSid && readOnlyOwner === uname;
+                      return (
+                        <button
+                          key={s.id}
+                          onClick={() => loadTeamSession(s.id, uname)}
+                          className={`w-full flex items-center gap-2 px-2 py-1.5 rounded text-left transition-all text-xs ${
+                            active
+                              ? "bg-purple-400 text-white"
+                              : "text-white hover:bg-white/10"
+                          }`}
+                          title={s.title}
+                        >
+                          <Eye size={12} className="flex-shrink-0 opacity-70" />
+                          <span className="flex-1 truncate">{s.title}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Own sessions / search results */}
+        <div className="flex-1 overflow-y-auto px-4 space-y-4">
+          {searchResults ? (
+            <div>
+              <div className="mb-2 text-white/85 text-xs uppercase tracking-wide">
+                ผลค้นหา {searchResults.length} รายการ
+              </div>
+              <div className="space-y-1">
+                {searchResults.map((h) => (
+                  <button
+                    key={h.id}
+                    onClick={() => {
+                      setSearchResults(null);
+                      setSearch("");
+                      loadSession(h.session_id);
+                    }}
+                    className="w-full text-left bg-white/5 hover:bg-white/15 rounded-lg p-3 transition-all"
+                  >
+                    <div className="text-xs text-white/85 truncate">
+                      {h.session_title}
+                    </div>
+                    <div className="text-white text-sm truncate mt-0.5">{h.question}</div>
+                  </button>
+                ))}
+                {searchResults.length === 0 && (
+                  <div className="text-white/85 text-sm px-1">ไม่พบ</div>
+                )}
+              </div>
+            </div>
+          ) : (
+            Object.entries(groups).map(
+              ([label, list]) => {
+                const isOpen = folderOpen[label] ?? true;
+                const isSavedFolder = label === "บันทึกไว้";
+                return (
+                  list.length > 0 && (
+                  <div key={label} className="mb-3">
+                    <button
+                      onClick={() =>
+                        setFolderOpen((prev) => ({ ...prev, [label]: !isOpen }))
+                      }
+                      className={`w-full flex items-center gap-2 mb-1.5 px-2 py-1.5 rounded-lg transition-all ${
+                        isSavedFolder
+                          ? "bg-yellow-400/15 hover:bg-yellow-400/25 border border-yellow-300/30"
+                          : "bg-white/5 hover:bg-white/10 border border-white/10"
+                      }`}
+                    >
+                      {isOpen ? (
+                        <ChevronDown size={14} className="text-white/85 flex-shrink-0" />
+                      ) : (
+                        <ChevronRight size={14} className="text-white/85 flex-shrink-0" />
+                      )}
+                      {isSavedFolder ? (
+                        isOpen ? (
+                          <FolderOpen size={16} className="text-yellow-300 flex-shrink-0" />
+                        ) : (
+                          <Folder size={16} className="text-yellow-300 flex-shrink-0" />
+                        )
+                      ) : isOpen ? (
+                        <FolderOpen size={16} className="text-white/85 flex-shrink-0" />
+                      ) : (
+                        <Folder size={16} className="text-white/85 flex-shrink-0" />
+                      )}
+                      <span className="flex-1 text-left text-white text-sm font-semibold">
+                        {label}
+                      </span>
+                      <span className="text-xs text-white/85 bg-white/10 rounded-full px-2 py-0.5">
+                        {list.length}
+                      </span>
+                    </button>
+                    {isOpen && (
+                    <div className="space-y-1 pl-3 border-l-2 border-white/10 ml-3">
+                      {list.map((s) => {
+                        const active = s.id === currentSid && !readOnlyOwner;
+                        return (
+                          <div
+                            key={s.id}
+                            onClick={() => loadSession(s.id)}
+                            className={`group flex items-center gap-2 px-3 py-2.5 rounded-lg cursor-pointer transition-all ${
+                              active
+                                ? "bg-purple-400 text-white shadow-lg"
+                                : "text-white hover:bg-white/10"
+                            }`}
+                          >
+                            <MessageSquare size={16} className="flex-shrink-0" />
+                            <span className="flex-1 truncate text-sm">{s.title}</span>
+                            <div className="hidden group-hover:flex gap-1 flex-shrink-0">
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  performToggleSave(s.id, !!s.is_saved);
+                                }}
+                                className={`p-1 ${s.is_saved ? "text-yellow-300" : "text-white/85 hover:text-yellow-300"}`}
+                                title={s.is_saved ? "เลิกบันทึก" : "บันทึกแชทนี้ไว้"}
+                              >
+                                {s.is_saved ? <BookmarkCheck size={14} /> : <Bookmark size={14} />}
+                              </button>
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setRenameTarget(s);
+                                }}
+                                className="p-1 text-white/85 hover:text-white"
+                                title="เปลี่ยนชื่อ"
+                              >
+                                <Pencil size={14} />
+                              </button>
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  exportSession(s.id);
+                                }}
+                                className="p-1 text-white/85 hover:text-white"
+                                title="ดาวน์โหลด CSV"
+                              >
+                                <Download size={14} />
+                              </button>
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setDeleteTargetId(s.id);
+                                }}
+                                className="p-1 text-white/85 hover:text-red-300"
+                                title="ลบ"
+                              >
+                                <Trash2 size={14} />
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                    )}
+                  </div>
+                  )
+                );
+              },
+            )
+          )}
+        </div>
+
+        {/* Profile + actions */}
+        <div className="p-4 border-t border-white/20 space-y-2">
+          <div className="flex items-center gap-3 px-2 py-2 rounded-xl bg-white/5 border border-white/10">
+            <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-purple-300 to-purple-500 flex items-center justify-center text-white font-medium shadow-md flex-shrink-0">
+              {avatarLetter}
+            </div>
+            <div className="flex-1 min-w-0">
+              <p className="text-white text-sm font-medium truncate">
+                {username ?? "—"}
+              </p>
+              <p className="text-white/85 text-xs">
+                {role === "admin" ? "⭐ Administrator" : "User"}
+              </p>
+            </div>
+          </div>
+          {role === "admin" && (
+            <button
+              onClick={() => router.push("/admin")}
+              className="w-full flex items-center gap-2 text-white hover:text-white hover:bg-white/10 py-2 px-3 rounded-lg transition-all text-sm"
+            >
+              <Settings size={16} />
+              <span>Admin Dashboard</span>
+            </button>
+          )}
+          <button
+            onClick={logout}
+            className="w-full flex items-center gap-2 text-white hover:text-white hover:bg-white/10 py-2 px-3 rounded-lg transition-all text-sm"
+          >
+            <LogOut size={16} />
+            <span>ออกจากระบบ</span>
+          </button>
+        </div>
+      </aside>
+
+      {/* Main */}
+      <main className="flex-1 flex flex-col">
+        <header className="bg-white border-b border-gray-200 px-8 py-4 shadow-sm flex items-center justify-between gap-4">
+          <h2 className="text-gray-800 font-medium truncate flex-1">{currentTitle}</h2>
+          <div className="flex items-center gap-3">
+            {readOnlyOwner && (
+              <button
+                onClick={exitReadOnly}
+                className="flex items-center gap-1.5 px-3 py-1.5 bg-amber-50 hover:bg-amber-100 text-amber-700 rounded-lg text-sm transition-all border border-amber-200"
+              >
+                <X size={14} />
+                ออกจากโหมดอ่าน
+              </button>
+            )}
+            <div className="flex items-center gap-2.5 pl-2 pr-4 py-1.5 bg-purple-500 rounded-xl">
+              <div className="bg-white rounded-lg p-0.5">
+                <img
+                  src="/Logo_siri.jpg"
+                  alt="Sirivatana"
+                  className="w-8 h-8 rounded-md object-cover"
+                />
+              </div>
+              <span className="text-white font-semibold text-sm whitespace-nowrap">
+                ศิริวัฒนาอินเตอร์พริ้นท์ จำกัด (มหาชน)
+              </span>
+            </div>
+          </div>
+        </header>
+
+        {readOnlyOwner && (
+          <div className="bg-amber-50 border-b border-amber-200 px-8 py-2.5 text-sm text-amber-800 flex items-center gap-2">
+            <Eye size={16} />
+            <span>
+              คุณกำลังดูบทสนทนาของ <strong>{readOnlyOwner}</strong> — โหมดอ่านอย่างเดียว
+            </span>
+          </div>
+        )}
+
+        <div
+          ref={scrollRef}
+          className="flex-1 overflow-y-auto bg-gradient-to-b from-purple-50/30 to-white"
+        >
+          <div className="max-w-4xl mx-auto px-8 py-8 space-y-6">
+            {messages.length === 0 && (
+              <div className="text-center text-gray-400 mt-20">
+                <img
+                  src="/Logo_siri.jpg"
+                  alt="Sirivatana"
+                  className="mx-auto w-20 h-20 rounded-2xl object-cover mb-4 shadow-md"
+                />
+                <p>พิมพ์คำถามเกี่ยวกับบริษัทหรือคำถามทั่วไปได้เลย</p>
+              </div>
+            )}
+            {messages.map((m, i) => {
+              const isTyping = i === typingIndex;
+              const shownText = isTyping ? m.text.slice(0, typedChars) : m.text;
+
+              if (m.role === "user") {
+                return (
+                  <div key={i} className="flex justify-end">
+                    <div className="max-w-2xl px-6 py-4 rounded-2xl shadow-md whitespace-pre-wrap bg-gradient-to-r from-purple-400 to-purple-500 text-white">
+                      {m.attachments && m.attachments.length > 0 && (
+                        <AttachmentList attachments={m.attachments} onUserBubble={true} />
+                      )}
+                      {m.text && <p className="leading-relaxed">{m.text}</p>}
+                    </div>
+                  </div>
+                );
+              }
+
+              return (
+                <div key={i} className="flex justify-start gap-3">
+                  <img
+                    src="/Logo_siri.jpg"
+                    alt="Sirivatana"
+                    className="w-9 h-9 rounded-full object-cover flex-shrink-0 shadow-sm border border-gray-200"
+                  />
+                  <div className="flex-1 min-w-0 pt-1">
+                    {m.attachments && m.attachments.length > 0 && (
+                      <AttachmentList attachments={m.attachments} onUserBubble={false} />
+                    )}
+                    {m.text && (
+                      <p className="leading-relaxed text-gray-800 whitespace-pre-wrap">
+                        {shownText}
+                        {isTyping && (
+                          <span className="inline-block w-0.5 h-4 bg-purple-500 ml-0.5 align-middle animate-pulse" />
+                        )}
+                      </p>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+            {sending && (
+              <div className="flex justify-start gap-3">
+                <img
+                  src="/Logo_siri.jpg"
+                  alt="Sirivatana"
+                  className="w-9 h-9 rounded-full object-cover flex-shrink-0 shadow-sm border border-gray-200"
+                />
+                <div className="flex items-center gap-1.5 pt-3">
+                  <span
+                    className="w-2 h-2 bg-purple-400 rounded-full animate-bounce"
+                    style={{ animationDelay: "0ms" }}
+                  />
+                  <span
+                    className="w-2 h-2 bg-purple-400 rounded-full animate-bounce"
+                    style={{ animationDelay: "150ms" }}
+                  />
+                  <span
+                    className="w-2 h-2 bg-purple-400 rounded-full animate-bounce"
+                    style={{ animationDelay: "300ms" }}
+                  />
+                  <span className="ml-2 text-sm text-gray-500">กำลังคิด…</span>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+
+        <div className="bg-white border-t border-gray-200 px-8 py-6 shadow-lg">
+          <form onSubmit={send} className="max-w-4xl mx-auto">
+            {pendingFiles.length > 0 && (
+              <div className="flex flex-wrap gap-2 mb-3">
+                {pendingFiles.map((f, i) => (
+                  <PendingFileChip
+                    key={i}
+                    file={f}
+                    onRemove={() => removePendingFile(i)}
+                  />
+                ))}
+              </div>
+            )}
+            <div className="flex gap-3 items-center">
+              <input
+                ref={fileInputRef}
+                type="file"
+                multiple
+                accept={FILE_ACCEPT_ATTR}
+                onChange={handleFilePick}
+                className="hidden"
+              />
+              <button
+                type="button"
+                onClick={() => fileInputRef.current?.click()}
+                disabled={sending || !!readOnlyOwner || pendingFiles.length >= 5}
+                className="flex-shrink-0 p-3 bg-gray-50 border border-gray-200 rounded-2xl hover:bg-gray-100 transition-all text-gray-600 disabled:opacity-50 disabled:cursor-not-allowed"
+                title="แนบไฟล์ (รูป, PDF, Word, Excel, PowerPoint, Text/Code — สูงสุด 5 ไฟล์)"
+              >
+                <Paperclip size={20} />
+              </button>
+              <input
+                type="text"
+                value={input}
+                onChange={(e) => setInput(e.target.value)}
+                placeholder={
+                  readOnlyOwner
+                    ? "ไม่สามารถส่งข้อความในโหมดอ่านได้"
+                    : pendingFiles.length > 0
+                    ? "เขียนคำถามเกี่ยวกับไฟล์ (หรือเว้นว่างก็ได้)"
+                    : "พิมพ์คำถาม…"
+                }
+                disabled={sending || !!readOnlyOwner}
+                className="flex-1 px-6 py-4 bg-gray-50 border border-gray-200 rounded-2xl focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-transparent transition-all disabled:opacity-60 disabled:cursor-not-allowed"
+              />
+              <button
+                type="submit"
+                disabled={
+                  sending ||
+                  !!readOnlyOwner ||
+                  (!input.trim() && pendingFiles.length === 0)
+                }
+                className="px-8 py-4 bg-gradient-to-r from-purple-400 to-purple-500 text-white rounded-2xl hover:from-purple-500 hover:to-purple-600 transition-all shadow-md hover:shadow-lg transform hover:-translate-y-0.5 flex items-center gap-2 disabled:opacity-60 disabled:transform-none disabled:cursor-not-allowed"
+              >
+                <Send size={20} />
+                <span>ส่ง</span>
+              </button>
+            </div>
+          </form>
+        </div>
+      </main>
+
+      <PromptModal
+        open={!!renameTarget}
+        onClose={() => setRenameTarget(null)}
+        onConfirm={(newTitle) => {
+          if (renameTarget) performRename(renameTarget.id, newTitle);
+        }}
+        title="เปลี่ยนชื่อบทสนทนา"
+        description="ตั้งชื่อใหม่เพื่อหาง่ายขึ้นในประวัติ"
+        initialValue={renameTarget?.title ?? ""}
+        placeholder="ชื่อบทสนทนา"
+        confirmLabel="บันทึก"
+      />
+
+      <ConfirmModal
+        open={deleteTargetId !== null}
+        onClose={() => setDeleteTargetId(null)}
+        onConfirm={() => {
+          if (deleteTargetId !== null) performDelete(deleteTargetId);
+        }}
+        title="ลบบทสนทนานี้?"
+        description="ข้อความทั้งหมดในบทสนทนานี้จะหายไปและไม่สามารถกู้คืนได้"
+        confirmLabel="ลบ"
+        danger
+      />
+
+      <AlertModal
+        open={!!alertMsg}
+        onClose={() => setAlertMsg(null)}
+        title="เกิดข้อผิดพลาด"
+        description={alertMsg ?? ""}
+        variant="error"
+      />
+    </div>
+  );
+}
+
+function PendingFileChip({ file, onRemove }: { file: File; onRemove: () => void }) {
+  const isImage = file.type.startsWith("image/");
+  const [thumb, setThumb] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!isImage) return;
+    const url = URL.createObjectURL(file);
+    setThumb(url);
+    return () => URL.revokeObjectURL(url);
+  }, [file, isImage]);
+
+  return (
+    <div className="flex items-center gap-2 bg-purple-50 border border-purple-200 rounded-xl px-3 py-2 text-sm">
+      {isImage && thumb ? (
+        <img
+          src={thumb}
+          alt={file.name}
+          className="w-10 h-10 rounded-md object-cover flex-shrink-0"
+        />
+      ) : (
+        <div className="w-10 h-10 rounded-md bg-purple-100 flex items-center justify-center text-purple-600 flex-shrink-0">
+          <FileText size={20} />
+        </div>
+      )}
+      <div className="min-w-0">
+        <p className="text-gray-800 truncate max-w-[140px]">{file.name}</p>
+        <p className="text-xs text-gray-500">{(file.size / 1024).toFixed(0)} KB</p>
+      </div>
+      <button
+        type="button"
+        onClick={onRemove}
+        className="text-gray-400 hover:text-red-500 ml-1"
+      >
+        <X size={16} />
+      </button>
+    </div>
+  );
+}
+
+function AttachmentList({
+  attachments,
+  onUserBubble,
+}: {
+  attachments: Attachment[];
+  onUserBubble: boolean;
+}) {
+  return (
+    <div className={`flex flex-wrap gap-2 ${onUserBubble ? "mb-2" : ""}`}>
+      {attachments.map((a) =>
+        a.content_type.startsWith("image/") ? (
+          <AttachmentImage key={a.id} attachment={a} onUserBubble={onUserBubble} />
+        ) : (
+          <AttachmentFile key={a.id} attachment={a} onUserBubble={onUserBubble} />
+        ),
+      )}
+    </div>
+  );
+}
+
+function AttachmentImage({
+  attachment,
+  onUserBubble,
+}: {
+  attachment: Attachment;
+  onUserBubble: boolean;
+}) {
+  const [url, setUrl] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (attachment.id < 0) return; // optimistic, no URL yet
+    let cancelled = false;
+    fetchAttachmentBlobUrl(attachment.id).then((u) => {
+      if (!cancelled) setUrl(u);
+    });
+    return () => {
+      cancelled = true;
+      if (url) URL.revokeObjectURL(url);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [attachment.id]);
+
+  if (!url) {
+    return (
+      <div
+        className={`w-32 h-32 rounded-lg flex items-center justify-center ${
+          onUserBubble ? "bg-white/10" : "bg-gray-100"
+        }`}
+      >
+        <ImageIcon size={24} className={onUserBubble ? "text-white/60" : "text-gray-400"} />
+      </div>
+    );
+  }
+
+  return (
+    <a href={url} target="_blank" rel="noreferrer">
+      <img
+        src={url}
+        alt={attachment.filename}
+        className="w-32 h-32 rounded-lg object-cover border border-white/20 hover:opacity-90 transition-opacity"
+      />
+    </a>
+  );
+}
+
+function AttachmentFile({
+  attachment,
+  onUserBubble,
+}: {
+  attachment: Attachment;
+  onUserBubble: boolean;
+}) {
+  async function open() {
+    if (attachment.id < 0) return;
+    const u = await fetchAttachmentBlobUrl(attachment.id);
+    window.open(u, "_blank");
+  }
+  return (
+    <button
+      type="button"
+      onClick={open}
+      className={`flex items-center gap-2 px-3 py-2 rounded-xl text-sm transition-all max-w-[260px] ${
+        onUserBubble
+          ? "bg-white/15 hover:bg-white/25 text-white"
+          : "bg-gray-50 hover:bg-gray-100 text-gray-700 border border-gray-200"
+      }`}
+    >
+      <div
+        className={`w-9 h-9 rounded-md flex items-center justify-center flex-shrink-0 ${
+          onUserBubble ? "bg-white/20" : "bg-purple-100 text-purple-600"
+        }`}
+      >
+        <FileText size={18} />
+      </div>
+      <div className="min-w-0 text-left">
+        <p className="truncate">{attachment.filename}</p>
+        <p className={`text-xs ${onUserBubble ? "text-white/70" : "text-gray-500"}`}>
+          {(attachment.size_bytes / 1024).toFixed(0)} KB
+        </p>
+      </div>
+    </button>
+  );
+}

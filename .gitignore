@@ -1,0 +1,38 @@
+# env (ห้าม commit ไฟล์จริง)
+.env
+.env.local
+backend/.env
+frontend/.env.local
+
+# python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# node
+node_modules/
+.next/
+out/
+
+# data & uploads (ไม่ commit DB หรือไฟล์ user)
+backend/data/
+data/
+*.db
+*.sqlite
+
+# logs
+*.log
+logs/
+
+# models & cache
+.cache/
+
+# Claude AI session (internal tool)
+.claude/
+
+# OS
+desktop.ini
+.DS_Store
+Thumbs.db
