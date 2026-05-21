@@ -12,13 +12,16 @@ def _connect() -> sqlite3.Connection:
     Path(DB_PATH).parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     conn.row_factory = sqlite3.Row
+
     conn.enable_load_extension(True)
     sqlite_vec.load(conn)
     conn.enable_load_extension(False)
-    conn.execute("PRAGMA journal_mode=WAL")   # readers don't block writers
-    conn.execute("PRAGMA synchronous=NORMAL") # safe but faster than FULL
-    conn.execute("PRAGMA cache_size=-32000")  # 32MB page cache in RAM
-    conn.execute("PRAGMA busy_timeout=5000")  # wait up to 5s instead of failing instantly
+
+    conn.execute("PRAGMA journal_mode=WAL")    # readers don't block writers
+    conn.execute("PRAGMA synchronous=NORMAL")  # safe but faster than FULL
+    conn.execute("PRAGMA cache_size=-32000")   # 32MB page cache in RAM
+    conn.execute("PRAGMA busy_timeout=5000")   # wait up to 5s instead of failing instantly
+
     return conn
 
 
@@ -39,6 +42,7 @@ def serialize_vector(vec: list[float]) -> bytes:
 
 def init_schema(conn: sqlite3.Connection) -> None:
     cur = conn.cursor()
+
     cur.executescript(
         """
         CREATE TABLE IF NOT EXISTS users (
@@ -89,8 +93,12 @@ def init_schema(conn: sqlite3.Connection) -> None:
             file_path TEXT NOT NULL,
             created_at TEXT NOT NULL DEFAULT (datetime('now'))
         );
-        CREATE INDEX IF NOT EXISTS idx_attachments_message ON attachments(message_id);
-        CREATE INDEX IF NOT EXISTS idx_attachments_user ON attachments(user_id);
+
+        CREATE INDEX IF NOT EXISTS idx_attachments_message
+            ON attachments(message_id);
+
+        CREATE INDEX IF NOT EXISTS idx_attachments_user
+            ON attachments(user_id);
 
         CREATE TABLE IF NOT EXISTS chat_sessions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -99,25 +107,52 @@ def init_schema(conn: sqlite3.Connection) -> None:
             created_at TEXT NOT NULL DEFAULT (datetime('now')),
             updated_at TEXT NOT NULL DEFAULT (datetime('now'))
         );
+
         CREATE INDEX IF NOT EXISTS idx_chat_sessions_user_updated
             ON chat_sessions(user_id, updated_at DESC);
+
+        CREATE TABLE IF NOT EXISTS embedding_cache (
+            text_hash TEXT PRIMARY KEY,
+            text TEXT NOT NULL,
+            embedding TEXT NOT NULL,
+            model TEXT NOT NULL,
+            dimensions INTEGER NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            last_used_at TEXT,
+            hit_count INTEGER NOT NULL DEFAULT 0
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_embedding_cache_model_dimensions
+            ON embedding_cache(model, dimensions);
+
+        CREATE INDEX IF NOT EXISTS idx_embedding_cache_created_at
+            ON embedding_cache(created_at);
         """
     )
 
     # Migration: ensure `session_id` column exists on legacy chat_history rows.
     try:
-        cur.execute("ALTER TABLE chat_history ADD COLUMN session_id INTEGER REFERENCES chat_sessions(id)")
+        cur.execute(
+            "ALTER TABLE chat_history "
+            "ADD COLUMN session_id INTEGER REFERENCES chat_sessions(id)"
+        )
     except sqlite3.OperationalError:
         pass
 
     # Migration: track which sessions the user has explicitly saved.
     # Unsaved sessions get auto-purged after 24h.
     try:
-        cur.execute("ALTER TABLE chat_sessions ADD COLUMN is_saved INTEGER NOT NULL DEFAULT 0")
+        cur.execute(
+            "ALTER TABLE chat_sessions "
+            "ADD COLUMN is_saved INTEGER NOT NULL DEFAULT 0"
+        )
     except sqlite3.OperationalError:
         pass
 
-    cur.execute("CREATE INDEX IF NOT EXISTS idx_chat_history_session ON chat_history(session_id, asked_at)")
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_chat_history_session "
+        "ON chat_history(session_id, asked_at)"
+    )
 
     # Backfill: any chat_history rows without a session_id get grouped into one
     # "ประวัติเก่า" session per user so they show up in the new sidebar UI.
@@ -127,6 +162,7 @@ def init_schema(conn: sqlite3.Connection) -> None:
             "SELECT DISTINCT user_id FROM chat_history WHERE session_id IS NULL"
         ).fetchall()
     ]
+
     for uid in orphan_users:
         cur.execute(
             "INSERT INTO chat_sessions (user_id, title) VALUES (?, ?)",
@@ -134,15 +170,20 @@ def init_schema(conn: sqlite3.Connection) -> None:
         )
         new_sid = cur.lastrowid
         cur.execute(
-            "UPDATE chat_history SET session_id = ? WHERE user_id = ? AND session_id IS NULL",
+            "UPDATE chat_history "
+            "SET session_id = ? "
+            "WHERE user_id = ? AND session_id IS NULL",
             (new_sid, uid),
         )
 
     # Migration: ensure `source` column exists on legacy DBs created before this column was added.
     try:
-        cur.execute("ALTER TABLE knowledge ADD COLUMN source TEXT NOT NULL DEFAULT 'admin'")
+        cur.execute(
+            "ALTER TABLE knowledge "
+            "ADD COLUMN source TEXT NOT NULL DEFAULT 'admin'"
+        )
     except sqlite3.OperationalError:
-        pass  # column already exists
+        pass
 
     # Migration: cache extracted text from PDF attachments so follow-up turns in the same
     # session can see the file content without re-parsing.
@@ -151,17 +192,34 @@ def init_schema(conn: sqlite3.Connection) -> None:
     except sqlite3.OperationalError:
         pass
 
+    # Migration: ensure embedding_cache columns exist if table was created by an older patch.
+    try:
+        cur.execute("ALTER TABLE embedding_cache ADD COLUMN last_used_at TEXT")
+    except sqlite3.OperationalError:
+        pass
+
+    try:
+        cur.execute(
+            "ALTER TABLE embedding_cache "
+            "ADD COLUMN hit_count INTEGER NOT NULL DEFAULT 0"
+        )
+    except sqlite3.OperationalError:
+        pass
+
     # Backfill: extract text for legacy PDF attachments whose text was never cached.
     legacy_pdfs = cur.execute(
         "SELECT id, file_path FROM attachments "
         "WHERE content_type = 'application/pdf' AND extracted_text IS NULL"
     ).fetchall()
+
     if legacy_pdfs:
         try:
             import attachments as _att  # local import to avoid circular at module top
+
             for r in legacy_pdfs:
                 if not Path(r["file_path"]).exists():
                     continue
+
                 text = _att.extract_pdf_text(r["file_path"])
                 cur.execute(
                     "UPDATE attachments SET extracted_text = ? WHERE id = ?",
@@ -178,6 +236,7 @@ def init_schema(conn: sqlite3.Connection) -> None:
         );
         """
     )
+
     cur.execute(
         """
         CREATE VIRTUAL TABLE IF NOT EXISTS pending_vec USING vec0(
@@ -186,4 +245,5 @@ def init_schema(conn: sqlite3.Connection) -> None:
         );
         """
     )
+
     conn.commit()

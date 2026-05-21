@@ -18,13 +18,27 @@ out/
 
 # data & uploads (ไม่ commit DB หรือไฟล์ user)
 backend/data/
+backend/data/uploads/
+backend/data/audit.log
+backend/data/chatbot.db
 data/
 *.db
 *.sqlite
+*.db-shm
+*.db-wal
+*.sqlite-shm
+*.sqlite-wal
 
 # logs
 *.log
 logs/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# docker/local overrides
+docker-compose.override.yml
 
 # models & cache
 .cache/

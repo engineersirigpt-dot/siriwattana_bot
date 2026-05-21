@@ -1,8 +1,11 @@
+import hashlib
+import json
 import os
 from functools import lru_cache
 
 from openai import OpenAI
 
+from audit import audit_log
 from db import get_db, serialize_vector
 
 SIMILARITY_THRESHOLD = float(os.getenv("SIMILARITY_THRESHOLD", "0.75"))
@@ -16,13 +19,135 @@ def _client() -> OpenAI:
     return OpenAI(api_key=os.environ["OPENAI_API_KEY"])
 
 
+def _normalize_embedding_text(text: str) -> str:
+    """
+    Normalize text before hashing.
+
+    This makes these inputs share one cache entry:
+    - "สวัสดีครับ"
+    - "  สวัสดีครับ  "
+    - "สวัสดีครับ\n"
+    """
+    return " ".join((text or "").strip().lower().split())
+
+
+def _embedding_hash(text: str, model: str, dimensions: int) -> str:
+    """
+    Hash normalized text together with model and dimensions.
+
+    We include model/dimensions because the same text can produce different vectors
+    if model or dimensions change.
+    """
+    normalized = _normalize_embedding_text(text)
+    raw = f"{model}:{dimensions}:{normalized}"
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _get_cached_embedding(text: str) -> list[float] | None:
+    text_hash = _embedding_hash(text, EMBEDDING_MODEL, EMBEDDING_DIM)
+
+    conn = get_db()
+    row = conn.execute(
+        """
+        SELECT embedding
+        FROM embedding_cache
+        WHERE text_hash = ?
+          AND model = ?
+          AND dimensions = ?
+        """,
+        (text_hash, EMBEDDING_MODEL, EMBEDDING_DIM),
+    ).fetchone()
+
+    if not row:
+        return None
+
+    try:
+        vector = json.loads(row["embedding"])
+    except Exception:
+        return None
+
+    conn.execute(
+        """
+        UPDATE embedding_cache
+        SET hit_count = hit_count + 1,
+            last_used_at = datetime('now')
+        WHERE text_hash = ?
+        """,
+        (text_hash,),
+    )
+    conn.commit()
+
+    audit_log(
+        "embedding_cache_hit",
+        detail={
+            "model": EMBEDDING_MODEL,
+            "dimensions": EMBEDDING_DIM,
+            "text_length": len(text or ""),
+        },
+    )
+
+    return vector
+
+
+def _save_cached_embedding(text: str, vector: list[float]) -> None:
+    text_hash = _embedding_hash(text, EMBEDDING_MODEL, EMBEDDING_DIM)
+    normalized = _normalize_embedding_text(text)
+
+    conn = get_db()
+    conn.execute(
+        """
+        INSERT OR REPLACE INTO embedding_cache
+        (text_hash, text, embedding, model, dimensions, created_at, last_used_at, hit_count)
+        VALUES (?, ?, ?, ?, ?, datetime('now'), datetime('now'), 0)
+        """,
+        (
+            text_hash,
+            normalized,
+            json.dumps(vector),
+            EMBEDDING_MODEL,
+            EMBEDDING_DIM,
+        ),
+    )
+    conn.commit()
+
+    audit_log(
+        "embedding_cache_saved",
+        detail={
+            "model": EMBEDDING_MODEL,
+            "dimensions": EMBEDDING_DIM,
+            "text_length": len(text or ""),
+        },
+    )
+
+
 def embed(text: str) -> list[float]:
+    """
+    Return embedding vector for text.
+
+    Uses local SQLite cache first to reduce OpenAI API calls and cost.
+    """
+    cached = _get_cached_embedding(text)
+    if cached is not None:
+        return cached
+
+    audit_log(
+        "embedding_cache_miss",
+        detail={
+            "model": EMBEDDING_MODEL,
+            "dimensions": EMBEDDING_DIM,
+            "text_length": len(text or ""),
+        },
+    )
+
     res = _client().embeddings.create(
         model=EMBEDDING_MODEL,
         input=text,
         dimensions=EMBEDDING_DIM,
     )
-    return res.data[0].embedding
+
+    vector = res.data[0].embedding
+    _save_cached_embedding(text, vector)
+    return vector
 
 
 def _distance_to_similarity(distance: float) -> float:
@@ -48,12 +173,22 @@ def search_knowledge(question_vec: list[float], k: int = 1) -> dict | None:
 
     top = rows[0]
     sim = _distance_to_similarity(top["distance"])
+
     if sim < SIMILARITY_THRESHOLD:
         return None
 
-    conn.execute("UPDATE knowledge SET hit_count = hit_count + 1 WHERE id = ?", (top["id"],))
+    conn.execute(
+        "UPDATE knowledge SET hit_count = hit_count + 1 WHERE id = ?",
+        (top["id"],),
+    )
     conn.commit()
-    return {"id": top["id"], "question": top["question"], "answer": top["answer"], "similarity": sim}
+
+    return {
+        "id": top["id"],
+        "question": top["question"],
+        "answer": top["answer"],
+        "similarity": sim,
+    }
 
 
 def log_pending_question(question: str, question_vec: list[float]) -> int:
@@ -73,21 +208,29 @@ def log_pending_question(question: str, question_vec: list[float]) -> int:
     if rows and _distance_to_similarity(rows[0]["distance"]) >= CLUSTER_THRESHOLD:
         pid = rows[0]["pending_id"]
         conn.execute(
-            "UPDATE pending_questions SET ask_count = ask_count + 1, last_asked_at = datetime('now') WHERE id = ?",
+            """
+            UPDATE pending_questions
+            SET ask_count = ask_count + 1,
+                last_asked_at = datetime('now')
+            WHERE id = ?
+            """,
             (pid,),
         )
         conn.commit()
         return pid
 
     cur = conn.execute(
-        "INSERT INTO pending_questions (question) VALUES (?)", (question,)
+        "INSERT INTO pending_questions (question) VALUES (?)",
+        (question,),
     )
     pid = cur.lastrowid
+
     conn.execute(
         "INSERT INTO pending_vec (pending_id, embedding) VALUES (?, ?)",
         (pid, serialize_vector(question_vec)),
     )
     conn.commit()
+
     return pid
 
 
@@ -99,31 +242,45 @@ def add_knowledge(
 ) -> int:
     conn = get_db()
     vec = embed(question)
+
     cur = conn.execute(
-        "INSERT INTO knowledge (question, answer, approved_by, source) VALUES (?, ?, ?, ?)",
+        """
+        INSERT INTO knowledge (question, answer, approved_by, source)
+        VALUES (?, ?, ?, ?)
+        """,
         (question, answer, approved_by, source),
     )
     kid = cur.lastrowid
+
     conn.execute(
         "INSERT INTO knowledge_vec (knowledge_id, embedding) VALUES (?, ?)",
         (kid, serialize_vector(vec)),
     )
     conn.commit()
+
     return kid
 
 
 def resolve_pending(pending_id: int, answer: str, approved_by: int) -> int:
     conn = get_db()
     row = conn.execute(
-        "SELECT question FROM pending_questions WHERE id = ?", (pending_id,)
+        "SELECT question FROM pending_questions WHERE id = ?",
+        (pending_id,),
     ).fetchone()
+
     if not row:
         raise ValueError("pending question not found")
 
     kid = add_knowledge(row["question"], answer, approved_by)
+
     conn.execute(
-        "UPDATE pending_questions SET status = 'answered' WHERE id = ?", (pending_id,)
+        "UPDATE pending_questions SET status = 'answered' WHERE id = ?",
+        (pending_id,),
     )
-    conn.execute("DELETE FROM pending_vec WHERE pending_id = ?", (pending_id,))
+    conn.execute(
+        "DELETE FROM pending_vec WHERE pending_id = ?",
+        (pending_id,),
+    )
     conn.commit()
+
     return kid

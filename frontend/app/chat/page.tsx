@@ -159,6 +159,7 @@ export default function ChatPage() {
   });
   const [readOnlyOwner, setReadOnlyOwner] = useState<string | null>(null);
   const [pendingFiles, setPendingFiles] = useState<File[]>([]);
+  const [isDragging, setIsDragging] = useState(false);
   const [typingIndex, setTypingIndex] = useState<number | null>(null);
   const [typedChars, setTypedChars] = useState(0);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -272,22 +273,74 @@ export default function ChatPage() {
     setTypingIndex(null);
   }
 
-  function handleFilePick(e: React.ChangeEvent<HTMLInputElement>) {
-    const files = Array.from(e.target.files ?? []);
+  function addFiles(files: File[]) {
+    if (readOnlyOwner) return;
+
     const valid: File[] = [];
+
     for (const f of files) {
       if (f.size > 10 * 1024 * 1024) {
         setAlertMsg(`ไฟล์ "${f.name}" ใหญ่เกิน 10MB`);
         continue;
       }
+
       if (!isAcceptedFile(f)) {
         setAlertMsg(`ไฟล์ "${f.name}" ไม่รองรับ`);
         continue;
       }
+
       valid.push(f);
     }
-    setPendingFiles((prev) => [...prev, ...valid].slice(0, 5));
+
+    if (valid.length === 0) return;
+
+    setPendingFiles((prev) => {
+      const next = [...prev, ...valid].slice(0, 5);
+
+      if (prev.length + valid.length > 5) {
+        setAlertMsg("แนบไฟล์ได้สูงสุด 5 ไฟล์ต่อข้อความ");
+      }
+
+      return next;
+    });
+  }
+
+  function handleFilePick(e: React.ChangeEvent<HTMLInputElement>) {
+    addFiles(Array.from(e.target.files ?? []));
     if (fileInputRef.current) fileInputRef.current.value = "";
+  }
+
+  function handleDragOver(e: React.DragEvent<HTMLDivElement>) {
+    e.preventDefault();
+    e.stopPropagation();
+
+    if (readOnlyOwner || sending) return;
+
+    e.dataTransfer.dropEffect = "copy";
+    setIsDragging(true);
+  }
+
+  function handleDragLeave(e: React.DragEvent<HTMLDivElement>) {
+    e.preventDefault();
+    e.stopPropagation();
+
+    const currentTarget = e.currentTarget;
+    const relatedTarget = e.relatedTarget as Node | null;
+
+    if (!relatedTarget || !currentTarget.contains(relatedTarget)) {
+      setIsDragging(false);
+    }
+  }
+
+  function handleDrop(e: React.DragEvent<HTMLDivElement>) {
+    e.preventDefault();
+    e.stopPropagation();
+
+    setIsDragging(false);
+
+    if (readOnlyOwner || sending) return;
+
+    addFiles(Array.from(e.dataTransfer.files ?? []));
   }
 
   function removePendingFile(idx: number) {
@@ -429,7 +482,26 @@ export default function ChatPage() {
   const avatarLetter = (username ?? "?").charAt(0).toUpperCase();
 
   return (
-    <div className="flex h-screen w-full bg-gray-50">
+    <div
+      className="relative flex h-screen w-full bg-gray-50"
+      onDragOver={handleDragOver}
+      onDragLeave={handleDragLeave}
+      onDrop={handleDrop}
+    >
+      {isDragging && !readOnlyOwner && !sending && (
+        <div className="pointer-events-none absolute inset-0 z-50 flex items-center justify-center bg-purple-900/20 backdrop-blur-sm">
+          <div className="rounded-3xl border-2 border-dashed border-purple-400 bg-white/95 px-10 py-8 text-center shadow-2xl">
+            <Paperclip size={36} className="mx-auto mb-3 text-purple-500" />
+            <p className="text-lg font-semibold text-purple-700">
+              วางไฟล์ที่นี่เพื่อแนบในแชท
+            </p>
+            <p className="mt-1 text-sm text-gray-500">
+              รองรับรูปภาพ, PDF, Word, Excel, PowerPoint และไฟล์ข้อความ สูงสุด 5 ไฟล์
+            </p>
+          </div>
+        </div>
+      )}
+
       {/* Sidebar */}
       <aside className="w-80 bg-gradient-to-b from-purple-500 via-purple-600 to-purple-700 flex flex-col shadow-2xl">
         <div className="p-4">
