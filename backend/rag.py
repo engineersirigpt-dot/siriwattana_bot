@@ -12,6 +12,11 @@ SIMILARITY_THRESHOLD = float(os.getenv("SIMILARITY_THRESHOLD", "0.75"))
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "text-embedding-3-large")
 EMBEDDING_DIM = int(os.getenv("EMBEDDING_DIM", "1024"))
 CLUSTER_THRESHOLD = 0.85  # tighter than RAG hit — only cluster near-duplicates
+DB_ENGINE = os.getenv("DB_ENGINE", "sqlite").strip().lower()
+
+
+def _use_postgres() -> bool:
+    return DB_ENGINE in {"postgres", "postgresql", "pg"}
 
 
 @lru_cache(maxsize=1)
@@ -121,6 +126,11 @@ def _save_cached_embedding(text: str, vector: list[float]) -> None:
 
 
 def embed(text: str) -> list[float]:
+    if _use_postgres():
+        from rag_pg import embed_pg
+
+        return embed_pg(text)
+
     """
     Return embedding vector for text.
 
@@ -156,6 +166,11 @@ def _distance_to_similarity(distance: float) -> float:
 
 
 def search_knowledge(question_vec: list[float], k: int = 1) -> dict | None:
+    if _use_postgres():
+        from rag_pg import search_knowledge_pg
+
+        return search_knowledge_pg(question_vec, k)
+
     conn = get_db()
     rows = conn.execute(
         """
@@ -192,6 +207,11 @@ def search_knowledge(question_vec: list[float], k: int = 1) -> dict | None:
 
 
 def log_pending_question(question: str, question_vec: list[float]) -> int:
+    if _use_postgres():
+        from rag_pg import log_pending_question_pg
+
+        return log_pending_question_pg(question, question_vec)
+
     """Save question; merge into existing cluster if very similar."""
     conn = get_db()
     rows = conn.execute(
@@ -240,6 +260,11 @@ def add_knowledge(
     approved_by: int | None,
     source: str = "admin",
 ) -> int:
+    if _use_postgres():
+        from rag_pg import add_knowledge_pg
+
+        return add_knowledge_pg(question, answer, approved_by, source)
+
     conn = get_db()
     vec = embed(question)
 
@@ -262,6 +287,11 @@ def add_knowledge(
 
 
 def resolve_pending(pending_id: int, answer: str, approved_by: int) -> int:
+    if _use_postgres():
+        from rag_pg import resolve_pending_pg
+
+        return resolve_pending_pg(pending_id, answer, approved_by)
+
     conn = get_db()
     row = conn.execute(
         "SELECT question FROM pending_questions WHERE id = ?",
