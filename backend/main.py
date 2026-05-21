@@ -156,7 +156,7 @@ def register(request: Request, form: OAuth2PasswordRequestForm = Depends()):
         )
         raise HTTPException(400, "username already taken")
 
-    role = "admin" if conn.execute("SELECT COUNT(*) c FROM users").fetchone()["c"] == 0 else "user"
+    role = "user"
 
     conn.execute(
         "INSERT INTO users (username, password_hash, role) VALUES (?, ?, ?)",
