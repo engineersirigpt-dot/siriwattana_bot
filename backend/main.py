@@ -27,10 +27,11 @@ from slowapi.util import get_remote_address
 
 import attachments as att
 from auth import (
-    create_token, 
-    current_user, 
-    hash_password, 
+    create_token,
+    current_user,
+    hash_password,
     require_admin,
+    use_postgres_auth,
     validate_jwt_secret,
     verify_password,
 )
@@ -143,10 +144,15 @@ class SessionSaveIn(BaseModel):
 def register(request: Request, form: OAuth2PasswordRequestForm = Depends()):
     conn = get_db()
 
-    existing = conn.execute(
-        "SELECT 1 FROM users WHERE username = ?",
-        (form.username,),
-    ).fetchone()
+    if use_postgres_auth():
+        from auth_pg import create_user_pg, username_exists_pg
+
+        existing = username_exists_pg(form.username)
+    else:
+        existing = conn.execute(
+            "SELECT 1 FROM users WHERE username = ?",
+            (form.username,),
+        ).fetchone()
 
     if existing:
         audit_log(
@@ -157,16 +163,24 @@ def register(request: Request, form: OAuth2PasswordRequestForm = Depends()):
         raise HTTPException(400, "username already taken")
 
     role = "user"
+    password_hash = hash_password(form.password)
 
-    conn.execute(
-        "INSERT INTO users (username, password_hash, role) VALUES (?, ?, ?)",
-        (form.username, hash_password(form.password), role),
-    )
-    conn.commit()
+    if use_postgres_auth():
+        create_user_pg(form.username, password_hash, role)
+    else:
+        conn.execute(
+            "INSERT INTO users (username, password_hash, role) VALUES (?, ?, ?)",
+            (form.username, password_hash, role),
+        )
+        conn.commit()
 
     audit_log(
         "user_registered",
-        detail={"username": form.username, "role": role},
+        detail={
+            "username": form.username,
+            "role": role,
+            "db_engine": "postgres" if use_postgres_auth() else "sqlite",
+        },
         request=request,
     )
 
@@ -176,15 +190,23 @@ def register(request: Request, form: OAuth2PasswordRequestForm = Depends()):
 @app.post("/auth/login")
 @limiter.limit("10/minute")
 def login(request: Request, form: OAuth2PasswordRequestForm = Depends()):
-    row = get_db().execute(
-        "SELECT id, username, password_hash, role FROM users WHERE username = ?",
-        (form.username,),
-    ).fetchone()
+    if use_postgres_auth():
+        from auth_pg import get_user_by_username_pg
+
+        row = get_user_by_username_pg(form.username)
+    else:
+        row = get_db().execute(
+            "SELECT id, username, password_hash, role FROM users WHERE username = ?",
+            (form.username,),
+        ).fetchone()
 
     if not row or not verify_password(form.password, row["password_hash"]):
         audit_log(
             "login_failed",
-            detail={"username": form.username},
+            detail={
+                "username": form.username,
+                "db_engine": "postgres" if use_postgres_auth() else "sqlite",
+            },
             request=request,
         )
         raise HTTPException(401, "invalid credentials")
@@ -194,6 +216,7 @@ def login(request: Request, form: OAuth2PasswordRequestForm = Depends()):
     audit_log(
         "login_success",
         user={"id": row["id"], "username": row["username"], "role": row["role"]},
+        detail={"db_engine": "postgres" if use_postgres_auth() else "sqlite"},
         request=request,
     )
 
@@ -258,7 +281,12 @@ def _get_session_history(conn, session_id: int | None, user_id: int) -> list[dic
     return history
 
 
-def _ensure_session(conn, user_id: int, session_id: int | None, first_question: str) -> tuple[int, str]:
+def _ensure_session(
+    conn,
+    user_id: int,
+    session_id: int | None,
+    first_question: str,
+) -> tuple[int, str]:
     if session_id is not None:
         row = conn.execute(
             "SELECT id, title FROM chat_sessions WHERE id = ? AND user_id = ?",
