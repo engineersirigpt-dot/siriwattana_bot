@@ -364,22 +364,18 @@ async def chat(
             )
 
         if use_postgres_auth():
-            if saved_files:
-                raise HTTPException(
-                    501,
-                    "File uploads are not supported yet in PostgreSQL mode",
-                )
-
+        
             from chat_pg import (
                 ensure_session_pg,
                 get_session_history_pg,
+                save_attachment_pg,
                 save_chat_message_pg,
             )
 
             sid, stitle = ensure_session_pg(
                 user_id=user["id"],
                 session_id=session_id,
-                first_question=question,
+                first_question=question or saved_files[0]["filename"],
             )
 
             history = get_session_history_pg(
@@ -388,6 +384,46 @@ async def chat(
                 limit=HISTORY_TURNS,
             )
 
+
+            if saved_files:
+                image_urls: list[str] = []
+                text_attachments: list[tuple[str, str]] = []
+
+                for sf in saved_files:
+                    if att.is_image(sf["content_type"]):
+                        image_urls.append(
+                            att.encode_image_data_url(sf["file_path"], sf["content_type"])
+                        )
+                        sf["extracted_text"] = None
+                        continue
+
+                    extracted = att.extract_any_text(
+                        sf["file_path"], sf["content_type"], sf["filename"]
+                    )
+
+                    sf["extracted_text"] = extracted if extracted.strip() else None
+
+                    if att.is_pdf(sf["content_type"]) and att.is_text_sparse(extracted):
+                        rendered = att.render_pdf_pages_as_images(sf["file_path"])
+                        image_urls.extend(rendered)
+
+                        if extracted.strip():
+                            text_attachments.append((sf["filename"], extracted))
+                    elif extracted.strip():
+                        text_attachments.append((sf["filename"], extracted))
+
+                prompt_question = question or "ช่วยอธิบายเนื้อหาในไฟล์ที่แนบ และให้คำแนะนำที่เกี่ยวข้อง"
+                answer = answer_with_files(
+                    prompt_question,
+                    image_urls,
+                    text_attachments,
+                    history=history,
+                )
+                source = "files"
+                knowledge_id = None
+                similarity = None
+
+        else:
             category = classify_query(question)
             chosen_model = LLM_MODEL_CALC if category == "calc" else LLM_MODEL
 
@@ -420,14 +456,120 @@ async def chat(
                 knowledge_id = None
                 similarity = None
 
+        if use_postgres_auth():
+            from chat_pg import (
+                ensure_session_pg,
+                get_session_history_pg,
+                save_attachment_pg,
+                save_chat_message_pg,
+            )
+
+            sid, stitle = ensure_session_pg(
+                user_id=user["id"],
+                session_id=session_id,
+                first_question=question or saved_files[0]["filename"],
+            )
+
+            history = get_session_history_pg(
+                session_id=session_id,
+                user_id=user["id"],
+                limit=HISTORY_TURNS,
+            )
+
+            if saved_files:
+                image_urls: list[str] = []
+                text_attachments: list[tuple[str, str]] = []
+
+                for sf in saved_files:
+                    if att.is_image(sf["content_type"]):
+                        image_urls.append(
+                            att.encode_image_data_url(sf["file_path"], sf["content_type"])
+                        )
+                        sf["extracted_text"] = None
+                        continue
+
+                    extracted = att.extract_any_text(
+                        sf["file_path"], sf["content_type"], sf["filename"]
+                    )
+
+                    sf["extracted_text"] = extracted if extracted.strip() else None
+
+                    if att.is_pdf(sf["content_type"]) and att.is_text_sparse(extracted):
+                        rendered = att.render_pdf_pages_as_images(sf["file_path"])
+                        image_urls.extend(rendered)
+
+                        if extracted.strip():
+                            text_attachments.append((sf["filename"], extracted))
+                    elif extracted.strip():
+                        text_attachments.append((sf["filename"], extracted))
+
+                prompt_question = question or "ช่วยอธิบายเนื้อหาในไฟล์ที่แนบ และให้คำแนะนำที่เกี่ยวข้อง"
+                answer = answer_with_files(
+                    prompt_question,
+                    image_urls,
+                    text_attachments,
+                    history=history,
+                )
+                source = "files"
+                knowledge_id = None
+                similarity = None
+
+            else:
+                category = classify_query(question)
+                chosen_model = LLM_MODEL_CALC if category == "calc" else LLM_MODEL
+
+                vec = embed(question)
+                hit = search_knowledge(vec)
+
+                if hit:
+                    answer = answer_from_context(
+                        question,
+                        hit["question"],
+                        hit["answer"],
+                        model=chosen_model,
+                        history=history,
+                    )
+                    source = "rag" if category == "general" else "rag-calc"
+                    knowledge_id = hit["id"]
+                    similarity = hit["similarity"]
+                else:
+                    log_pending_question(question, vec)
+
+                    audit_log(
+                        "pending_question_created",
+                        user=user,
+                        detail={"question": question[:300], "db_engine": "postgres"},
+                        request=request,
+                    )
+
+                    answer = answer_freely(question, model=chosen_model, history=history)
+                    source = "llm" if category == "general" else "llm-calc"
+                    knowledge_id = None
+                    similarity = None
+
             message_id = save_chat_message_pg(
                 user_id=user["id"],
                 session_id=sid,
-                question=question,
+                question=question or "[ไฟล์แนบ]",
                 answer=answer,
                 source=source,
                 knowledge_id=knowledge_id,
             )
+
+            attachment_rows: list[dict] = []
+
+            for sf in saved_files:
+                attachment_rows.append(
+                    save_attachment_pg(
+                        message_id=message_id,
+                        user_id=user["id"],
+                        filename=sf["filename"],
+                        content_type=sf["content_type"],
+                        size_bytes=sf["size"],
+                        file_path=sf["file_path"],
+                        extracted_text=sf.get("extracted_text"),
+                    )
+                )
 
             audit_log(
                 "chat_message",
@@ -437,8 +579,8 @@ async def chat(
                     "message_id": message_id,
                     "source": source,
                     "similarity": similarity,
-                    "has_files": False,
-                    "file_count": 0,
+                    "has_files": bool(saved_files),
+                    "file_count": len(saved_files),
                     "message_length": len(question),
                     "db_engine": "postgres",
                 },
@@ -451,7 +593,7 @@ async def chat(
                 similarity=similarity,
                 session_id=sid,
                 session_title=stitle,
-                attachments=[],
+                attachments=attachment_rows,
             )
         conn = get_db()
         sid, stitle = _ensure_session(
