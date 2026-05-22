@@ -713,6 +713,11 @@ def _purge_unsaved_sessions(conn, user_id: int) -> None:
 
 @app.get("/chat/sessions")
 def list_sessions(user: dict = Depends(current_user)):
+    if use_postgres_auth():
+        from chat_pg import list_sessions_pg
+
+        return list_sessions_pg(user["id"])
+
     conn = get_db()
     _purge_unsaved_sessions(conn, user["id"])
 
@@ -752,6 +757,14 @@ def _messages_with_attachments(conn, session_id: int) -> list[dict]:
 
 @app.get("/chat/sessions/{session_id}")
 def get_session(session_id: int, user: dict = Depends(current_user)):
+    if use_postgres_auth():
+        from chat_pg import get_session_messages_pg
+
+        session = get_session_messages_pg(session_id, user["id"])
+        if not session:
+            raise HTTPException(404, "session not found")
+        return session
+
     conn = get_db()
 
     s = conn.execute(
