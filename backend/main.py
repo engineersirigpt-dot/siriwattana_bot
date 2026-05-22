@@ -785,6 +785,14 @@ def rename_session(session_id: int, body: SessionRenameIn, user: dict = Depends(
     if not title:
         raise HTTPException(400, "title required")
 
+    if use_postgres_auth():
+        from chat_pg import rename_session_pg
+
+        updated = rename_session_pg(session_id, user["id"], title)
+        if not updated:
+            raise HTTPException(404, "session not found")
+        return {"ok": True, "title": title}
+
     conn = get_db()
     res = conn.execute(
         "UPDATE chat_sessions SET title = ? WHERE id = ? AND user_id = ?",
@@ -804,6 +812,14 @@ def toggle_save_session(
     body: SessionSaveIn,
     user: dict = Depends(current_user),
 ):
+    if use_postgres_auth():
+        from chat_pg import toggle_save_session_pg
+
+        updated = toggle_save_session_pg(session_id, user["id"], body.is_saved)
+        if not updated:
+            raise HTTPException(404, "session not found")
+        return {"ok": True, "is_saved": body.is_saved}
+
     conn = get_db()
     res = conn.execute(
         "UPDATE chat_sessions SET is_saved = ? WHERE id = ? AND user_id = ?",
@@ -819,6 +835,74 @@ def toggle_save_session(
 
 @app.delete("/chat/sessions/{session_id}")
 def delete_session(request: Request, session_id: int, user: dict = Depends(current_user)):
+    if use_postgres_auth():
+        from chat_pg import delete_session_pg
+
+        deleted = delete_session_pg(session_id, user["id"])
+        if not deleted:
+            raise HTTPException(404, "session not found")
+
+        audit_log(
+            "chat_session_deleted",
+            user=user,
+            detail={
+                "session_id": session_id,
+                "deleted_files": 0,
+                "db_engine": "postgres",
+            },
+            request=request,
+        )
+
+        return {"ok": True, "deleted_files": 0}
+
+    conn = get_db()
+
+    owned = conn.execute(
+        "SELECT 1 FROM chat_sessions WHERE id = ? AND user_id = ?",
+        (session_id, user["id"]),
+    ).fetchone()
+
+    if not owned:
+        raise HTTPException(404, "session not found")
+
+    file_paths = [
+        r["file_path"]
+        for r in conn.execute(
+            """
+            SELECT a.file_path FROM attachments a
+            JOIN chat_history h ON h.id = a.message_id
+            WHERE h.session_id = ?
+            """,
+            (session_id,),
+        ).fetchall()
+    ]
+
+    conn.execute(
+        "DELETE FROM attachments WHERE message_id IN "
+        "(SELECT id FROM chat_history WHERE session_id = ?)",
+        (session_id,),
+    )
+    conn.execute("DELETE FROM chat_history WHERE session_id = ?", (session_id,))
+    conn.execute(
+        "DELETE FROM chat_sessions WHERE id = ? AND user_id = ?",
+        (session_id, user["id"]),
+    )
+    conn.commit()
+
+    deleted_files = 0
+
+    for fp in file_paths:
+        if _safe_unlink_attachment(fp):
+            deleted_files += 1
+
+    audit_log(
+        "chat_session_deleted",
+        user=user,
+        detail={"session_id": session_id, "deleted_files": deleted_files},
+        request=request,
+    )
+
+    return {"ok": True, "deleted_files": deleted_files}
     conn = get_db()
 
     owned = conn.execute(

@@ -194,3 +194,78 @@ def get_session_messages_pg(session_id: int, user_id: int) -> dict | None:
             for row in messages
         ],
     }
+def rename_session_pg(session_id: int, user_id: int, title: str) -> bool:
+    with get_pg_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE chat_sessions
+                SET title = %s,
+                    updated_at = now()
+                WHERE id = %s AND user_id = %s
+                """,
+                (title, session_id, user_id),
+            )
+            updated = cur.rowcount
+
+    return updated > 0
+
+
+def toggle_save_session_pg(session_id: int, user_id: int, is_saved: bool) -> bool:
+    with get_pg_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE chat_sessions
+                SET is_saved = %s,
+                    updated_at = now()
+                WHERE id = %s AND user_id = %s
+                """,
+                (is_saved, session_id, user_id),
+            )
+            updated = cur.rowcount
+
+    return updated > 0
+
+
+def delete_session_pg(session_id: int, user_id: int) -> bool:
+    with get_pg_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT 1
+                FROM chat_sessions
+                WHERE id = %s AND user_id = %s
+                """,
+                (session_id, user_id),
+            )
+            owned = cur.fetchone()
+
+            if not owned:
+                return False
+
+            cur.execute(
+                """
+                DELETE FROM attachments
+                WHERE message_id IN (
+                    SELECT id FROM chat_history WHERE session_id = %s
+                )
+                """,
+                (session_id,),
+            )
+            cur.execute(
+                """
+                DELETE FROM chat_history
+                WHERE session_id = %s
+                """,
+                (session_id,),
+            )
+            cur.execute(
+                """
+                DELETE FROM chat_sessions
+                WHERE id = %s AND user_id = %s
+                """,
+                (session_id, user_id),
+            )
+
+    return True
