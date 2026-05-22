@@ -354,3 +354,89 @@ def export_session_csv_pg(session_id: int, user_id: int) -> tuple[str, str] | No
 
     filename = f"session-{session_id}.csv"
     return filename, buf.getvalue()
+def save_attachment_pg(
+    message_id: int,
+    user_id: int,
+    filename: str,
+    content_type: str,
+    size_bytes: int,
+    file_path: str,
+    extracted_text: str | None = None,
+) -> dict:
+    with get_pg_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO attachments
+                    (message_id, user_id, filename, content_type, size_bytes, file_path, extracted_text)
+                VALUES
+                    (%s, %s, %s, %s, %s, %s, %s)
+                RETURNING id, filename, content_type, size_bytes
+                """,
+                (
+                    message_id,
+                    user_id,
+                    filename,
+                    content_type,
+                    size_bytes,
+                    file_path,
+                    extracted_text,
+                ),
+            )
+            row = cur.fetchone()
+
+    return {
+        "id": row[0],
+        "filename": row[1],
+        "content_type": row[2],
+        "size_bytes": row[3],
+    }
+
+
+def list_message_attachments_pg(message_id: int) -> list[dict]:
+    with get_pg_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, filename, content_type, size_bytes
+                FROM attachments
+                WHERE message_id = %s
+                ORDER BY id
+                """,
+                (message_id,),
+            )
+            rows = cur.fetchall()
+
+    return [
+        {
+            "id": row[0],
+            "filename": row[1],
+            "content_type": row[2],
+            "size_bytes": row[3],
+        }
+        for row in rows
+    ]
+
+
+def get_attachment_pg(aid: int) -> dict | None:
+    with get_pg_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT user_id, filename, content_type, file_path
+                FROM attachments
+                WHERE id = %s
+                """,
+                (aid,),
+            )
+            row = cur.fetchone()
+
+    if not row:
+        return None
+
+    return {
+        "user_id": row[0],
+        "filename": row[1],
+        "content_type": row[2],
+        "file_path": row[3],
+    }
