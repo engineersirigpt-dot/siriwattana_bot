@@ -1115,6 +1115,10 @@ def admin_export_all(request: Request, user: dict = Depends(require_admin)):
 
 @app.get("/admin/pending")
 def list_pending(user: dict = Depends(require_admin)):
+    if use_postgres_auth():
+        from admin_pg import list_pending_pg
+
+        return list_pending_pg()
     rows = get_db().execute(
         """
         SELECT id, question, ask_count, first_asked_at, last_asked_at
@@ -1153,6 +1157,21 @@ def answer_pending(
 @app.post("/admin/pending/{pending_id}/ignore")
 @limiter.limit("30/minute")
 def ignore_pending(request: Request, pending_id: int, user: dict = Depends(require_admin)):
+    if use_postgres_auth():
+        from admin_pg import ignore_pending_pg
+
+        ignored = ignore_pending_pg(pending_id)
+        if not ignored:
+            raise HTTPException(404, "pending question not found")
+
+        audit_log(
+            "admin_ignored_pending_question",
+            user=user,
+            detail={"pending_id": pending_id, "db_engine": "postgres"},
+            request=request,
+        )
+
+        return {"ok": True}
     conn = get_db()
     conn.execute("UPDATE pending_questions SET status = 'ignored' WHERE id = ?", (pending_id,))
     conn.execute("DELETE FROM pending_vec WHERE pending_id = ?", (pending_id,))
@@ -1170,6 +1189,10 @@ def ignore_pending(request: Request, pending_id: int, user: dict = Depends(requi
 
 @app.get("/admin/knowledge")
 def list_knowledge(user: dict = Depends(require_admin)):
+    if use_postgres_auth():
+        from admin_pg import list_knowledge_pg
+
+        return list_knowledge_pg()
     rows = get_db().execute(
         "SELECT id, question, answer, hit_count, approved_at, source FROM knowledge ORDER BY id DESC"
     ).fetchall()
@@ -1180,6 +1203,21 @@ def list_knowledge(user: dict = Depends(require_admin)):
 @app.post("/admin/knowledge/{kid}/verify")
 @limiter.limit("30/minute")
 def verify_knowledge(request: Request, kid: int, user: dict = Depends(require_admin)):
+    if use_postgres_auth():
+        from admin_pg import verify_knowledge_pg
+
+        verified = verify_knowledge_pg(kid, user["id"])
+        if not verified:
+            raise HTTPException(404, "knowledge not found")
+
+        audit_log(
+            "admin_verified_knowledge",
+            user=user,
+            detail={"knowledge_id": kid, "db_engine": "postgres"},
+            request=request,
+        )
+
+        return {"ok": True}
     conn = get_db()
     conn.execute(
         "UPDATE knowledge SET source = 'admin', approved_by = ? WHERE id = ?",
@@ -1221,6 +1259,21 @@ def create_knowledge(request: Request, body: KnowledgeIn, user: dict = Depends(r
 @app.delete("/admin/knowledge/{kid}")
 @limiter.limit("30/minute")
 def delete_knowledge(request: Request, kid: int, user: dict = Depends(require_admin)):
+    if use_postgres_auth():
+        from admin_pg import delete_knowledge_pg
+
+        deleted = delete_knowledge_pg(kid)
+        if not deleted:
+            raise HTTPException(404, "knowledge not found")
+
+        audit_log(
+            "admin_deleted_knowledge",
+            user=user,
+            detail={"knowledge_id": kid, "db_engine": "postgres"},
+            request=request,
+        )
+
+        return {"ok": True}
     conn = get_db()
     conn.execute("DELETE FROM knowledge WHERE id = ?", (kid,))
     conn.execute("DELETE FROM knowledge_vec WHERE knowledge_id = ?", (kid,))
