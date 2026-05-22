@@ -363,6 +363,96 @@ async def chat(
                 request=request,
             )
 
+        if use_postgres_auth():
+            if saved_files:
+                raise HTTPException(
+                    501,
+                    "File uploads are not supported yet in PostgreSQL mode",
+                )
+
+            from chat_pg import (
+                ensure_session_pg,
+                get_session_history_pg,
+                save_chat_message_pg,
+            )
+
+            sid, stitle = ensure_session_pg(
+                user_id=user["id"],
+                session_id=session_id,
+                first_question=question,
+            )
+
+            history = get_session_history_pg(
+                session_id=session_id,
+                user_id=user["id"],
+                limit=HISTORY_TURNS,
+            )
+
+            category = classify_query(question)
+            chosen_model = LLM_MODEL_CALC if category == "calc" else LLM_MODEL
+
+            vec = embed(question)
+            hit = search_knowledge(vec)
+
+            if hit:
+                answer = answer_from_context(
+                    question,
+                    hit["question"],
+                    hit["answer"],
+                    model=chosen_model,
+                    history=history,
+                )
+                source = "rag" if category == "general" else "rag-calc"
+                knowledge_id = hit["id"]
+                similarity = hit["similarity"]
+            else:
+                log_pending_question(question, vec)
+
+                audit_log(
+                    "pending_question_created",
+                    user=user,
+                    detail={"question": question[:300], "db_engine": "postgres"},
+                    request=request,
+                )
+
+                answer = answer_freely(question, model=chosen_model, history=history)
+                source = "llm" if category == "general" else "llm-calc"
+                knowledge_id = None
+                similarity = None
+
+            message_id = save_chat_message_pg(
+                user_id=user["id"],
+                session_id=sid,
+                question=question,
+                answer=answer,
+                source=source,
+                knowledge_id=knowledge_id,
+            )
+
+            audit_log(
+                "chat_message",
+                user=user,
+                detail={
+                    "session_id": sid,
+                    "message_id": message_id,
+                    "source": source,
+                    "similarity": similarity,
+                    "has_files": False,
+                    "file_count": 0,
+                    "message_length": len(question),
+                    "db_engine": "postgres",
+                },
+                request=request,
+            )
+
+            return ChatResponse(
+                answer=answer,
+                source=source,
+                similarity=similarity,
+                session_id=sid,
+                session_title=stitle,
+                attachments=[],
+            )
         conn = get_db()
         sid, stitle = _ensure_session(
             conn, user["id"], session_id, question or saved_files[0]["filename"]
