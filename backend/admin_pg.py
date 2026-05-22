@@ -126,3 +126,136 @@ def delete_knowledge_pg(kid: int) -> bool:
             )
 
     return True
+import csv
+import io
+
+
+def admin_chat_history_pg() -> list[dict]:
+    with get_pg_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    s.id,
+                    s.title,
+                    s.user_id,
+                    u.username,
+                    s.created_at,
+                    s.updated_at,
+                    (
+                        SELECT COUNT(*)
+                        FROM chat_history h
+                        WHERE h.session_id = s.id
+                    ) AS message_count
+                FROM chat_sessions s
+                JOIN users u ON u.id = s.user_id
+                ORDER BY s.updated_at DESC
+                LIMIT 500
+                """
+            )
+            rows = cur.fetchall()
+
+    return [
+        {
+            "id": row[0],
+            "title": row[1],
+            "user_id": row[2],
+            "username": row[3],
+            "created_at": row[4].isoformat() if row[4] else None,
+            "updated_at": row[5].isoformat() if row[5] else None,
+            "message_count": row[6],
+        }
+        for row in rows
+    ]
+
+
+def admin_session_messages_pg(session_id: int) -> dict | None:
+    with get_pg_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    s.id,
+                    s.title,
+                    s.user_id,
+                    u.username,
+                    s.created_at
+                FROM chat_sessions s
+                JOIN users u ON u.id = s.user_id
+                WHERE s.id = %s
+                """,
+                (session_id,),
+            )
+            session = cur.fetchone()
+
+            if not session:
+                return None
+
+            cur.execute(
+                """
+                SELECT id, question, answer, source, asked_at
+                FROM chat_history
+                WHERE session_id = %s
+                ORDER BY id ASC
+                """,
+                (session_id,),
+            )
+            messages = cur.fetchall()
+
+    return {
+        "id": session[0],
+        "title": session[1],
+        "user_id": session[2],
+        "username": session[3],
+        "created_at": session[4].isoformat() if session[4] else None,
+        "messages": [
+            {
+                "id": row[0],
+                "question": row[1],
+                "answer": row[2],
+                "source": row[3],
+                "asked_at": row[4].isoformat() if row[4] else None,
+                "attachments": [],
+            }
+            for row in messages
+        ],
+    }
+
+
+def admin_export_all_chat_history_pg() -> tuple[str, str]:
+    with get_pg_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    u.username,
+                    s.title AS session_title,
+                    h.asked_at,
+                    h.question,
+                    h.answer,
+                    h.source
+                FROM chat_history h
+                JOIN chat_sessions s ON s.id = h.session_id
+                JOIN users u ON u.id = h.user_id
+                ORDER BY h.id ASC
+                """
+            )
+            rows = cur.fetchall()
+
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(["username", "session_title", "timestamp", "question", "answer", "source"])
+
+    for row in rows:
+        writer.writerow(
+            [
+                row[0],
+                row[1],
+                row[2].isoformat() if row[2] else "",
+                row[3],
+                row[4],
+                row[5],
+            ]
+        )
+
+    return "all-chat-history.csv", buf.getvalue()

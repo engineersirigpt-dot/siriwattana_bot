@@ -1038,6 +1038,10 @@ def export_session(request: Request, session_id: int, user: dict = Depends(curre
 
 @app.get("/admin/chat-history")
 def admin_chat_history(user: dict = Depends(require_admin)):
+    if use_postgres_auth():
+        from admin_pg import admin_chat_history_pg
+
+        return admin_chat_history_pg()
     rows = get_db().execute(
         """
         SELECT s.id, s.title, s.user_id, u.username, s.created_at, s.updated_at,
@@ -1054,6 +1058,13 @@ def admin_chat_history(user: dict = Depends(require_admin)):
 
 @app.get("/admin/chat-history/{session_id}")
 def admin_session_messages(session_id: int, user: dict = Depends(require_admin)):
+    if use_postgres_auth():
+        from admin_pg import admin_session_messages_pg
+
+        session = admin_session_messages_pg(session_id)
+        if not session:
+            raise HTTPException(404, "session not found")
+        return session
     conn = get_db()
     s = conn.execute(
         """
@@ -1073,6 +1084,23 @@ def admin_session_messages(session_id: int, user: dict = Depends(require_admin))
 @app.get("/admin/chat-history/export/all")
 @limiter.limit("5/minute")
 def admin_export_all(request: Request, user: dict = Depends(require_admin)):
+    if use_postgres_auth():
+        from admin_pg import admin_export_all_chat_history_pg
+
+        filename, csv_text = admin_export_all_chat_history_pg()
+
+        audit_log(
+            "admin_export_all_chat_history",
+            user=user,
+            detail={"db_engine": "postgres"},
+            request=request,
+        )
+
+        return StreamingResponse(
+            iter([csv_text]),
+            media_type="text/csv",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
     rows = get_db().execute(
         """
         SELECT u.username, s.title AS session_title, h.asked_at, h.question, h.answer, h.source
