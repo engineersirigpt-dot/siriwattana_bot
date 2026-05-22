@@ -955,6 +955,10 @@ def delete_session(request: Request, session_id: int, user: dict = Depends(curre
 
 @app.get("/chat/search")
 def search_chat(q: str = Query(..., min_length=1), user: dict = Depends(current_user)):
+    if use_postgres_auth():
+        from chat_pg import search_chat_pg
+
+        return search_chat_pg(user["id"], q)
     like = f"%{q.lower()}%"
     rows = get_db().execute(
         """
@@ -975,6 +979,27 @@ def search_chat(q: str = Query(..., min_length=1), user: dict = Depends(current_
 @app.get("/chat/sessions/{session_id}/export")
 @limiter.limit("10/minute")
 def export_session(request: Request, session_id: int, user: dict = Depends(current_user)):
+    if use_postgres_auth():
+        from chat_pg import export_session_csv_pg
+
+        exported = export_session_csv_pg(session_id, user["id"])
+        if not exported:
+            raise HTTPException(404, "session not found")
+
+        filename, csv_text = exported
+
+        audit_log(
+            "chat_session_exported",
+            user=user,
+            detail={"session_id": session_id, "db_engine": "postgres"},
+            request=request,
+        )
+
+        return StreamingResponse(
+            iter([csv_text]),
+            media_type="text/csv",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
     conn = get_db()
     s = conn.execute(
         "SELECT id, title FROM chat_sessions WHERE id = ? AND user_id = ?",

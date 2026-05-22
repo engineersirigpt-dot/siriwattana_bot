@@ -269,3 +269,88 @@ def delete_session_pg(session_id: int, user_id: int) -> bool:
             )
 
     return True
+import csv
+import io
+
+
+def search_chat_pg(user_id: int, q: str) -> list[dict]:
+    like = f"%{q.lower()}%"
+
+    with get_pg_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    h.id,
+                    h.session_id,
+                    s.title AS session_title,
+                    h.question,
+                    h.answer,
+                    h.asked_at
+                FROM chat_history h
+                JOIN chat_sessions s ON s.id = h.session_id
+                WHERE h.user_id = %s
+                  AND (LOWER(h.question) LIKE %s OR LOWER(h.answer) LIKE %s)
+                ORDER BY h.id DESC
+                LIMIT 50
+                """,
+                (user_id, like, like),
+            )
+            rows = cur.fetchall()
+
+    return [
+        {
+            "id": row[0],
+            "session_id": row[1],
+            "session_title": row[2],
+            "question": row[3],
+            "answer": row[4],
+            "asked_at": row[5].isoformat() if row[5] else None,
+        }
+        for row in rows
+    ]
+
+
+def export_session_csv_pg(session_id: int, user_id: int) -> tuple[str, str] | None:
+    with get_pg_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, title
+                FROM chat_sessions
+                WHERE id = %s AND user_id = %s
+                """,
+                (session_id, user_id),
+            )
+            session = cur.fetchone()
+
+            if not session:
+                return None
+
+            cur.execute(
+                """
+                SELECT asked_at, question, answer, source
+                FROM chat_history
+                WHERE session_id = %s
+                ORDER BY id ASC
+                """,
+                (session_id,),
+            )
+            rows = cur.fetchall()
+
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(["timestamp", "question", "answer", "source"])
+
+    for row in rows:
+        writer.writerow(
+            [
+                row[0].isoformat() if row[0] else "",
+                row[1],
+                row[2],
+                row[3],
+            ]
+        )
+
+    filename = f"session-{session_id}.csv"
+    return filename, buf.getvalue()
