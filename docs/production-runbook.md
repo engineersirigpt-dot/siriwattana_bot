@@ -22,6 +22,7 @@ It covers:
 - Stop services
 - Check status
 - Check PostgreSQL
+- Deploy from main or migration branch
 - Start backend
 - Run smoke tests
 - Backup database
@@ -47,6 +48,22 @@ DATABASE_URL=postgresql://chatbot:<strong-password>@localhost:5434/chatbot_prod
 ```
 
 `localhost` may be slow or hang on some Windows + Docker environments.
+
+### Current tested prod-style local URL
+
+For the current self-hosted production-style test container, use:
+
+```env
+DB_ENGINE=postgres
+DATABASE_URL=postgresql://chatbot:Siriwattanachatbot@127.0.0.1:5434/chatbot_prod
+```
+
+This password is for testing only.
+
+For real production, replace it with a strong random password and update both:
+
+- `POSTGRES_PASSWORD`
+- `DATABASE_URL`
 
 ---
 
@@ -102,7 +119,31 @@ siriwattana-postgres-prod
 
 ---
 
-## 3. Set Backend Environment
+## 3. Deploy from main after merge
+
+If this branch has been merged into `main`, production deployment can use:
+
+```cmd
+git checkout main
+git pull origin main
+```
+
+If deploying directly from the PostgreSQL migration branch:
+
+```cmd
+git checkout migrate-postgresql-pgvector
+git pull origin migrate-postgresql-pgvector
+```
+
+Recommended production branch:
+
+```text
+main
+```
+
+---
+
+## 4. Set Backend Environment
 
 For production-style PostgreSQL:
 
@@ -122,7 +163,7 @@ For real production, replace password with a strong random password.
 
 ---
 
-## 4. Validate PostgreSQL Connection
+## 5. Validate PostgreSQL Connection
 
 From project root:
 
@@ -157,7 +198,7 @@ vector
 
 ---
 
-## 5. Start Backend Manually
+## 6. Start Backend Manually
 
 Open a dedicated backend terminal:
 
@@ -184,7 +225,7 @@ For real production, prefer running backend through a service manager or Docker 
 
 ---
 
-## 6. Check Backend API
+## 7. Check Backend API
 
 From another terminal:
 
@@ -200,7 +241,7 @@ HTTP/1.1 200 OK
 
 ---
 
-## 7. Login Test User
+## 8. Login Test User
 
 ```cmd
 curl.exe -X POST "http://localhost:8010/auth/login" ^
@@ -223,7 +264,7 @@ curl.exe -X GET "http://localhost:8010/auth/me" ^
 
 ---
 
-## 8. Test RAG Chat
+## 9. Test RAG Chat
 
 ```cmd
 curl.exe -X POST "http://localhost:8010/chat" ^
@@ -240,7 +281,7 @@ Expected:
 
 ---
 
-## 9. Check Production Data
+## 10. Check Production Data
 
 Users:
 
@@ -274,7 +315,7 @@ docker exec -it siriwattana-postgres-prod psql -U chatbot -d chatbot_prod -c "SE
 
 ---
 
-## 10. Backup PostgreSQL
+## 11. Backup PostgreSQL
 
 Run production PostgreSQL backup script:
 
@@ -302,7 +343,7 @@ backups\chatbot_prod_backup_YYYY-MM-DD_HHMMSS.sql
 
 ---
 
-## 11. Backup Uploads
+## 12. Backup Uploads
 
 Run uploads backup script:
 
@@ -324,7 +365,33 @@ backups\uploads_YYYY-MM-DD_HHMMSS
 
 ---
 
-## 12. Restore Test
+## 13. Backup All
+
+Run both database and uploads backup:
+
+```cmd
+scripts\backup_postgres_prod.bat
+scripts\backup_uploads_prod.bat
+```
+
+Verify backup files:
+
+```cmd
+dir backups
+```
+
+Production backup must include both:
+
+```text
+1. PostgreSQL dump file
+2. Uploads backup folder
+```
+
+PostgreSQL backup alone is not enough because uploaded files are stored on disk.
+
+---
+
+## 14. Restore Test
 
 Never restore directly into `chatbot_prod` without testing first.
 
@@ -350,7 +417,7 @@ docker exec -it siriwattana-postgres-prod psql -U chatbot -d postgres -c "DROP D
 
 ---
 
-## 13. Stop Backend
+## 15. Stop Backend
 
 If backend is running manually in CMD:
 
@@ -372,7 +439,7 @@ taskkill /PID <PID> /F
 
 ---
 
-## 14. Stop PostgreSQL Container
+## 16. Stop PostgreSQL Container
 
 ```cmd
 docker stop siriwattana-postgres-prod
@@ -386,7 +453,7 @@ docker stop siriwattana-postgres-local
 
 ---
 
-## 15. Restart PostgreSQL Container
+## 17. Restart PostgreSQL Container
 
 ```cmd
 docker restart siriwattana-postgres-prod
@@ -400,7 +467,7 @@ docker ps
 
 ---
 
-## 16. Troubleshooting
+## 18. Troubleshooting
 
 ### Backend cannot connect to PostgreSQL
 
@@ -491,7 +558,7 @@ python -c "import sys; sys.path.insert(0,'backend'); from rag import add_knowled
 
 ---
 
-## 17. Daily Operation Checklist
+## 19. Daily Operation Checklist
 
 Recommended daily checks:
 
@@ -519,9 +586,10 @@ docker system df
 
 ---
 
-## 18. Important Notes
+## 20. Important Notes
 
 - Use `127.0.0.1` for Docker PostgreSQL connection on Windows.
+- Do not use `localhost:5434` for the PostgreSQL Docker connection on Windows.
 - Do not commit real `.env` secrets.
 - Production must use strong PostgreSQL password.
 - Production must use strong `JWT_SECRET`.
