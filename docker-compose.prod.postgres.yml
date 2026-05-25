@@ -1,0 +1,26 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: siriwattana-postgres-prod
+    restart: unless-stopped
+
+    environment:
+      POSTGRES_DB: chatbot_prod
+      POSTGRES_USER: chatbot
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+
+    ports:
+      - "127.0.0.1:5434:5432"
+
+    volumes:
+      - siriwattana_pg_prod_data:/var/lib/postgresql/data
+
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U chatbot -d chatbot_prod"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  siriwattana_pg_prod_data:
+    name: siriwattana_pg_prod_data
