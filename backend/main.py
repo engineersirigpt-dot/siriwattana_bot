@@ -27,10 +27,11 @@ from slowapi.util import get_remote_address
 
 import attachments as att
 from auth import (
-    create_token, 
-    current_user, 
-    hash_password, 
+    create_token,
+    current_user,
+    hash_password,
     require_admin,
+    use_postgres_auth,
     validate_jwt_secret,
     verify_password,
 )
@@ -143,10 +144,15 @@ class SessionSaveIn(BaseModel):
 def register(request: Request, form: OAuth2PasswordRequestForm = Depends()):
     conn = get_db()
 
-    existing = conn.execute(
-        "SELECT 1 FROM users WHERE username = ?",
-        (form.username,),
-    ).fetchone()
+    if use_postgres_auth():
+        from auth_pg import create_user_pg, username_exists_pg
+
+        existing = username_exists_pg(form.username)
+    else:
+        existing = conn.execute(
+            "SELECT 1 FROM users WHERE username = ?",
+            (form.username,),
+        ).fetchone()
 
     if existing:
         audit_log(
@@ -157,16 +163,24 @@ def register(request: Request, form: OAuth2PasswordRequestForm = Depends()):
         raise HTTPException(400, "username already taken")
 
     role = "user"
+    password_hash = hash_password(form.password)
 
-    conn.execute(
-        "INSERT INTO users (username, password_hash, role) VALUES (?, ?, ?)",
-        (form.username, hash_password(form.password), role),
-    )
-    conn.commit()
+    if use_postgres_auth():
+        create_user_pg(form.username, password_hash, role)
+    else:
+        conn.execute(
+            "INSERT INTO users (username, password_hash, role) VALUES (?, ?, ?)",
+            (form.username, password_hash, role),
+        )
+        conn.commit()
 
     audit_log(
         "user_registered",
-        detail={"username": form.username, "role": role},
+        detail={
+            "username": form.username,
+            "role": role,
+            "db_engine": "postgres" if use_postgres_auth() else "sqlite",
+        },
         request=request,
     )
 
@@ -176,15 +190,23 @@ def register(request: Request, form: OAuth2PasswordRequestForm = Depends()):
 @app.post("/auth/login")
 @limiter.limit("10/minute")
 def login(request: Request, form: OAuth2PasswordRequestForm = Depends()):
-    row = get_db().execute(
-        "SELECT id, username, password_hash, role FROM users WHERE username = ?",
-        (form.username,),
-    ).fetchone()
+    if use_postgres_auth():
+        from auth_pg import get_user_by_username_pg
+
+        row = get_user_by_username_pg(form.username)
+    else:
+        row = get_db().execute(
+            "SELECT id, username, password_hash, role FROM users WHERE username = ?",
+            (form.username,),
+        ).fetchone()
 
     if not row or not verify_password(form.password, row["password_hash"]):
         audit_log(
             "login_failed",
-            detail={"username": form.username},
+            detail={
+                "username": form.username,
+                "db_engine": "postgres" if use_postgres_auth() else "sqlite",
+            },
             request=request,
         )
         raise HTTPException(401, "invalid credentials")
@@ -194,6 +216,7 @@ def login(request: Request, form: OAuth2PasswordRequestForm = Depends()):
     audit_log(
         "login_success",
         user={"id": row["id"], "username": row["username"], "role": row["role"]},
+        detail={"db_engine": "postgres" if use_postgres_auth() else "sqlite"},
         request=request,
     )
 
@@ -258,7 +281,12 @@ def _get_session_history(conn, session_id: int | None, user_id: int) -> list[dic
     return history
 
 
-def _ensure_session(conn, user_id: int, session_id: int | None, first_question: str) -> tuple[int, str]:
+def _ensure_session(
+    conn,
+    user_id: int,
+    session_id: int | None,
+    first_question: str,
+) -> tuple[int, str]:
     if session_id is not None:
         row = conn.execute(
             "SELECT id, title FROM chat_sessions WHERE id = ? AND user_id = ?",
@@ -335,6 +363,238 @@ async def chat(
                 request=request,
             )
 
+        if use_postgres_auth():
+        
+            from chat_pg import (
+                ensure_session_pg,
+                get_session_history_pg,
+                save_attachment_pg,
+                save_chat_message_pg,
+            )
+
+            sid, stitle = ensure_session_pg(
+                user_id=user["id"],
+                session_id=session_id,
+                first_question=question or saved_files[0]["filename"],
+            )
+
+            history = get_session_history_pg(
+                session_id=session_id,
+                user_id=user["id"],
+                limit=HISTORY_TURNS,
+            )
+
+
+            if saved_files:
+                image_urls: list[str] = []
+                text_attachments: list[tuple[str, str]] = []
+
+                for sf in saved_files:
+                    if att.is_image(sf["content_type"]):
+                        image_urls.append(
+                            att.encode_image_data_url(sf["file_path"], sf["content_type"])
+                        )
+                        sf["extracted_text"] = None
+                        continue
+
+                    extracted = att.extract_any_text(
+                        sf["file_path"], sf["content_type"], sf["filename"]
+                    )
+
+                    sf["extracted_text"] = extracted if extracted.strip() else None
+
+                    if att.is_pdf(sf["content_type"]) and att.is_text_sparse(extracted):
+                        rendered = att.render_pdf_pages_as_images(sf["file_path"])
+                        image_urls.extend(rendered)
+
+                        if extracted.strip():
+                            text_attachments.append((sf["filename"], extracted))
+                    elif extracted.strip():
+                        text_attachments.append((sf["filename"], extracted))
+
+                prompt_question = question or "ช่วยอธิบายเนื้อหาในไฟล์ที่แนบ และให้คำแนะนำที่เกี่ยวข้อง"
+                answer = answer_with_files(
+                    prompt_question,
+                    image_urls,
+                    text_attachments,
+                    history=history,
+                )
+                source = "files"
+                knowledge_id = None
+                similarity = None
+
+        else:
+            category = classify_query(question)
+            chosen_model = LLM_MODEL_CALC if category == "calc" else LLM_MODEL
+
+            vec = embed(question)
+            hit = search_knowledge(vec)
+
+            if hit:
+                answer = answer_from_context(
+                    question,
+                    hit["question"],
+                    hit["answer"],
+                    model=chosen_model,
+                    history=history,
+                )
+                source = "rag" if category == "general" else "rag-calc"
+                knowledge_id = hit["id"]
+                similarity = hit["similarity"]
+            else:
+                log_pending_question(question, vec)
+
+                audit_log(
+                    "pending_question_created",
+                    user=user,
+                    detail={"question": question[:300], "db_engine": "postgres"},
+                    request=request,
+                )
+
+                answer = answer_freely(question, model=chosen_model, history=history)
+                source = "llm" if category == "general" else "llm-calc"
+                knowledge_id = None
+                similarity = None
+
+        if use_postgres_auth():
+            from chat_pg import (
+                ensure_session_pg,
+                get_session_history_pg,
+                save_attachment_pg,
+                save_chat_message_pg,
+            )
+
+            sid, stitle = ensure_session_pg(
+                user_id=user["id"],
+                session_id=session_id,
+                first_question=question or saved_files[0]["filename"],
+            )
+
+            history = get_session_history_pg(
+                session_id=session_id,
+                user_id=user["id"],
+                limit=HISTORY_TURNS,
+            )
+
+            if saved_files:
+                image_urls: list[str] = []
+                text_attachments: list[tuple[str, str]] = []
+
+                for sf in saved_files:
+                    if att.is_image(sf["content_type"]):
+                        image_urls.append(
+                            att.encode_image_data_url(sf["file_path"], sf["content_type"])
+                        )
+                        sf["extracted_text"] = None
+                        continue
+
+                    extracted = att.extract_any_text(
+                        sf["file_path"], sf["content_type"], sf["filename"]
+                    )
+
+                    sf["extracted_text"] = extracted if extracted.strip() else None
+
+                    if att.is_pdf(sf["content_type"]) and att.is_text_sparse(extracted):
+                        rendered = att.render_pdf_pages_as_images(sf["file_path"])
+                        image_urls.extend(rendered)
+
+                        if extracted.strip():
+                            text_attachments.append((sf["filename"], extracted))
+                    elif extracted.strip():
+                        text_attachments.append((sf["filename"], extracted))
+
+                prompt_question = question or "ช่วยอธิบายเนื้อหาในไฟล์ที่แนบ และให้คำแนะนำที่เกี่ยวข้อง"
+                answer = answer_with_files(
+                    prompt_question,
+                    image_urls,
+                    text_attachments,
+                    history=history,
+                )
+                source = "files"
+                knowledge_id = None
+                similarity = None
+
+            else:
+                category = classify_query(question)
+                chosen_model = LLM_MODEL_CALC if category == "calc" else LLM_MODEL
+
+                vec = embed(question)
+                hit = search_knowledge(vec)
+
+                if hit:
+                    answer = answer_from_context(
+                        question,
+                        hit["question"],
+                        hit["answer"],
+                        model=chosen_model,
+                        history=history,
+                    )
+                    source = "rag" if category == "general" else "rag-calc"
+                    knowledge_id = hit["id"]
+                    similarity = hit["similarity"]
+                else:
+                    log_pending_question(question, vec)
+
+                    audit_log(
+                        "pending_question_created",
+                        user=user,
+                        detail={"question": question[:300], "db_engine": "postgres"},
+                        request=request,
+                    )
+
+                    answer = answer_freely(question, model=chosen_model, history=history)
+                    source = "llm" if category == "general" else "llm-calc"
+                    knowledge_id = None
+                    similarity = None
+
+            message_id = save_chat_message_pg(
+                user_id=user["id"],
+                session_id=sid,
+                question=question or "[ไฟล์แนบ]",
+                answer=answer,
+                source=source,
+                knowledge_id=knowledge_id,
+            )
+
+            attachment_rows: list[dict] = []
+
+            for sf in saved_files:
+                attachment_rows.append(
+                    save_attachment_pg(
+                        message_id=message_id,
+                        user_id=user["id"],
+                        filename=sf["filename"],
+                        content_type=sf["content_type"],
+                        size_bytes=sf["size"],
+                        file_path=sf["file_path"],
+                        extracted_text=sf.get("extracted_text"),
+                    )
+                )
+
+            audit_log(
+                "chat_message",
+                user=user,
+                detail={
+                    "session_id": sid,
+                    "message_id": message_id,
+                    "source": source,
+                    "similarity": similarity,
+                    "has_files": bool(saved_files),
+                    "file_count": len(saved_files),
+                    "message_length": len(question),
+                    "db_engine": "postgres",
+                },
+                request=request,
+            )
+
+            return ChatResponse(
+                answer=answer,
+                source=source,
+                similarity=similarity,
+                session_id=sid,
+                session_title=stitle,
+                attachments=attachment_rows,
+            )
         conn = get_db()
         sid, stitle = _ensure_session(
             conn, user["id"], session_id, question or saved_files[0]["filename"]
@@ -595,6 +855,11 @@ def _purge_unsaved_sessions(conn, user_id: int) -> None:
 
 @app.get("/chat/sessions")
 def list_sessions(user: dict = Depends(current_user)):
+    if use_postgres_auth():
+        from chat_pg import list_sessions_pg
+
+        return list_sessions_pg(user["id"])
+
     conn = get_db()
     _purge_unsaved_sessions(conn, user["id"])
 
@@ -634,6 +899,14 @@ def _messages_with_attachments(conn, session_id: int) -> list[dict]:
 
 @app.get("/chat/sessions/{session_id}")
 def get_session(session_id: int, user: dict = Depends(current_user)):
+    if use_postgres_auth():
+        from chat_pg import get_session_messages_pg
+
+        session = get_session_messages_pg(session_id, user["id"])
+        if not session:
+            raise HTTPException(404, "session not found")
+        return session
+
     conn = get_db()
 
     s = conn.execute(
@@ -654,6 +927,14 @@ def rename_session(session_id: int, body: SessionRenameIn, user: dict = Depends(
     if not title:
         raise HTTPException(400, "title required")
 
+    if use_postgres_auth():
+        from chat_pg import rename_session_pg
+
+        updated = rename_session_pg(session_id, user["id"], title)
+        if not updated:
+            raise HTTPException(404, "session not found")
+        return {"ok": True, "title": title}
+
     conn = get_db()
     res = conn.execute(
         "UPDATE chat_sessions SET title = ? WHERE id = ? AND user_id = ?",
@@ -673,6 +954,14 @@ def toggle_save_session(
     body: SessionSaveIn,
     user: dict = Depends(current_user),
 ):
+    if use_postgres_auth():
+        from chat_pg import toggle_save_session_pg
+
+        updated = toggle_save_session_pg(session_id, user["id"], body.is_saved)
+        if not updated:
+            raise HTTPException(404, "session not found")
+        return {"ok": True, "is_saved": body.is_saved}
+
     conn = get_db()
     res = conn.execute(
         "UPDATE chat_sessions SET is_saved = ? WHERE id = ? AND user_id = ?",
@@ -688,6 +977,74 @@ def toggle_save_session(
 
 @app.delete("/chat/sessions/{session_id}")
 def delete_session(request: Request, session_id: int, user: dict = Depends(current_user)):
+    if use_postgres_auth():
+        from chat_pg import delete_session_pg
+
+        deleted = delete_session_pg(session_id, user["id"])
+        if not deleted:
+            raise HTTPException(404, "session not found")
+
+        audit_log(
+            "chat_session_deleted",
+            user=user,
+            detail={
+                "session_id": session_id,
+                "deleted_files": 0,
+                "db_engine": "postgres",
+            },
+            request=request,
+        )
+
+        return {"ok": True, "deleted_files": 0}
+
+    conn = get_db()
+
+    owned = conn.execute(
+        "SELECT 1 FROM chat_sessions WHERE id = ? AND user_id = ?",
+        (session_id, user["id"]),
+    ).fetchone()
+
+    if not owned:
+        raise HTTPException(404, "session not found")
+
+    file_paths = [
+        r["file_path"]
+        for r in conn.execute(
+            """
+            SELECT a.file_path FROM attachments a
+            JOIN chat_history h ON h.id = a.message_id
+            WHERE h.session_id = ?
+            """,
+            (session_id,),
+        ).fetchall()
+    ]
+
+    conn.execute(
+        "DELETE FROM attachments WHERE message_id IN "
+        "(SELECT id FROM chat_history WHERE session_id = ?)",
+        (session_id,),
+    )
+    conn.execute("DELETE FROM chat_history WHERE session_id = ?", (session_id,))
+    conn.execute(
+        "DELETE FROM chat_sessions WHERE id = ? AND user_id = ?",
+        (session_id, user["id"]),
+    )
+    conn.commit()
+
+    deleted_files = 0
+
+    for fp in file_paths:
+        if _safe_unlink_attachment(fp):
+            deleted_files += 1
+
+    audit_log(
+        "chat_session_deleted",
+        user=user,
+        detail={"session_id": session_id, "deleted_files": deleted_files},
+        request=request,
+    )
+
+    return {"ok": True, "deleted_files": deleted_files}
     conn = get_db()
 
     owned = conn.execute(
@@ -740,6 +1097,10 @@ def delete_session(request: Request, session_id: int, user: dict = Depends(curre
 
 @app.get("/chat/search")
 def search_chat(q: str = Query(..., min_length=1), user: dict = Depends(current_user)):
+    if use_postgres_auth():
+        from chat_pg import search_chat_pg
+
+        return search_chat_pg(user["id"], q)
     like = f"%{q.lower()}%"
     rows = get_db().execute(
         """
@@ -760,6 +1121,27 @@ def search_chat(q: str = Query(..., min_length=1), user: dict = Depends(current_
 @app.get("/chat/sessions/{session_id}/export")
 @limiter.limit("10/minute")
 def export_session(request: Request, session_id: int, user: dict = Depends(current_user)):
+    if use_postgres_auth():
+        from chat_pg import export_session_csv_pg
+
+        exported = export_session_csv_pg(session_id, user["id"])
+        if not exported:
+            raise HTTPException(404, "session not found")
+
+        filename, csv_text = exported
+
+        audit_log(
+            "chat_session_exported",
+            user=user,
+            detail={"session_id": session_id, "db_engine": "postgres"},
+            request=request,
+        )
+
+        return StreamingResponse(
+            iter([csv_text]),
+            media_type="text/csv",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
     conn = get_db()
     s = conn.execute(
         "SELECT id, title FROM chat_sessions WHERE id = ? AND user_id = ?",
@@ -798,6 +1180,10 @@ def export_session(request: Request, session_id: int, user: dict = Depends(curre
 
 @app.get("/admin/chat-history")
 def admin_chat_history(user: dict = Depends(require_admin)):
+    if use_postgres_auth():
+        from admin_pg import admin_chat_history_pg
+
+        return admin_chat_history_pg()
     rows = get_db().execute(
         """
         SELECT s.id, s.title, s.user_id, u.username, s.created_at, s.updated_at,
@@ -814,6 +1200,13 @@ def admin_chat_history(user: dict = Depends(require_admin)):
 
 @app.get("/admin/chat-history/{session_id}")
 def admin_session_messages(session_id: int, user: dict = Depends(require_admin)):
+    if use_postgres_auth():
+        from admin_pg import admin_session_messages_pg
+
+        session = admin_session_messages_pg(session_id)
+        if not session:
+            raise HTTPException(404, "session not found")
+        return session
     conn = get_db()
     s = conn.execute(
         """
@@ -833,6 +1226,23 @@ def admin_session_messages(session_id: int, user: dict = Depends(require_admin))
 @app.get("/admin/chat-history/export/all")
 @limiter.limit("5/minute")
 def admin_export_all(request: Request, user: dict = Depends(require_admin)):
+    if use_postgres_auth():
+        from admin_pg import admin_export_all_chat_history_pg
+
+        filename, csv_text = admin_export_all_chat_history_pg()
+
+        audit_log(
+            "admin_export_all_chat_history",
+            user=user,
+            detail={"db_engine": "postgres"},
+            request=request,
+        )
+
+        return StreamingResponse(
+            iter([csv_text]),
+            media_type="text/csv",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
     rows = get_db().execute(
         """
         SELECT u.username, s.title AS session_title, h.asked_at, h.question, h.answer, h.source
@@ -875,6 +1285,10 @@ def admin_export_all(request: Request, user: dict = Depends(require_admin)):
 
 @app.get("/admin/pending")
 def list_pending(user: dict = Depends(require_admin)):
+    if use_postgres_auth():
+        from admin_pg import list_pending_pg
+
+        return list_pending_pg()
     rows = get_db().execute(
         """
         SELECT id, question, ask_count, first_asked_at, last_asked_at
@@ -913,6 +1327,21 @@ def answer_pending(
 @app.post("/admin/pending/{pending_id}/ignore")
 @limiter.limit("30/minute")
 def ignore_pending(request: Request, pending_id: int, user: dict = Depends(require_admin)):
+    if use_postgres_auth():
+        from admin_pg import ignore_pending_pg
+
+        ignored = ignore_pending_pg(pending_id)
+        if not ignored:
+            raise HTTPException(404, "pending question not found")
+
+        audit_log(
+            "admin_ignored_pending_question",
+            user=user,
+            detail={"pending_id": pending_id, "db_engine": "postgres"},
+            request=request,
+        )
+
+        return {"ok": True}
     conn = get_db()
     conn.execute("UPDATE pending_questions SET status = 'ignored' WHERE id = ?", (pending_id,))
     conn.execute("DELETE FROM pending_vec WHERE pending_id = ?", (pending_id,))
@@ -930,6 +1359,10 @@ def ignore_pending(request: Request, pending_id: int, user: dict = Depends(requi
 
 @app.get("/admin/knowledge")
 def list_knowledge(user: dict = Depends(require_admin)):
+    if use_postgres_auth():
+        from admin_pg import list_knowledge_pg
+
+        return list_knowledge_pg()
     rows = get_db().execute(
         "SELECT id, question, answer, hit_count, approved_at, source FROM knowledge ORDER BY id DESC"
     ).fetchall()
@@ -940,6 +1373,21 @@ def list_knowledge(user: dict = Depends(require_admin)):
 @app.post("/admin/knowledge/{kid}/verify")
 @limiter.limit("30/minute")
 def verify_knowledge(request: Request, kid: int, user: dict = Depends(require_admin)):
+    if use_postgres_auth():
+        from admin_pg import verify_knowledge_pg
+
+        verified = verify_knowledge_pg(kid, user["id"])
+        if not verified:
+            raise HTTPException(404, "knowledge not found")
+
+        audit_log(
+            "admin_verified_knowledge",
+            user=user,
+            detail={"knowledge_id": kid, "db_engine": "postgres"},
+            request=request,
+        )
+
+        return {"ok": True}
     conn = get_db()
     conn.execute(
         "UPDATE knowledge SET source = 'admin', approved_by = ? WHERE id = ?",
@@ -981,6 +1429,21 @@ def create_knowledge(request: Request, body: KnowledgeIn, user: dict = Depends(r
 @app.delete("/admin/knowledge/{kid}")
 @limiter.limit("30/minute")
 def delete_knowledge(request: Request, kid: int, user: dict = Depends(require_admin)):
+    if use_postgres_auth():
+        from admin_pg import delete_knowledge_pg
+
+        deleted = delete_knowledge_pg(kid)
+        if not deleted:
+            raise HTTPException(404, "knowledge not found")
+
+        audit_log(
+            "admin_deleted_knowledge",
+            user=user,
+            detail={"knowledge_id": kid, "db_engine": "postgres"},
+            request=request,
+        )
+
+        return {"ok": True}
     conn = get_db()
     conn.execute("DELETE FROM knowledge WHERE id = ?", (kid,))
     conn.execute("DELETE FROM knowledge_vec WHERE knowledge_id = ?", (kid,))

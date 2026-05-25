@@ -12,6 +12,7 @@ from db import get_db
 JWT_SECRET = os.getenv("JWT_SECRET", "dev-secret-change-me")
 JWT_ALG = "HS256"
 JWT_EXPIRES_HOURS = int(os.getenv("JWT_EXPIRES_HOURS", "8"))
+DB_ENGINE = os.getenv("DB_ENGINE", "sqlite").strip().lower()
 
 DEFAULT_JWT_SECRETS = {
     "",
@@ -25,6 +26,10 @@ DEFAULT_JWT_SECRETS = {
 
 pwd_ctx = CryptContext(schemes=["bcrypt"], deprecated="auto")
 oauth2 = OAuth2PasswordBearer(tokenUrl="/auth/login")
+
+
+def use_postgres_auth() -> bool:
+    return DB_ENGINE in {"postgres", "postgresql", "pg"}
 
 
 def validate_jwt_secret() -> None:
@@ -111,27 +116,38 @@ def current_user(request: Request, token: str = Depends(oauth2)) -> dict:
         )
         raise _credential_exception()
 
-    row = get_db().execute(
-        "SELECT id, username, role FROM users WHERE id = ?",
-        (user_id,),
-    ).fetchone()
+    if use_postgres_auth():
+        from auth_pg import get_user_by_id_pg
 
-    if not row:
+        user_row = get_user_by_id_pg(user_id)
+    else:
+        row = get_db().execute(
+            "SELECT id, username, role FROM users WHERE id = ?",
+            (user_id,),
+        ).fetchone()
+        user_row = (
+            {
+                "id": row["id"],
+                "username": row["username"],
+                "role": row["role"],
+            }
+            if row
+            else None
+        )
+
+    if not user_row:
         audit_log(
             "invalid_or_expired_token",
             detail={
                 "reason": "token_user_not_found",
                 "user_id": user_id,
+                "db_engine": DB_ENGINE,
             },
             request=request,
         )
         raise _credential_exception()
 
-    return {
-        "id": row["id"],
-        "username": row["username"],
-        "role": row["role"],
-    }
+    return user_row
 
 
 def require_admin(request: Request, user: dict = Depends(current_user)) -> dict:
