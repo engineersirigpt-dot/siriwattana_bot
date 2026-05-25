@@ -6,10 +6,10 @@
 siriwattana_bot
 ```
 
-## Branch
+## Production Branch
 
 ```text
-migrate-postgresql-pgvector
+main
 ```
 
 ## Purpose
@@ -22,7 +22,7 @@ It covers:
 - Stop services
 - Check status
 - Check PostgreSQL
-- Deploy from main or migration branch
+- Deploy from main
 - Start backend
 - Run smoke tests
 - Backup database
@@ -38,32 +38,36 @@ For Windows + Docker self-hosted PostgreSQL, use `127.0.0.1` instead of `localho
 
 ```env
 DB_ENGINE=postgres
-DATABASE_URL=postgresql://chatbot:<strong-password>@127.0.0.1:5434/chatbot_prod
+DATABASE_URL=postgresql://chatbot:<strong-postgres-password>@127.0.0.1:5434/chatbot_prod
 ```
 
 Do not use:
 
 ```env
-DATABASE_URL=postgresql://chatbot:<strong-password>@localhost:5434/chatbot_prod
+DATABASE_URL=postgresql://chatbot:<strong-postgres-password>@localhost:5434/chatbot_prod
 ```
 
 `localhost` may be slow or hang on some Windows + Docker environments.
 
-### Current tested prod-style local URL
+### Current prod-style local URL format
 
-For the current self-hosted production-style test container, use:
+For the current self-hosted production-style container, use this format:
 
 ```env
 DB_ENGINE=postgres
-DATABASE_URL=postgresql://chatbot:Siriwattanachatbot@127.0.0.1:5434/chatbot_prod
+DATABASE_URL=postgresql://chatbot:<test-or-production-password>@127.0.0.1:5434/chatbot_prod
 ```
 
-This password is for testing only.
-
-For real production, replace it with a strong random password and update both:
+For real production, replace `<test-or-production-password>` with a strong random password and update both:
 
 - `POSTGRES_PASSWORD`
 - `DATABASE_URL`
+
+Generate a strong password:
+
+```cmd
+python -c "import secrets; print(secrets.token_urlsafe(32))"
+```
 
 ---
 
@@ -119,16 +123,25 @@ siriwattana-postgres-prod
 
 ---
 
-## 3. Deploy from main after merge
+## 3. Deploy from main
 
-If this branch has been merged into `main`, production deployment can use:
+Production deployment should use `main`.
 
 ```cmd
 git checkout main
 git pull origin main
+git status
 ```
 
-If deploying directly from the PostgreSQL migration branch:
+Expected:
+
+```text
+On branch main
+Your branch is up to date with 'origin/main'.
+nothing to commit, working tree clean
+```
+
+If temporarily deploying directly from the PostgreSQL migration branch:
 
 ```cmd
 git checkout migrate-postgresql-pgvector
@@ -149,21 +162,62 @@ For production-style PostgreSQL:
 
 ```cmd
 set DB_ENGINE=postgres
-set DATABASE_URL=postgresql://chatbot:<strong-password>@127.0.0.1:5434/chatbot_prod
+set DATABASE_URL=postgresql://chatbot:<strong-postgres-password>@127.0.0.1:5434/chatbot_prod
 ```
 
-For current test password only:
+For real production, replace `<strong-postgres-password>` with a strong random password.
 
-```cmd
-set DB_ENGINE=postgres
-set DATABASE_URL=postgresql://chatbot:Siriwattanachatbot@127.0.0.1:5434/chatbot_prod
-```
-
-For real production, replace password with a strong random password.
+Do not commit real production secrets to Git.
 
 ---
 
-## 5. Validate PostgreSQL Connection
+## 5. Production `.env` Template
+
+Create or update:
+
+```text
+backend\.env
+```
+
+Example:
+
+```env
+OPENAI_API_KEY=<real-openai-api-key>
+
+JWT_SECRET=<strong-random-secret-at-least-32-characters>
+JWT_EXPIRES_HOURS=8
+
+DB_ENGINE=postgres
+DATABASE_URL=postgresql://chatbot:<strong-postgres-password>@127.0.0.1:5434/chatbot_prod
+
+SIMILARITY_THRESHOLD=0.6
+
+LLM_MODEL=gpt-4o-mini
+
+EMBEDDING_MODEL=text-embedding-3-large
+EMBEDDING_DIM=1024
+
+CORS_ORIGIN=http://<production-frontend-host>
+
+UPLOAD_DIR=./data/uploads
+```
+
+Generate a strong `JWT_SECRET`:
+
+```cmd
+python -c "import secrets; print(secrets.token_urlsafe(48))"
+```
+
+Important:
+
+```text
+Do not use example secrets in production.
+Do not commit backend\.env to Git.
+```
+
+---
+
+## 6. Validate PostgreSQL Connection
 
 From project root:
 
@@ -198,7 +252,7 @@ vector
 
 ---
 
-## 6. Start Backend Manually
+## 7. Start Backend Manually
 
 Open a dedicated backend terminal:
 
@@ -207,7 +261,7 @@ cd /d C:\Users\MIS-BPK\Desktop\siriwattana_\siriwattana_bot\backend
 .venv\Scripts\activate
 
 set DB_ENGINE=postgres
-set DATABASE_URL=postgresql://chatbot:<strong-password>@127.0.0.1:5434/chatbot_prod
+set DATABASE_URL=postgresql://chatbot:<strong-postgres-password>@127.0.0.1:5434/chatbot_prod
 
 python -c "from auth import use_postgres_auth; print(use_postgres_auth())"
 
@@ -221,11 +275,11 @@ True
 Application startup complete.
 ```
 
-For real production, prefer running backend through a service manager or Docker Compose instead of manual terminal.
+For real production, prefer running backend through a service manager or Docker Compose instead of a manual terminal.
 
 ---
 
-## 7. Check Backend API
+## 8. Check Backend API
 
 From another terminal:
 
@@ -241,12 +295,14 @@ HTTP/1.1 200 OK
 
 ---
 
-## 8. Login Test User
+## 9. Login Test User
+
+Use an existing test user only for validation.
 
 ```cmd
 curl.exe -X POST "http://localhost:8010/auth/login" ^
   -H "Content-Type: application/x-www-form-urlencoded" ^
-  -d "username=pgprodtest8&password=pgtest123"
+  -d "username=<test-username>&password=<test-password>"
 ```
 
 Set token:
@@ -264,7 +320,7 @@ curl.exe -X GET "http://localhost:8010/auth/me" ^
 
 ---
 
-## 9. Test RAG Chat
+## 10. Test RAG Chat
 
 ```cmd
 curl.exe -X POST "http://localhost:8010/chat" ^
@@ -281,7 +337,7 @@ Expected:
 
 ---
 
-## 10. Check Production Data
+## 11. Check Production Data
 
 Users:
 
@@ -315,7 +371,7 @@ docker exec -it siriwattana-postgres-prod psql -U chatbot -d chatbot_prod -c "SE
 
 ---
 
-## 11. Backup PostgreSQL
+## 12. Backup PostgreSQL
 
 Run production PostgreSQL backup script:
 
@@ -343,7 +399,7 @@ backups\chatbot_prod_backup_YYYY-MM-DD_HHMMSS.sql
 
 ---
 
-## 12. Backup Uploads
+## 13. Backup Uploads
 
 Run uploads backup script:
 
@@ -365,7 +421,7 @@ backups\uploads_YYYY-MM-DD_HHMMSS
 
 ---
 
-## 13. Backup All
+## 14. Backup All
 
 Run both database and uploads backup:
 
@@ -391,7 +447,7 @@ PostgreSQL backup alone is not enough because uploaded files are stored on disk.
 
 ---
 
-## 14. Restore Test
+## 15. Restore Test
 
 Never restore directly into `chatbot_prod` without testing first.
 
@@ -417,7 +473,7 @@ docker exec -it siriwattana-postgres-prod psql -U chatbot -d postgres -c "DROP D
 
 ---
 
-## 15. Stop Backend
+## 16. Stop Backend
 
 If backend is running manually in CMD:
 
@@ -439,7 +495,7 @@ taskkill /PID <PID> /F
 
 ---
 
-## 16. Stop PostgreSQL Container
+## 17. Stop PostgreSQL Container
 
 ```cmd
 docker stop siriwattana-postgres-prod
@@ -453,7 +509,7 @@ docker stop siriwattana-postgres-local
 
 ---
 
-## 17. Restart PostgreSQL Container
+## 18. Restart PostgreSQL Container
 
 ```cmd
 docker restart siriwattana-postgres-prod
@@ -467,7 +523,7 @@ docker ps
 
 ---
 
-## 18. Troubleshooting
+## 19. Troubleshooting
 
 ### Backend cannot connect to PostgreSQL
 
@@ -558,7 +614,7 @@ python -c "import sys; sys.path.insert(0,'backend'); from rag import add_knowled
 
 ---
 
-## 19. Daily Operation Checklist
+## 20. Daily Operation Checklist
 
 Recommended daily checks:
 
@@ -586,13 +642,14 @@ docker system df
 
 ---
 
-## 20. Important Notes
+## 21. Important Notes
 
 - Use `127.0.0.1` for Docker PostgreSQL connection on Windows.
 - Do not use `localhost:5434` for the PostgreSQL Docker connection on Windows.
 - Do not commit real `.env` secrets.
-- Production must use strong PostgreSQL password.
-- Production must use strong `JWT_SECRET`.
+- Do not commit real API keys, JWT secrets, or database passwords.
+- Production must use a strong PostgreSQL password.
+- Production must use a strong `JWT_SECRET`.
 - PostgreSQL backup does not include uploaded files.
 - Uploads must be backed up separately.
 - Restore should be tested before real recovery.
