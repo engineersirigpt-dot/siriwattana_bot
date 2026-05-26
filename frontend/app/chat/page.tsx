@@ -164,6 +164,7 @@ export default function ChatPage() {
   const [typedChars, setTypedChars] = useState(0);
   const scrollRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
     if (!getToken()) {
@@ -182,6 +183,23 @@ export default function ChatPage() {
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
   }, [messages, typedChars, sending]);
+
+  // Auto-resize chat input textarea based on content (capped at ~10 lines).
+  useEffect(() => {
+    const ta = inputRef.current;
+    if (!ta) return;
+    ta.style.height = "auto";
+    ta.style.height = `${Math.min(ta.scrollHeight, 240)}px`;
+  }, [input]);
+
+  function handleInputKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
+    // Enter alone sends; Shift+Enter inserts newline.
+    // isComposing prevents accidental send while typing Thai via IME.
+    if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
+      e.preventDefault();
+      e.currentTarget.closest("form")?.requestSubmit();
+    }
+  }
 
   // Typewriter effect — only animates the currently-streaming bot message.
   useEffect(() => {
@@ -899,7 +917,7 @@ export default function ChatPage() {
                 ))}
               </div>
             )}
-            <div className="flex gap-3 items-center">
+            <div className="flex gap-3 items-end">
               <input
                 ref={fileInputRef}
                 type="file"
@@ -917,19 +935,21 @@ export default function ChatPage() {
               >
                 <Paperclip size={20} />
               </button>
-              <input
-                type="text"
+              <textarea
+                ref={inputRef}
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
+                onKeyDown={handleInputKeyDown}
+                rows={1}
                 placeholder={
                   readOnlyOwner
                     ? "ไม่สามารถส่งข้อความในโหมดอ่านได้"
                     : pendingFiles.length > 0
-                    ? "เขียนคำถามเกี่ยวกับไฟล์ (หรือเว้นว่างก็ได้)"
-                    : "พิมพ์คำถาม…"
+                    ? "เขียนคำถามเกี่ยวกับไฟล์ (Shift+Enter ขึ้นบรรทัดใหม่)"
+                    : "พิมพ์คำถาม… (Shift+Enter ขึ้นบรรทัดใหม่)"
                 }
                 disabled={sending || !!readOnlyOwner}
-                className="flex-1 px-6 py-4 bg-gray-50 border border-gray-200 rounded-2xl focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-transparent transition-all disabled:opacity-60 disabled:cursor-not-allowed"
+                className="flex-1 px-6 py-4 bg-gray-50 border border-gray-200 rounded-2xl focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-transparent transition-all disabled:opacity-60 disabled:cursor-not-allowed resize-none overflow-y-auto leading-6"
               />
               <button
                 type="submit"
@@ -938,7 +958,7 @@ export default function ChatPage() {
                   !!readOnlyOwner ||
                   (!input.trim() && pendingFiles.length === 0)
                 }
-                className="px-8 py-4 bg-gradient-to-r from-purple-400 to-purple-500 text-white rounded-2xl hover:from-purple-500 hover:to-purple-600 transition-all shadow-md hover:shadow-lg transform hover:-translate-y-0.5 flex items-center gap-2 disabled:opacity-60 disabled:transform-none disabled:cursor-not-allowed"
+                className="flex-shrink-0 px-8 py-4 bg-gradient-to-r from-purple-400 to-purple-500 text-white rounded-2xl hover:from-purple-500 hover:to-purple-600 transition-all shadow-md hover:shadow-lg transform hover:-translate-y-0.5 flex items-center gap-2 disabled:opacity-60 disabled:transform-none disabled:cursor-not-allowed"
               >
                 <Send size={20} />
                 <span>ส่ง</span>
