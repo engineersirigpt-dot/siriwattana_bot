@@ -13,7 +13,7 @@ UPLOAD_DIR = Path(os.getenv("UPLOAD_DIR", "./data/uploads"))
 MAX_FILE_BYTES = 100 * 1024 * 1024  # 100MB
 SPARSE_TEXT_THRESHOLD = 100  # if PDF extracts < this many chars, treat as scanned
 MAX_PDF_PAGES_AS_IMAGES = 50
-PDF_RENDER_DPI = 100  # JPEG @ 100 DPI keeps payload under OpenAI vision gateway limit
+PDF_RENDER_DPI = 130  # JPEG @ 130 DPI balances small-text legibility vs OpenAI vision payload size
 PDF_JPEG_QUALITY = 85  # good OCR quality, ~5-10x smaller than PNG
 MAX_EXTRACT_CHARS = 500_000
 
