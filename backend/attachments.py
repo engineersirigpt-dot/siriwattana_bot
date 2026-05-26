@@ -10,11 +10,11 @@ import fitz  # PyMuPDF
 from fastapi import HTTPException, UploadFile
 
 UPLOAD_DIR = Path(os.getenv("UPLOAD_DIR", "./data/uploads"))
-MAX_FILE_BYTES = 10 * 1024 * 1024  # 10MB
+MAX_FILE_BYTES = 100 * 1024 * 1024  # 100MB
 SPARSE_TEXT_THRESHOLD = 100  # if PDF extracts < this many chars, treat as scanned
-MAX_PDF_PAGES_AS_IMAGES = 5
+MAX_PDF_PAGES_AS_IMAGES = 50
 PDF_RENDER_DPI = 150
-MAX_EXTRACT_CHARS = 60_000
+MAX_EXTRACT_CHARS = 500_000
 
 IMAGE_TYPES = {"image/jpeg", "image/jpg", "image/png", "image/webp", "image/gif"}
 PDF_TYPES = {"application/pdf"}
@@ -135,7 +135,7 @@ async def save_upload(upload: UploadFile) -> tuple[str, str, int, str]:
                 if size > MAX_FILE_BYTES:
                     f.close()
                     file_path.unlink(missing_ok=True)
-                    raise HTTPException(400, "ไฟล์ใหญ่เกิน 10MB")
+                    raise HTTPException(400, "ไฟล์ใหญ่เกิน 100MB")
                 f.write(chunk)
     except HTTPException:
         raise

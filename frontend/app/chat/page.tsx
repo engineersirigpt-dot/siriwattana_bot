@@ -279,8 +279,8 @@ export default function ChatPage() {
     const valid: File[] = [];
 
     for (const f of files) {
-      if (f.size > 10 * 1024 * 1024) {
-        setAlertMsg(`ไฟล์ "${f.name}" ใหญ่เกิน 10MB`);
+      if (f.size > 100 * 1024 * 1024) {
+        setAlertMsg(`ไฟล์ "${f.name}" ใหญ่เกิน 100MB`);
         continue;
       }
 
