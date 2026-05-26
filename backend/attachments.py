@@ -13,7 +13,8 @@ UPLOAD_DIR = Path(os.getenv("UPLOAD_DIR", "./data/uploads"))
 MAX_FILE_BYTES = 100 * 1024 * 1024  # 100MB
 SPARSE_TEXT_THRESHOLD = 100  # if PDF extracts < this many chars, treat as scanned
 MAX_PDF_PAGES_AS_IMAGES = 50
-PDF_RENDER_DPI = 150
+PDF_RENDER_DPI = 100  # JPEG @ 100 DPI keeps payload under OpenAI vision gateway limit
+PDF_JPEG_QUALITY = 85  # good OCR quality, ~5-10x smaller than PNG
 MAX_EXTRACT_CHARS = 500_000
 
 IMAGE_TYPES = {"image/jpeg", "image/jpg", "image/png", "image/webp", "image/gif"}
@@ -404,9 +405,9 @@ def render_pdf_pages_as_images(
                 break
 
             pix = page.get_pixmap(matrix=matrix, alpha=False)
-            buf = io.BytesIO(pix.tobytes("png"))
+            buf = io.BytesIO(pix.tobytes("jpeg", jpg_quality=PDF_JPEG_QUALITY))
             b64 = base64.b64encode(buf.getvalue()).decode("ascii")
-            urls.append(f"data:image/png;base64,{b64}")
+            urls.append(f"data:image/jpeg;base64,{b64}")
 
         doc.close()
     except HTTPException:
