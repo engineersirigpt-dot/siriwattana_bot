@@ -53,7 +53,7 @@ export default function LoginPage() {
         {/* Title */}
         <div className="text-center mb-8">
           <h1 className="text-2xl font-medium mb-2 bg-gradient-to-r from-purple-500 to-purple-700 bg-clip-text text-transparent">
-            {mode === "login" ? "ระบบแชทบอทบริษัท" : "สมัครสมาชิก"}
+            Sirivatana AI Chatbot
           </h1>
           <p className="text-gray-600 text-sm">
             {mode === "login"

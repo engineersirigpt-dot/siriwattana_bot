@@ -10,8 +10,8 @@ const notoThai = Noto_Sans_Thai_Looped({
 });
 
 export const metadata: Metadata = {
-  title: "Siriwattan Chatbot",
-  description: "ผู้ช่วย AI ภายในบริษัท",
+  title: "Sirivatana AI Chatbot",
+  description: "ผู้ช่วย AI ภายในบริษัท ศิริวัฒนาอินเตอร์พริ้นท์",
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
