@@ -106,6 +106,59 @@ def save_chat_message_pg(
     return message_id
 
 
+def purge_unsaved_sessions_pg(user_id: int, keep: int) -> tuple[int, list[str]]:
+    """
+    Delete unsaved chat_sessions for `user_id` beyond the `keep` most-recent.
+    Returns (sessions_deleted, file_paths) so the caller can unlink files from disk.
+    """
+    with get_pg_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id FROM chat_sessions
+                WHERE user_id = %s AND is_saved = false
+                ORDER BY updated_at DESC
+                OFFSET %s
+                """,
+                (user_id, keep),
+            )
+            expired_ids = [row[0] for row in cur.fetchall()]
+
+            if not expired_ids:
+                return 0, []
+
+            cur.execute(
+                """
+                SELECT a.file_path
+                FROM attachments a
+                JOIN chat_history h ON h.id = a.message_id
+                WHERE h.session_id = ANY(%s)
+                """,
+                (expired_ids,),
+            )
+            file_paths = [row[0] for row in cur.fetchall()]
+
+            cur.execute(
+                """
+                DELETE FROM attachments
+                WHERE message_id IN (
+                    SELECT id FROM chat_history WHERE session_id = ANY(%s)
+                )
+                """,
+                (expired_ids,),
+            )
+            cur.execute(
+                "DELETE FROM chat_history WHERE session_id = ANY(%s)",
+                (expired_ids,),
+            )
+            cur.execute(
+                "DELETE FROM chat_sessions WHERE id = ANY(%s)",
+                (expired_ids,),
+            )
+
+    return len(expired_ids), file_paths
+
+
 def list_sessions_pg(user_id: int) -> list[dict]:
     with get_pg_conn() as conn:
         with conn.cursor() as cur:
@@ -169,30 +222,42 @@ def get_session_messages_pg(session_id: int, user_id: int) -> dict | None:
 
             cur.execute(
                 """
-                SELECT id, question, answer, source, asked_at
-                FROM chat_history
-                WHERE session_id = %s
-                ORDER BY id ASC
+                SELECT h.id, h.question, h.answer, h.source, h.asked_at,
+                       a.id, a.filename, a.content_type, a.size_bytes
+                FROM chat_history h
+                LEFT JOIN attachments a ON a.message_id = h.id
+                WHERE h.session_id = %s
+                ORDER BY h.id ASC, a.id ASC
                 """,
                 (session_id,),
             )
-            messages = cur.fetchall()
+            rows = cur.fetchall()
 
-    return {
-        "id": session[0],
-        "title": session[1],
-        "created_at": session[2].isoformat() if session[2] else None,
-        "messages": [
-            {
-                "id": row[0],
+    messages: dict[int, dict] = {}
+    for row in rows:
+        msg_id = row[0]
+        if msg_id not in messages:
+            messages[msg_id] = {
+                "id": msg_id,
                 "question": row[1],
                 "answer": row[2],
                 "source": row[3],
                 "asked_at": row[4].isoformat() if row[4] else None,
                 "attachments": [],
             }
-            for row in messages
-        ],
+        if row[5] is not None:
+            messages[msg_id]["attachments"].append({
+                "id": row[5],
+                "filename": row[6],
+                "content_type": row[7],
+                "size_bytes": row[8],
+            })
+
+    return {
+        "id": session[0],
+        "title": session[1],
+        "created_at": session[2].isoformat() if session[2] else None,
+        "messages": list(messages.values()),
     }
 def rename_session_pg(session_id: int, user_id: int, title: str) -> bool:
     with get_pg_conn() as conn:
@@ -228,7 +293,12 @@ def toggle_save_session_pg(session_id: int, user_id: int, is_saved: bool) -> boo
     return updated > 0
 
 
-def delete_session_pg(session_id: int, user_id: int) -> bool:
+def delete_session_pg(session_id: int, user_id: int) -> list[str] | None:
+    """
+    Delete a chat session and return file paths of attachments so the caller can
+    unlink them from disk. Returns None if the session does not belong to the user.
+    Returns an empty list when there are no attachments.
+    """
     with get_pg_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -239,10 +309,19 @@ def delete_session_pg(session_id: int, user_id: int) -> bool:
                 """,
                 (session_id, user_id),
             )
-            owned = cur.fetchone()
+            if not cur.fetchone():
+                return None
 
-            if not owned:
-                return False
+            cur.execute(
+                """
+                SELECT a.file_path
+                FROM attachments a
+                JOIN chat_history h ON h.id = a.message_id
+                WHERE h.session_id = %s
+                """,
+                (session_id,),
+            )
+            file_paths = [row[0] for row in cur.fetchall()]
 
             cur.execute(
                 """
@@ -268,7 +347,7 @@ def delete_session_pg(session_id: int, user_id: int) -> bool:
                 (session_id, user_id),
             )
 
-    return True
+    return file_paths
 import csv
 import io
 

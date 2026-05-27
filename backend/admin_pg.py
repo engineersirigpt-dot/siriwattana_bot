@@ -193,14 +193,36 @@ def admin_session_messages_pg(session_id: int) -> dict | None:
 
             cur.execute(
                 """
-                SELECT id, question, answer, source, asked_at
-                FROM chat_history
-                WHERE session_id = %s
-                ORDER BY id ASC
+                SELECT h.id, h.question, h.answer, h.source, h.asked_at,
+                       a.id, a.filename, a.content_type, a.size_bytes
+                FROM chat_history h
+                LEFT JOIN attachments a ON a.message_id = h.id
+                WHERE h.session_id = %s
+                ORDER BY h.id ASC, a.id ASC
                 """,
                 (session_id,),
             )
-            messages = cur.fetchall()
+            rows = cur.fetchall()
+
+    messages: dict[int, dict] = {}
+    for row in rows:
+        msg_id = row[0]
+        if msg_id not in messages:
+            messages[msg_id] = {
+                "id": msg_id,
+                "question": row[1],
+                "answer": row[2],
+                "source": row[3],
+                "asked_at": row[4].isoformat() if row[4] else None,
+                "attachments": [],
+            }
+        if row[5] is not None:
+            messages[msg_id]["attachments"].append({
+                "id": row[5],
+                "filename": row[6],
+                "content_type": row[7],
+                "size_bytes": row[8],
+            })
 
     return {
         "id": session[0],
@@ -208,17 +230,7 @@ def admin_session_messages_pg(session_id: int) -> dict | None:
         "user_id": session[2],
         "username": session[3],
         "created_at": session[4].isoformat() if session[4] else None,
-        "messages": [
-            {
-                "id": row[0],
-                "question": row[1],
-                "answer": row[2],
-                "source": row[3],
-                "asked_at": row[4].isoformat() if row[4] else None,
-                "attachments": [],
-            }
-            for row in messages
-        ],
+        "messages": list(messages.values()),
     }
 
 

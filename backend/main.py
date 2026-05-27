@@ -49,7 +49,7 @@ from rag import add_knowledge, embed, log_pending_question, resolve_pending, sea
 
 limiter = Limiter(key_func=get_remote_address)
 
-app = FastAPI(title="Siriwattan Chatbot API")
+app = FastAPI(title="Sirivatana AI Chatbot API")
 app.state.limiter = limiter
 
 
@@ -364,99 +364,6 @@ async def chat(
             )
 
         if use_postgres_auth():
-        
-            from chat_pg import (
-                ensure_session_pg,
-                get_session_history_pg,
-                save_attachment_pg,
-                save_chat_message_pg,
-            )
-
-            sid, stitle = ensure_session_pg(
-                user_id=user["id"],
-                session_id=session_id,
-                first_question=question or saved_files[0]["filename"],
-            )
-
-            history = get_session_history_pg(
-                session_id=session_id,
-                user_id=user["id"],
-                limit=HISTORY_TURNS,
-            )
-
-
-            if saved_files:
-                image_urls: list[str] = []
-                text_attachments: list[tuple[str, str]] = []
-
-                for sf in saved_files:
-                    if att.is_image(sf["content_type"]):
-                        image_urls.append(
-                            att.encode_image_data_url(sf["file_path"], sf["content_type"])
-                        )
-                        sf["extracted_text"] = None
-                        continue
-
-                    extracted = att.extract_any_text(
-                        sf["file_path"], sf["content_type"], sf["filename"]
-                    )
-
-                    sf["extracted_text"] = extracted if extracted.strip() else None
-
-                    if att.is_pdf(sf["content_type"]) and att.is_text_sparse(extracted):
-                        rendered = att.render_pdf_pages_as_images(sf["file_path"])
-                        image_urls.extend(rendered)
-
-                        if extracted.strip():
-                            text_attachments.append((sf["filename"], extracted))
-                    elif extracted.strip():
-                        text_attachments.append((sf["filename"], extracted))
-
-                prompt_question = question or "ช่วยอธิบายเนื้อหาในไฟล์ที่แนบ และให้คำแนะนำที่เกี่ยวข้อง"
-                answer = answer_with_files(
-                    prompt_question,
-                    image_urls,
-                    text_attachments,
-                    history=history,
-                )
-                source = "files"
-                knowledge_id = None
-                similarity = None
-
-        else:
-            category = classify_query(question)
-            chosen_model = LLM_MODEL_CALC if category == "calc" else LLM_MODEL
-
-            vec = embed(question)
-            hit = search_knowledge(vec)
-
-            if hit:
-                answer = answer_from_context(
-                    question,
-                    hit["question"],
-                    hit["answer"],
-                    model=chosen_model,
-                    history=history,
-                )
-                source = "rag" if category == "general" else "rag-calc"
-                knowledge_id = hit["id"]
-                similarity = hit["similarity"]
-            else:
-                log_pending_question(question, vec)
-
-                audit_log(
-                    "pending_question_created",
-                    user=user,
-                    detail={"question": question[:300], "db_engine": "postgres"},
-                    request=request,
-                )
-
-                answer = answer_freely(question, model=chosen_model, history=history)
-                source = "llm" if category == "general" else "llm-calc"
-                knowledge_id = None
-                similarity = None
-
-        if use_postgres_auth():
             from chat_pg import (
                 ensure_session_pg,
                 get_session_history_pg,
@@ -748,10 +655,15 @@ async def chat(
 @app.get("/attachments/{aid}")
 @limiter.limit("60/minute")
 def get_attachment(request: Request, aid: int, user: dict = Depends(current_user)):
-    row = get_db().execute(
-        "SELECT user_id, filename, content_type, file_path FROM attachments WHERE id = ?",
-        (aid,),
-    ).fetchone()
+    if use_postgres_auth():
+        from chat_pg import get_attachment_pg
+
+        row = get_attachment_pg(aid)
+    else:
+        row = get_db().execute(
+            "SELECT user_id, filename, content_type, file_path FROM attachments WHERE id = ?",
+            (aid,),
+        ).fetchone()
 
     if not row:
         raise HTTPException(404, "attachment not found")
@@ -856,7 +768,20 @@ def _purge_unsaved_sessions(conn, user_id: int) -> None:
 @app.get("/chat/sessions")
 def list_sessions(user: dict = Depends(current_user)):
     if use_postgres_auth():
-        from chat_pg import list_sessions_pg
+        from chat_pg import list_sessions_pg, purge_unsaved_sessions_pg
+
+        sessions_deleted, file_paths = purge_unsaved_sessions_pg(user["id"], UNSAVED_LIMIT)
+        if sessions_deleted:
+            deleted_files = sum(1 for fp in file_paths if _safe_unlink_attachment(fp))
+            audit_log(
+                "unsaved_sessions_purged",
+                detail={
+                    "user_id": user["id"],
+                    "session_count": sessions_deleted,
+                    "deleted_files": deleted_files,
+                    "db_engine": "postgres",
+                },
+            )
 
         return list_sessions_pg(user["id"])
 
@@ -980,71 +905,28 @@ def delete_session(request: Request, session_id: int, user: dict = Depends(curre
     if use_postgres_auth():
         from chat_pg import delete_session_pg
 
-        deleted = delete_session_pg(session_id, user["id"])
-        if not deleted:
+        file_paths = delete_session_pg(session_id, user["id"])
+        if file_paths is None:
             raise HTTPException(404, "session not found")
+
+        deleted_files = 0
+        for fp in file_paths:
+            if _safe_unlink_attachment(fp):
+                deleted_files += 1
 
         audit_log(
             "chat_session_deleted",
             user=user,
             detail={
                 "session_id": session_id,
-                "deleted_files": 0,
+                "deleted_files": deleted_files,
                 "db_engine": "postgres",
             },
             request=request,
         )
 
-        return {"ok": True, "deleted_files": 0}
+        return {"ok": True, "deleted_files": deleted_files}
 
-    conn = get_db()
-
-    owned = conn.execute(
-        "SELECT 1 FROM chat_sessions WHERE id = ? AND user_id = ?",
-        (session_id, user["id"]),
-    ).fetchone()
-
-    if not owned:
-        raise HTTPException(404, "session not found")
-
-    file_paths = [
-        r["file_path"]
-        for r in conn.execute(
-            """
-            SELECT a.file_path FROM attachments a
-            JOIN chat_history h ON h.id = a.message_id
-            WHERE h.session_id = ?
-            """,
-            (session_id,),
-        ).fetchall()
-    ]
-
-    conn.execute(
-        "DELETE FROM attachments WHERE message_id IN "
-        "(SELECT id FROM chat_history WHERE session_id = ?)",
-        (session_id,),
-    )
-    conn.execute("DELETE FROM chat_history WHERE session_id = ?", (session_id,))
-    conn.execute(
-        "DELETE FROM chat_sessions WHERE id = ? AND user_id = ?",
-        (session_id, user["id"]),
-    )
-    conn.commit()
-
-    deleted_files = 0
-
-    for fp in file_paths:
-        if _safe_unlink_attachment(fp):
-            deleted_files += 1
-
-    audit_log(
-        "chat_session_deleted",
-        user=user,
-        detail={"session_id": session_id, "deleted_files": deleted_files},
-        request=request,
-    )
-
-    return {"ok": True, "deleted_files": deleted_files}
     conn = get_db()
 
     owned = conn.execute(
