@@ -945,8 +945,8 @@ export default function ChatPage() {
                   readOnlyOwner
                     ? "ไม่สามารถส่งข้อความในโหมดอ่านได้"
                     : pendingFiles.length > 0
-                    ? "เขียนคำถามเกี่ยวกับไฟล์ (Shift+Enter ขึ้นบรรทัดใหม่)"
-                    : "พิมพ์คำถาม… (Shift+Enter ขึ้นบรรทัดใหม่)"
+                    ? "เขียนคำถามเกี่ยวกับไฟล์"
+                    : "พิมพ์คำถาม…"
                 }
                 disabled={sending || !!readOnlyOwner}
                 className="flex-1 px-6 py-4 bg-gray-50 border border-gray-200 rounded-2xl focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-transparent transition-all disabled:opacity-60 disabled:cursor-not-allowed resize-none overflow-y-auto leading-6"
@@ -964,6 +964,17 @@ export default function ChatPage() {
                 <span>ส่ง</span>
               </button>
             </div>
+            <p className="mt-2 text-xs text-gray-400 text-center">
+              กด{" "}
+              <kbd className="px-1.5 py-0.5 bg-gray-100 rounded text-gray-600 font-mono text-[10px]">
+                Enter
+              </kbd>{" "}
+              ส่ง • กด{" "}
+              <kbd className="px-1.5 py-0.5 bg-gray-100 rounded text-gray-600 font-mono text-[10px]">
+                Shift+Enter
+              </kbd>{" "}
+              ขึ้นบรรทัดใหม่
+            </p>
           </form>
         </div>
       </main>
