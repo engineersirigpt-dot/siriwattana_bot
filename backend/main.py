@@ -45,6 +45,7 @@ from llm import (
     classify_query,
 )
 from rag import add_knowledge, embed, log_pending_question, resolve_pending, search_knowledge
+from sensitive import BLOCKED_RESPONSE, is_sensitive
 
 
 limiter = Limiter(key_func=get_remote_address)
@@ -333,6 +334,29 @@ async def chat(
 
     if not question and not files:
         raise HTTPException(400, "empty message")
+
+    # Pre-filter: block sensitive questions before any upload / RAG / LLM call.
+    # Saves OpenAI tokens and prevents the chatbot from ever attempting to answer.
+    matched_kw = is_sensitive(question)
+    if matched_kw is not None:
+        audit_log(
+            "sensitive_blocked",
+            user=user,
+            detail={
+                "matched_keyword": matched_kw,
+                "message_length": len(question),
+                "had_files": bool(files),
+            },
+            request=request,
+        )
+        return ChatResponse(
+            answer=BLOCKED_RESPONSE,
+            source="blocked",
+            similarity=None,
+            session_id=session_id or 0,
+            session_title="",
+            attachments=[],
+        )
 
     saved_files: list[dict] = []
 
