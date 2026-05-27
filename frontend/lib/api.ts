@@ -67,6 +67,7 @@ export async function sendChat(opts: {
   message: string;
   sessionId: number | null;
   files: File[];
+  signal?: AbortSignal;
 }): Promise<{
   answer: string;
   source: string;
@@ -84,6 +85,7 @@ export async function sendChat(opts: {
     method: "POST",
     headers: token ? { Authorization: `Bearer ${token}` } : undefined,
     body: fd,
+    signal: opts.signal,
   });
   if (!res.ok) {
     const text = await res.text();

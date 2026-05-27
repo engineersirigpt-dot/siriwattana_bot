@@ -21,6 +21,7 @@ import {
   Search,
   Send,
   Settings,
+  Square,
   Trash2,
   Users,
   X,
@@ -165,6 +166,7 @@ export default function ChatPage() {
   const scrollRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const abortRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
     if (!getToken()) {
@@ -390,11 +392,16 @@ export default function ChatPage() {
     setInput("");
     setPendingFiles([]);
     setSending(true);
+
+    const controller = new AbortController();
+    abortRef.current = controller;
+
     try {
       const res = await sendChat({
         message: text,
         sessionId: currentSid,
         files: filesToSend,
+        signal: controller.signal,
       });
       let newBotIdx = 0;
       setMessages((m) => {
@@ -413,13 +420,25 @@ export default function ChatPage() {
       refreshSessions();
       if (role === "admin") refreshTeamSessions();
     } catch (e: unknown) {
+      const isAbort =
+        e instanceof DOMException && e.name === "AbortError";
       setMessages((m) => [
         ...m,
-        { role: "bot", text: `เกิดข้อผิดพลาด: ${e instanceof Error ? e.message : ""}` },
+        {
+          role: "bot",
+          text: isAbort
+            ? "ยกเลิกการถามแล้ว"
+            : `เกิดข้อผิดพลาด: ${e instanceof Error ? e.message : ""}`,
+        },
       ]);
     } finally {
       setSending(false);
+      abortRef.current = null;
     }
+  }
+
+  function cancelSend() {
+    abortRef.current?.abort();
   }
 
   async function performRename(sid: number, newTitle: string) {
@@ -951,18 +970,29 @@ export default function ChatPage() {
                 disabled={sending || !!readOnlyOwner}
                 className="flex-1 px-6 py-4 bg-gray-50 border border-gray-200 rounded-2xl focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-transparent transition-all disabled:opacity-60 disabled:cursor-not-allowed resize-none overflow-y-auto leading-6"
               />
-              <button
-                type="submit"
-                disabled={
-                  sending ||
-                  !!readOnlyOwner ||
-                  (!input.trim() && pendingFiles.length === 0)
-                }
-                className="flex-shrink-0 px-8 py-4 bg-gradient-to-r from-purple-400 to-purple-500 text-white rounded-2xl hover:from-purple-500 hover:to-purple-600 transition-all shadow-md hover:shadow-lg transform hover:-translate-y-0.5 flex items-center gap-2 disabled:opacity-60 disabled:transform-none disabled:cursor-not-allowed"
-              >
-                <Send size={20} />
-                <span>ส่ง</span>
-              </button>
+              {sending ? (
+                <button
+                  type="button"
+                  onClick={cancelSend}
+                  className="flex-shrink-0 px-8 py-4 bg-red-500 hover:bg-red-600 text-white rounded-2xl transition-all shadow-md hover:shadow-lg flex items-center gap-2"
+                  title="หยุด AI"
+                >
+                  <Square size={18} fill="currentColor" />
+                  <span>หยุด</span>
+                </button>
+              ) : (
+                <button
+                  type="submit"
+                  disabled={
+                    !!readOnlyOwner ||
+                    (!input.trim() && pendingFiles.length === 0)
+                  }
+                  className="flex-shrink-0 px-8 py-4 bg-gradient-to-r from-purple-400 to-purple-500 text-white rounded-2xl hover:from-purple-500 hover:to-purple-600 transition-all shadow-md hover:shadow-lg transform hover:-translate-y-0.5 flex items-center gap-2 disabled:opacity-60 disabled:transform-none disabled:cursor-not-allowed"
+                >
+                  <Send size={20} />
+                  <span>ส่ง</span>
+                </button>
+              )}
             </div>
             <p className="mt-2 text-xs text-gray-400 text-center">
               กด{" "}
