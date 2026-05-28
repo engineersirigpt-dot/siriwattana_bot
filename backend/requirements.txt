@@ -51,3 +51,4 @@ wrapt==2.1.2
 xlsxwriter==3.2.9
 psycopg[binary]
 pgvector
+pymssql

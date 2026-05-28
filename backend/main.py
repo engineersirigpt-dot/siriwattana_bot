@@ -191,9 +191,42 @@ def register(request: Request, form: OAuth2PasswordRequestForm = Depends()):
 @app.post("/auth/login")
 @limiter.limit("10/minute")
 def login(request: Request, form: OAuth2PasswordRequestForm = Depends()):
+    from auth_mssql import authenticate_company_user, mssql_enabled
+
+    # ── 1. เช็ค MSSQL บริษัทก่อน (ถ้าเปิดใช้งาน) ──────────────────────────
+    if mssql_enabled():
+        company_user = authenticate_company_user(form.username, form.password)
+        if company_user:
+            # sync/สร้าง user ใน local DB เพื่อให้ session ทำงานได้
+            conn = get_db()
+            local = conn.execute(
+                "SELECT id, username, role FROM users WHERE username = ?",
+                (form.username,),
+            ).fetchone()
+            if not local:
+                conn.execute(
+                    "INSERT INTO users (username, password_hash, role) VALUES (?, ?, ?)",
+                    (form.username, "mssql-auth", "user"),
+                )
+                conn.commit()
+                local = conn.execute(
+                    "SELECT id, username, role FROM users WHERE username = ?",
+                    (form.username,),
+                ).fetchone()
+
+            token = create_token(local["id"], local["username"], local["role"])
+            audit_log("login_success", user=dict(local),
+                      detail={"source": "mssql"}, request=request)
+            return {
+                "access_token": token,
+                "token_type": "bearer",
+                "username": local["username"],
+                "role": local["role"],
+            }
+
+    # ── 2. Fallback — เช็ค local DB (สำหรับ admin) ──────────────────────────
     if use_postgres_auth():
         from auth_pg import get_user_by_username_pg
-
         row = get_user_by_username_pg(form.username)
     else:
         row = get_db().execute(
@@ -204,22 +237,14 @@ def login(request: Request, form: OAuth2PasswordRequestForm = Depends()):
     if not row or not verify_password(form.password, row["password_hash"]):
         audit_log(
             "login_failed",
-            detail={
-                "username": form.username,
-                "db_engine": "postgres" if use_postgres_auth() else "sqlite",
-            },
+            detail={"username": form.username},
             request=request,
         )
         raise HTTPException(401, "invalid credentials")
 
     token = create_token(row["id"], row["username"], row["role"])
-
-    audit_log(
-        "login_success",
-        user={"id": row["id"], "username": row["username"], "role": row["role"]},
-        detail={"db_engine": "postgres" if use_postgres_auth() else "sqlite"},
-        request=request,
-    )
+    audit_log("login_success", user=dict(row),
+              detail={"source": "local"}, request=request)
 
     return {
         "access_token": token,
