@@ -576,13 +576,19 @@ def main() -> None:
         if not args.dir.is_dir():
             print(f"ERROR: not a directory: {args.dir}")
             sys.exit(1)
+        # Recursive: pick up files inside subfolders too.
         files = sorted(
-            p for p in args.dir.iterdir()
+            p for p in args.dir.rglob("*")
             if p.is_file() and p.suffix.lower() in EXTRACTORS
         )
-        print(f"Found {len(files)} supported file(s) in {args.dir}")
+        print(f"Found {len(files)} supported file(s) under {args.dir} (recursive)")
         for path in files:
-            print(f"\n--- {path.name} ---")
+            # Show relative path so subfolder context is visible.
+            try:
+                rel = path.relative_to(args.dir)
+            except ValueError:
+                rel = path
+            print(f"\n--- {rel} ---")
             try:
                 added, skipped = import_doc_chunks(path, admin, args.dept, source_label, metadata_map)
                 total_added += added
