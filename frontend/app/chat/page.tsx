@@ -558,8 +558,8 @@ export default function ChatPage() {
             onClick={() => newChat("company")}
             className="w-full flex items-center justify-center gap-2 bg-amber-400/30 hover:bg-amber-400/50 text-white py-3 px-4 rounded-xl transition-all backdrop-blur-sm border border-amber-200/40 shadow-lg"
           >
-            <span className="text-base">🏢</span>
-            <span>ถามข้อมูลบริษัท</span>
+            <span className="text-base">📘</span>
+            <span>คู่มือบริษัท</span>
           </button>
         </div>
 
@@ -822,12 +822,12 @@ export default function ChatPage() {
           <div className="flex items-center gap-3">
             {chatMode === "company" && !readOnlyOwner && (
               <button
-                onClick={() => newChat("normal")}
+                onClick={() => setChatMode("normal")}
                 className="flex items-center gap-1.5 px-3 py-1.5 bg-amber-100 hover:bg-amber-200 text-amber-800 rounded-lg text-sm transition-all border border-amber-300"
-                title="ออกจากโหมดถามข้อมูลบริษัท"
+                title="ปิดโหมดคู่มือบริษัท (ยังอยู่ในแชทเดิม)"
               >
-                <span>🏢</span>
-                <span>โหมด: ถามข้อมูลบริษัท</span>
+                <span>📘</span>
+                <span>โหมด: คู่มือบริษัท</span>
                 <X size={14} />
               </button>
             )}
