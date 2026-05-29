@@ -13,10 +13,16 @@ Supports two input modes:
 
        python import_doc.py --file kb_sources/production/komori_manual.pdf --dept Production
        python import_doc.py --dir  kb_sources/HR                            --dept HR
+       python import_doc.py --dir  kb_sources/ISO9001 --auto-dept-from-subfolder
 
    The script extracts text from the file (PDF/DOCX/XLSX/PPTX), splits it
    into ~400-token chunks at paragraph boundaries, and imports each chunk
    as a knowledge entry.
+
+   --auto-dept-from-subfolder: for mixed-dept directories, tag each file
+   with its first-level subfolder name. E.g. ISO9001/HR/jd.docx → dept=HR,
+   ISO9001/QC/sop.pdf → dept=QC. Files directly under --dir fall back to
+   --dept. Excel metadata in --metadata still wins over both.
 
 Optional metadata Excel (--metadata kb_metadata.xlsx):
 
@@ -506,6 +512,16 @@ def main() -> None:
     g.add_argument("--file", type=Path, help="Single PDF/DOCX/XLSX/PPTX to chunk-import")
     g.add_argument("--dir", type=Path, help="Directory — import every supported file inside (non-recursive)")
     parser.add_argument("--dept", help="Department label, recorded in the `source` column (e.g. HR, Production)")
+    parser.add_argument(
+        "--auto-dept-from-subfolder",
+        action="store_true",
+        help=(
+            "Use the first-level subfolder name as the dept tag. "
+            "E.g. with --dir data/ISO9001, the file ISO9001/HR/jd.docx is tagged dept=HR, "
+            "ISO9001/QC/sop.pdf → dept=QC. Files directly under --dir (no subfolder) "
+            "fall back to --dept. Excel metadata always wins over both."
+        ),
+    )
     parser.add_argument("--metadata", type=Path, help="Optional Excel sheet with per-file metadata (see header docs above)")
     parser.add_argument("--dry-run", action="store_true", help="Show what would be imported, don't write to DB")
     args = parser.parse_args()
@@ -518,10 +534,18 @@ def main() -> None:
     source_label = f"kb_import:{args.dept}" if args.dept else "kb_import"
     print(f"DB_ENGINE:     {DB_ENGINE}")
     print(f"Admin:         {admin['username']} (id={admin['id']})")
-    print(f"Dept:          {args.dept or '(none)'}")
-    print(f"Source label:  {source_label}")
+    if args.auto_dept_from_subfolder:
+        print(f"Dept:          auto (subfolder name); fallback = {args.dept or '(none)'}")
+        print(f"Source label:  kb_import:<subfolder>  (varies per file)")
+    else:
+        print(f"Dept:          {args.dept or '(none)'}")
+        print(f"Source label:  {source_label}")
     print(f"Dry-run:       {args.dry_run}")
     print()
+
+    if args.auto_dept_from_subfolder and not args.dir:
+        print("WARNING: --auto-dept-from-subfolder only applies with --dir; ignoring.")
+        print()
 
     if args.dry_run:
         # Make BOTH add_knowledge and update_metadata into no-ops for dry-run.
@@ -593,9 +617,25 @@ def main() -> None:
                 rel = path.relative_to(args.dir)
             except ValueError:
                 rel = path
+
+            # Per-file dept resolution:
+            #   priority 1 (handled inside metadata_for_file): Excel metadata
+            #   priority 2: first-level subfolder name, if --auto-dept-from-subfolder
+            #   priority 3: --dept arg
+            file_dept = args.dept
+            if args.auto_dept_from_subfolder:
+                rel_parts = rel.parts if rel != path else ()
+                if len(rel_parts) > 1:
+                    file_dept = rel_parts[0]
+            file_source_label = (
+                f"kb_import:{file_dept}" if file_dept else "kb_import"
+            )
+
             print(f"\n--- {rel} ---")
+            if args.auto_dept_from_subfolder and file_dept != args.dept:
+                print(f"  (dept = {file_dept} from subfolder)")
             try:
-                added, skipped = import_doc_chunks(path, admin, args.dept, source_label, metadata_map)
+                added, skipped = import_doc_chunks(path, admin, file_dept, file_source_label, metadata_map)
                 total_added += added
                 total_skipped += skipped
             except Exception as exc:
