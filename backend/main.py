@@ -44,6 +44,7 @@ from llm import (
     answer_with_files,
     classify_query,
 )
+from mi_auth import mi_enabled, verify_mi_credentials
 from rag import add_knowledge, embed, log_pending_question, resolve_pending, search_knowledge
 from sensitive import BLOCKED_RESPONSE, is_sensitive
 
@@ -191,42 +192,10 @@ def register(request: Request, form: OAuth2PasswordRequestForm = Depends()):
 @app.post("/auth/login")
 @limiter.limit("10/minute")
 def login(request: Request, form: OAuth2PasswordRequestForm = Depends()):
-    from auth_mssql import authenticate_company_user, mssql_enabled
-
-    # ── 1. เช็ค MSSQL บริษัทก่อน (ถ้าเปิดใช้งาน) ──────────────────────────
-    if mssql_enabled():
-        company_user = authenticate_company_user(form.username, form.password)
-        if company_user:
-            # sync/สร้าง user ใน local DB เพื่อให้ session ทำงานได้
-            conn = get_db()
-            local = conn.execute(
-                "SELECT id, username, role FROM users WHERE username = ?",
-                (form.username,),
-            ).fetchone()
-            if not local:
-                conn.execute(
-                    "INSERT INTO users (username, password_hash, role) VALUES (?, ?, ?)",
-                    (form.username, "mssql-auth", "user"),
-                )
-                conn.commit()
-                local = conn.execute(
-                    "SELECT id, username, role FROM users WHERE username = ?",
-                    (form.username,),
-                ).fetchone()
-
-            token = create_token(local["id"], local["username"], local["role"])
-            audit_log("login_success", user=dict(local),
-                      detail={"source": "mssql"}, request=request)
-            return {
-                "access_token": token,
-                "token_type": "bearer",
-                "username": local["username"],
-                "role": local["role"],
-            }
-
-    # ── 2. Fallback — เช็ค local DB (สำหรับ admin) ──────────────────────────
+    # 1. Try local chatbot user first (siriadmin and any other locally-created users).
     if use_postgres_auth():
         from auth_pg import get_user_by_username_pg
+
         row = get_user_by_username_pg(form.username)
     else:
         row = get_db().execute(
@@ -234,24 +203,116 @@ def login(request: Request, form: OAuth2PasswordRequestForm = Depends()):
             (form.username,),
         ).fetchone()
 
-    if not row or not verify_password(form.password, row["password_hash"]):
+    if row and verify_password(form.password, row["password_hash"]):
+        token = create_token(row["id"], row["username"], row["role"])
+
         audit_log(
-            "login_failed",
-            detail={"username": form.username},
+            "login_success",
+            user={"id": row["id"], "username": row["username"], "role": row["role"]},
+            detail={
+                "auth_source": "local",
+                "db_engine": "postgres" if use_postgres_auth() else "sqlite",
+            },
             request=request,
         )
-        raise HTTPException(401, "invalid credentials")
 
-    token = create_token(row["id"], row["username"], row["role"])
-    audit_log("login_success", user=dict(row),
-              detail={"source": "local"}, request=request)
+        return {
+            "access_token": token,
+            "token_type": "bearer",
+            "username": row["username"],
+            "role": row["role"],
+        }
 
-    return {
-        "access_token": token,
-        "token_type": "bearer",
-        "username": row["username"],
-        "role": row["role"],
-    }
+    # 2. Fall back to MI (HRM.dbo.v_user_account, MD5 lowercase) if configured.
+    if mi_enabled():
+        mi_user = verify_mi_credentials(form.username, form.password)
+        if mi_user:
+            user_row = _ensure_mi_user_provisioned(mi_user["username"])
+            token = create_token(
+                user_row["id"], user_row["username"], user_row["role"]
+            )
+
+            audit_log(
+                "login_success",
+                user={
+                    "id": user_row["id"],
+                    "username": user_row["username"],
+                    "role": user_row["role"],
+                },
+                detail={
+                    "auth_source": "mi",
+                    "mi_emp_id": mi_user.get("emp_id"),
+                    "mi_display_name": mi_user.get("display_name"),
+                    "db_engine": "postgres" if use_postgres_auth() else "sqlite",
+                },
+                request=request,
+            )
+
+            return {
+                "access_token": token,
+                "token_type": "bearer",
+                "username": user_row["username"],
+                "role": user_row["role"],
+            }
+
+    audit_log(
+        "login_failed",
+        detail={
+            "username": form.username,
+            "mi_enabled": mi_enabled(),
+            "db_engine": "postgres" if use_postgres_auth() else "sqlite",
+        },
+        request=request,
+    )
+    raise HTTPException(401, "invalid credentials")
+
+
+def _ensure_mi_user_provisioned(username: str) -> dict:
+    """Look up the local chatbot user record for an MI user, creating it on first login.
+
+    MI-sourced users always get role='user'. The local password_hash is a sentinel
+    bcrypt hash that cannot match any submitted password, so these users can only
+    authenticate via MI going forward.
+    """
+    sentinel_hash = hash_password(
+        "__mi_sso_no_local_password__:" + os.urandom(16).hex()
+    )
+
+    if use_postgres_auth():
+        from auth_pg import (
+            create_user_pg,
+            get_user_by_username_pg,
+        )
+
+        existing = get_user_by_username_pg(username)
+        if existing:
+            return {
+                "id": existing["id"],
+                "username": existing["username"],
+                "role": existing["role"],
+            }
+
+        return create_user_pg(username, sentinel_hash, role="user")
+
+    conn = get_db()
+    existing = conn.execute(
+        "SELECT id, username, role FROM users WHERE username = ?",
+        (username,),
+    ).fetchone()
+    if existing:
+        return {
+            "id": existing["id"],
+            "username": existing["username"],
+            "role": existing["role"],
+        }
+
+    cur = conn.execute(
+        "INSERT INTO users (username, password_hash, role) VALUES (?, ?, ?)",
+        (username, sentinel_hash, "user"),
+    )
+    conn.commit()
+    new_id = cur.lastrowid
+    return {"id": new_id, "username": username, "role": "user"}
 
 
 @app.get("/auth/me")
