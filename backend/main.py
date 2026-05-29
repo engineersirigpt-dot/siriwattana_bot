@@ -538,7 +538,7 @@ async def chat(
                 chosen_model = LLM_MODEL_CALC if category == "calc" else LLM_MODEL
 
                 vec = embed(question)
-                hit = search_knowledge(vec)
+                hit = search_knowledge(vec, include_confidential=(user.get("role") == "admin"))
 
                 if hit:
                     answer = answer_from_context(

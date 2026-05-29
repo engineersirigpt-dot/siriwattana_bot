@@ -147,26 +147,66 @@ def _distance_to_similarity(distance: float) -> float:
     return 1.0 - (distance * distance) / 2.0
 
 
-def search_knowledge_pg(question_vec: list[float], k: int = 1) -> dict | None:
+def search_knowledge_pg(
+    question_vec: list[float],
+    k: int = 1,
+    *,
+    include_confidential: bool = False,
+) -> dict | None:
+    """Vector search over the knowledge base.
+
+    When include_confidential=False (the default for regular users), rows
+    whose confidentiality is 'confidential' are excluded. NULL / 'public' /
+    'internal' all stay visible. Pass include_confidential=True for admins.
+    Legacy rows that don't have the confidentiality column yet are unaffected.
+    """
     qv = Vector(question_vec)
+
+    if include_confidential:
+        confid_clause = ""
+    else:
+        # NULL is treated as "internal" (legacy data, still visible to users).
+        # Only 'confidential' is hidden.
+        confid_clause = (
+            "WHERE k.confidentiality IS NULL OR k.confidentiality <> 'confidential' "
+        )
 
     with get_pg_conn() as conn:
         with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT
-                    k.id,
-                    k.question,
-                    k.answer,
-                    kv.embedding <-> %s::vector AS distance
-                FROM knowledge_vec kv
-                JOIN knowledge k ON k.id = kv.knowledge_id
-                ORDER BY kv.embedding <-> %s::vector
-                LIMIT %s
-                """,
-                (qv, qv, k),
-            )
-            rows = cur.fetchall()
+            try:
+                cur.execute(
+                    f"""
+                    SELECT
+                        k.id,
+                        k.question,
+                        k.answer,
+                        kv.embedding <-> %s::vector AS distance
+                    FROM knowledge_vec kv
+                    JOIN knowledge k ON k.id = kv.knowledge_id
+                    {confid_clause}
+                    ORDER BY kv.embedding <-> %s::vector
+                    LIMIT %s
+                    """,
+                    (qv, qv, k),
+                )
+                rows = cur.fetchall()
+            except Exception:
+                # confidentiality column doesn't exist yet (pre-migration). Fall back to no filter.
+                cur.execute(
+                    """
+                    SELECT
+                        k.id,
+                        k.question,
+                        k.answer,
+                        kv.embedding <-> %s::vector AS distance
+                    FROM knowledge_vec kv
+                    JOIN knowledge k ON k.id = kv.knowledge_id
+                    ORDER BY kv.embedding <-> %s::vector
+                    LIMIT %s
+                    """,
+                    (qv, qv, k),
+                )
+                rows = cur.fetchall()
 
             if not rows:
                 return None

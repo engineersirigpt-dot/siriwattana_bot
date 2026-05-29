@@ -165,11 +165,22 @@ def _distance_to_similarity(distance: float) -> float:
     return 1.0 - (distance * distance) / 2.0
 
 
-def search_knowledge(question_vec: list[float], k: int = 1) -> dict | None:
+def search_knowledge(
+    question_vec: list[float],
+    k: int = 1,
+    *,
+    include_confidential: bool = False,
+) -> dict | None:
+    """Vector search over the knowledge base.
+
+    include_confidential=False (the default) hides rows whose
+    confidentiality is 'confidential'. Pass True for admin users so they
+    can see everything. NULL / 'public' / 'internal' are always visible.
+    """
     if _use_postgres():
         from rag_pg import search_knowledge_pg
 
-        return search_knowledge_pg(question_vec, k)
+        return search_knowledge_pg(question_vec, k, include_confidential=include_confidential)
 
     conn = get_db()
     rows = conn.execute(
@@ -185,6 +196,22 @@ def search_knowledge(question_vec: list[float], k: int = 1) -> dict | None:
 
     if not rows:
         return None
+
+    if not include_confidential:
+        # SQLite path: filter in Python because sqlite-vec's MATCH constrains
+        # what we can put in the WHERE clause. Confidentiality is rare enough
+        # that the loop is fine for PoC.
+        filtered = []
+        for r in rows:
+            try:
+                confid = r["confidentiality"]
+            except (IndexError, KeyError):
+                confid = None
+            if confid != "confidential":
+                filtered.append(r)
+        rows = filtered
+        if not rows:
+            return None
 
     top = rows[0]
     sim = _distance_to_similarity(top["distance"])
