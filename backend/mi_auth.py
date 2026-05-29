@@ -2,7 +2,7 @@
 MI (Master Information) authentication integration.
 
 Verifies user credentials against the MI MSSQL database.
-Source view: HRM.dbo.v_user_account (MD5 lowercase hashed passwords).
+Source view: MI2_AUTHEN.dbo.vw_AUTHEN_user_account (MD5 lowercase hashed passwords).
 
 If MI env vars are NOT set, MI verification is silently skipped.
 This makes the feature opt-in per environment.
@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 MI_DB_SERVER = os.getenv("MI_DB_SERVER", "").strip()
 MI_DB_USER = os.getenv("MI_DB_USER", "").strip()
 MI_DB_PASSWORD = os.getenv("MI_DB_PASSWORD", "").strip()
-MI_DB_NAME = os.getenv("MI_DB_NAME", "HRM").strip()
+MI_DB_NAME = os.getenv("MI_DB_NAME", "MI2_AUTHEN").strip()
 MI_DB_PORT = int(os.getenv("MI_DB_PORT", "1433"))
 MI_CONNECT_TIMEOUT = int(os.getenv("MI_CONNECT_TIMEOUT", "5"))
 
@@ -34,14 +34,14 @@ def _md5_lower(text: str) -> str:
 
 def verify_mi_credentials(username: str, password: str) -> dict | None:
     """
-    Verify username/password against MI HRM.dbo.v_user_account.
+    Verify username/password against MI2_AUTHEN.dbo.vw_AUTHEN_user_account.
 
-    Returns dict {username, display_name, emp_id} if credentials match
-    an active (user_expired = 0) MI user, otherwise None.
+    Returns dict {username, display_name, emp_id} if credentials match an
+    ACTIVE MI user (status = 'ACTIVE'), otherwise None.
 
-    Returns None silently on any error (DB down, bad query, etc.) so
-    that the caller can fall through to its normal "invalid credentials"
-    response rather than leaking infrastructure details.
+    Returns None silently on any error (DB down, bad query, etc.) so that
+    the caller can fall through to its normal "invalid credentials" response
+    rather than leaking infrastructure details.
     """
     if not mi_enabled():
         return None
@@ -76,10 +76,10 @@ def verify_mi_credentials(username: str, password: str) -> dict | None:
         cur.execute(
             """
             SELECT TOP 1 user_account, user_name, emp_id
-            FROM dbo.v_user_account
+            FROM dbo.vw_AUTHEN_user_account
             WHERE (user_account = %s OR emp_id = %s)
               AND LOWER(user_password) = %s
-              AND user_expired = 0
+              AND status = 'ACTIVE'
             """,
             (username, username, md5_hash),
         )
