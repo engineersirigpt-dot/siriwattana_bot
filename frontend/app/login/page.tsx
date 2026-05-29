@@ -3,13 +3,12 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { Lock, User } from "lucide-react";
-import { login, register, saveAuth } from "@/lib/api";
+import { login, saveAuth } from "@/lib/api";
 
 export default function LoginPage() {
   const router = useRouter();
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
-  const [mode, setMode] = useState<"login" | "register">("login");
   const [err, setErr] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
@@ -18,9 +17,6 @@ export default function LoginPage() {
     setErr(null);
     setLoading(true);
     try {
-      if (mode === "register") {
-        await register(username, password);
-      }
       const { access_token, role, username: name } = await login(username, password);
       saveAuth(access_token, role, name);
       router.replace("/chat");
@@ -56,9 +52,7 @@ export default function LoginPage() {
             Sirivatana AI Chatbot
           </h1>
           <p className="text-gray-600 text-sm">
-            {mode === "login"
-              ? "เข้าสู่ระบบเพื่อสอบถามข้อมูลบริษัท"
-              : "สร้างบัญชีใหม่เพื่อเริ่มใช้งาน"}
+            เข้าสู่ระบบเพื่อสอบถามข้อมูลบริษัท
           </p>
         </div>
 
@@ -72,8 +66,9 @@ export default function LoginPage() {
               type="text"
               value={username}
               onChange={(e) => setUsername(e.target.value)}
-              placeholder="ชื่อผู้ใช้"
+              placeholder="รหัสพนักงาน (MI)"
               required
+              autoComplete="username"
               className="w-full pl-12 pr-4 py-3.5 bg-gray-50 border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-transparent transition-all"
             />
           </div>
@@ -88,6 +83,7 @@ export default function LoginPage() {
               onChange={(e) => setPassword(e.target.value)}
               placeholder="รหัสผ่าน"
               required
+              autoComplete="current-password"
               className="w-full pl-12 pr-4 py-3.5 bg-gray-50 border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-transparent transition-all"
             />
           </div>
@@ -103,18 +99,17 @@ export default function LoginPage() {
             disabled={loading}
             className="w-full py-3.5 bg-gradient-to-r from-purple-400 to-purple-600 text-white rounded-xl hover:from-purple-500 hover:to-purple-700 transition-all shadow-lg hover:shadow-xl transform hover:-translate-y-0.5 disabled:opacity-60 disabled:transform-none"
           >
-            {loading ? "กำลังโหลด..." : mode === "login" ? "เข้าสู่ระบบ" : "สมัคร"}
+            {loading ? "กำลังโหลด..." : "เข้าสู่ระบบ"}
           </button>
 
-          <button
-            type="button"
-            onClick={() => setMode(mode === "login" ? "register" : "login")}
-            className="w-full text-center text-sm text-purple-600 hover:text-purple-700 transition-colors"
-          >
-            {mode === "login"
-              ? "ยังไม่มีบัญชี? สมัครที่นี่"
-              : "มีบัญชีแล้ว? เข้าสู่ระบบ"}
-          </button>
+          <div className="text-center pt-1 space-y-1">
+            <p className="text-xs text-gray-600">
+              เข้าสู่ระบบด้วยรหัสพนักงาน MI
+            </p>
+            <p className="text-xs text-gray-500">
+              ลืมรหัสผ่าน? ติดต่อฝ่าย IT
+            </p>
+          </div>
         </form>
 
         {/* Footer */}
