@@ -170,17 +170,25 @@ def search_knowledge(
     k: int = 1,
     *,
     include_confidential: bool = False,
+    company_mode: bool = False,
 ) -> dict | None:
     """Vector search over the knowledge base.
 
-    include_confidential=False (the default) hides rows whose
-    confidentiality is 'confidential'. Pass True for admin users so they
-    can see everything. NULL / 'public' / 'internal' are always visible.
+    - include_confidential=False (default): hide 'confidential' rows. Pass True
+      for admins.
+    - company_mode=False (default, normal chat): hide rows whose `source`
+      starts with 'kb_import:' (bulk-imported department documents). They
+      become visible only when the user opens "คู่มือบริษัท" mode.
     """
     if _use_postgres():
         from rag_pg import search_knowledge_pg
 
-        return search_knowledge_pg(question_vec, k, include_confidential=include_confidential)
+        return search_knowledge_pg(
+            question_vec,
+            k,
+            include_confidential=include_confidential,
+            company_mode=company_mode,
+        )
 
     conn = get_db()
     rows = conn.execute(
@@ -197,18 +205,24 @@ def search_knowledge(
     if not rows:
         return None
 
-    if not include_confidential:
+    if not include_confidential or not company_mode:
         # SQLite path: filter in Python because sqlite-vec's MATCH constrains
-        # what we can put in the WHERE clause. Confidentiality is rare enough
-        # that the loop is fine for PoC.
+        # what we can put in the WHERE clause. Cheap enough for PoC scale.
         filtered = []
         for r in rows:
             try:
                 confid = r["confidentiality"]
             except (IndexError, KeyError):
                 confid = None
-            if confid != "confidential":
-                filtered.append(r)
+            if not include_confidential and confid == "confidential":
+                continue
+            try:
+                src = r["source"]
+            except (IndexError, KeyError):
+                src = None
+            if not company_mode and src and src.startswith("kb_import:"):
+                continue
+            filtered.append(r)
         rows = filtered
         if not rows:
             return None

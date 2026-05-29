@@ -152,24 +152,35 @@ def search_knowledge_pg(
     k: int = 1,
     *,
     include_confidential: bool = False,
+    company_mode: bool = False,
 ) -> dict | None:
     """Vector search over the knowledge base.
 
-    When include_confidential=False (the default for regular users), rows
-    whose confidentiality is 'confidential' are excluded. NULL / 'public' /
-    'internal' all stay visible. Pass include_confidential=True for admins.
-    Legacy rows that don't have the confidentiality column yet are unaffected.
+    Filtering rules:
+    - include_confidential=False (default): hide rows whose confidentiality is
+      'confidential'. Pass True for admins so they see everything.
+    - company_mode=False (default, normal chat): hide rows whose `source` starts
+      with 'kb_import:' so that bulk-imported department documents only appear
+      when the user explicitly opens the "คู่มือบริษัท" mode. Admin-curated
+      knowledge (source='admin' / NULL / other) is still visible.
+    - company_mode=True: no source-based hiding; the company manual sees everything.
+    Legacy rows missing the metadata columns fall back to no filter.
     """
     qv = Vector(question_vec)
 
-    if include_confidential:
-        confid_clause = ""
-    else:
+    where_clauses: list[str] = []
+    if not include_confidential:
         # NULL is treated as "internal" (legacy data, still visible to users).
         # Only 'confidential' is hidden.
-        confid_clause = (
-            "WHERE k.confidentiality IS NULL OR k.confidentiality <> 'confidential' "
+        where_clauses.append(
+            "(k.confidentiality IS NULL OR k.confidentiality <> 'confidential')"
         )
+    if not company_mode:
+        # Hide bulk-imported KB outside the "คู่มือบริษัท" mode.
+        where_clauses.append(
+            "(k.source IS NULL OR k.source NOT LIKE 'kb_import:%%')"
+        )
+    where_clause = ("WHERE " + " AND ".join(where_clauses) + " ") if where_clauses else ""
 
     with get_pg_conn() as conn:
         with conn.cursor() as cur:
@@ -183,7 +194,7 @@ def search_knowledge_pg(
                         kv.embedding <-> %s::vector AS distance
                     FROM knowledge_vec kv
                     JOIN knowledge k ON k.id = kv.knowledge_id
-                    {confid_clause}
+                    {where_clause}
                     ORDER BY kv.embedding <-> %s::vector
                     LIMIT %s
                     """,
@@ -191,7 +202,7 @@ def search_knowledge_pg(
                 )
                 rows = cur.fetchall()
             except Exception:
-                # confidentiality column doesn't exist yet (pre-migration). Fall back to no filter.
+                # Filter columns don't exist yet (pre-migration). Fall back to no filter.
                 cur.execute(
                     """
                     SELECT
