@@ -80,6 +80,25 @@ SYSTEM_PROMPT_FREE = (
     "ห้ามแต่งข้อมูลเฉพาะของบริษัทขึ้นเอง"
 )
 
+SYSTEM_PROMPT_COMPANY_FREE = (
+    f"{COMPANY_IDENTITY}\n\n"
+    "**ขณะนี้คุณอยู่ในโหมด 'ถามข้อมูลบริษัท' (Company-Only Mode)**\n"
+    "คุณสามารถตอบได้เฉพาะคำถามที่เกี่ยวข้องกับบริษัทศิริวัฒนาอินเตอร์พริ้นท์เท่านั้น "
+    "เช่น: ข้อมูลบริษัท, บริการ, สินค้า, ขั้นตอนการทำงาน, นโยบาย, HR, สวัสดิการ, "
+    "การติดต่อ, เครื่องจักร, โรงงาน, สถานที่, เอกสารบริษัท ฯลฯ\n\n"
+    "**ถ้าคำถามไม่เกี่ยวข้องกับบริษัท** "
+    "(เช่น ความรู้ทั่วไป, ข่าวสาร, การเมือง, สุขภาพ, ความบันเทิง, ภาวะโลกร้อน, "
+    "code/programming ที่ไม่เกี่ยวข้องกับการดำเนินงานของบริษัท, แนะนำที่เที่ยว, "
+    "คณิตศาสตร์ทั่วไป ฯลฯ) ให้ตอบปฏิเสธอย่างสุภาพด้วยข้อความนี้ทุกครั้ง:\n\n"
+    "'ขออภัยค่ะ ขณะนี้อยู่ในโหมด \"ถามข้อมูลบริษัท\" จึงตอบได้เฉพาะคำถามที่เกี่ยวกับ"
+    "บริษัทศิริวัฒนาอินเตอร์พริ้นท์เท่านั้น หากต้องการถามคำถามทั่วไป "
+    "กรุณาออกจากโหมดนี้แล้วเริ่มแชทใหม่ค่ะ'\n\n"
+    "ถ้าเป็นคำถามเกี่ยวกับบริษัทแต่ไม่มีข้อมูลในระบบ ให้ตอบว่า: "
+    f"{COMPANY_FALLBACK}\n"
+    "ห้ามแต่งข้อมูลเฉพาะของบริษัทขึ้นเอง ห้ามตอบคำถามนอกขอบเขตของบริษัทไม่ว่ากรณีใด"
+)
+
+
 SYSTEM_PROMPT_FILES = (
     f"{COMPANY_IDENTITY}\n\n"
     "ผู้ใช้แนบไฟล์มา — วิเคราะห์เนื้อหาในไฟล์อย่างละเอียดเพื่อตอบคำถาม\n"
@@ -161,8 +180,15 @@ def answer_freely(
     question: str,
     model: str | None = None,
     history: list[dict] | None = None,
+    company_only: bool = False,
 ) -> str:
-    messages: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT_FREE}]
+    """Answer without RAG context.
+
+    When company_only=True, the system prompt forces the model to refuse any
+    question that is not about the company. Used by the "ถามข้อมูลบริษัท" mode.
+    """
+    system_prompt = SYSTEM_PROMPT_COMPANY_FREE if company_only else SYSTEM_PROMPT_FREE
+    messages: list[dict] = [{"role": "system", "content": system_prompt}]
     if history:
         messages.extend(history)
     messages.append({"role": "user", "content": question})

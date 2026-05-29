@@ -163,6 +163,7 @@ export default function ChatPage() {
   const [isDragging, setIsDragging] = useState(false);
   const [typingIndex, setTypingIndex] = useState<number | null>(null);
   const [typedChars, setTypedChars] = useState(0);
+  const [chatMode, setChatMode] = useState<"normal" | "company">("normal");
   const scrollRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -262,6 +263,7 @@ export default function ChatPage() {
     setSearchResults(null);
     setReadOnlyOwner(null);
     setTypingIndex(null);
+    setChatMode("normal");
     try {
       const data = await api<{ messages: LoadedMessage[] }>(`/chat/sessions/${sid}`);
       setMessages(hydrateMessages(data.messages));
@@ -275,6 +277,7 @@ export default function ChatPage() {
     setSearchResults(null);
     setReadOnlyOwner(owner);
     setTypingIndex(null);
+    setChatMode("normal");
     try {
       const data = await api<{ messages: LoadedMessage[] }>(`/admin/chat-history/${sid}`);
       setMessages(hydrateMessages(data.messages));
@@ -283,7 +286,7 @@ export default function ChatPage() {
     }
   }
 
-  function newChat() {
+  function newChat(mode: "normal" | "company" = "normal") {
     setCurrentSid(null);
     setMessages([]);
     setSearchResults(null);
@@ -291,6 +294,7 @@ export default function ChatPage() {
     setInput("");
     setPendingFiles([]);
     setTypingIndex(null);
+    setChatMode(mode);
   }
 
   function addFiles(files: File[]) {
@@ -401,6 +405,7 @@ export default function ChatPage() {
         message: text,
         sessionId: currentSid,
         files: filesToSend,
+        mode: chatMode,
         signal: controller.signal,
       });
       let newBotIdx = 0;
@@ -541,13 +546,20 @@ export default function ChatPage() {
 
       {/* Sidebar */}
       <aside className="w-80 bg-gradient-to-b from-purple-500 via-purple-600 to-purple-700 flex flex-col shadow-2xl">
-        <div className="p-4">
+        <div className="p-4 space-y-2">
           <button
-            onClick={newChat}
+            onClick={() => newChat("normal")}
             className="w-full flex items-center justify-center gap-2 bg-white/10 hover:bg-white/20 text-white py-3 px-4 rounded-xl transition-all backdrop-blur-sm border border-white/20 shadow-lg"
           >
             <Plus size={20} />
             <span>แชทใหม่</span>
+          </button>
+          <button
+            onClick={() => newChat("company")}
+            className="w-full flex items-center justify-center gap-2 bg-amber-400/30 hover:bg-amber-400/50 text-white py-3 px-4 rounded-xl transition-all backdrop-blur-sm border border-amber-200/40 shadow-lg"
+          >
+            <span className="text-base">🏢</span>
+            <span>ถามข้อมูลบริษัท</span>
           </button>
         </div>
 
@@ -808,6 +820,17 @@ export default function ChatPage() {
         <header className="bg-white border-b border-gray-200 px-8 py-4 shadow-sm flex items-center justify-between gap-4">
           <h2 className="text-gray-800 font-medium truncate flex-1">{currentTitle}</h2>
           <div className="flex items-center gap-3">
+            {chatMode === "company" && !readOnlyOwner && (
+              <button
+                onClick={() => newChat("normal")}
+                className="flex items-center gap-1.5 px-3 py-1.5 bg-amber-100 hover:bg-amber-200 text-amber-800 rounded-lg text-sm transition-all border border-amber-300"
+                title="ออกจากโหมดถามข้อมูลบริษัท"
+              >
+                <span>🏢</span>
+                <span>โหมด: ถามข้อมูลบริษัท</span>
+                <X size={14} />
+              </button>
+            )}
             {readOnlyOwner && (
               <button
                 onClick={exitReadOnly}

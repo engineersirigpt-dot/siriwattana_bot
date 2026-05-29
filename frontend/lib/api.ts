@@ -67,6 +67,7 @@ export async function sendChat(opts: {
   message: string;
   sessionId: number | null;
   files: File[];
+  mode?: "normal" | "company";
   signal?: AbortSignal;
 }): Promise<{
   answer: string;
@@ -78,6 +79,7 @@ export async function sendChat(opts: {
   const fd = new FormData();
   fd.append("message", opts.message);
   if (opts.sessionId !== null) fd.append("session_id", String(opts.sessionId));
+  if (opts.mode && opts.mode !== "normal") fd.append("mode", opts.mode);
   for (const f of opts.files) fd.append("files", f, f.name);
 
   const token = getToken();

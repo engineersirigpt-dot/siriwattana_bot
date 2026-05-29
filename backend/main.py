@@ -413,10 +413,12 @@ async def chat(
     request: Request,
     message: str = Form(...),
     session_id: int | None = Form(None),
+    mode: str = Form("normal"),
     files: list[UploadFile] = File([]),
     user: dict = Depends(current_user),
 ):
     question = message.strip()
+    company_only = mode == "company"
 
     if not question and not files:
         raise HTTPException(400, "empty message")
@@ -559,7 +561,7 @@ async def chat(
                         request=request,
                     )
 
-                    answer = answer_freely(question, model=chosen_model, history=history)
+                    answer = answer_freely(question, model=chosen_model, history=history, company_only=company_only)
                     source = "llm" if category == "general" else "llm-calc"
                     knowledge_id = None
                     similarity = None
