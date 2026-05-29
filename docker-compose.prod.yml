@@ -1,0 +1,67 @@
+# Production stack for Sirivatana Chatbot.
+#
+# Runs alongside the test stack (docker-compose.yml) on the same server:
+#   test stack : ports 3032 / 8000 / 5433, DB = chatbot_test
+#   prod stack : ports 3031 / 8010 / 5434, DB = chatbot_prod
+#
+# Launch:
+#   sudo docker compose -f docker-compose.prod.yml up -d
+#
+# Stop:
+#   sudo docker compose -f docker-compose.prod.yml down
+#
+# Logs:
+#   sudo docker compose -f docker-compose.prod.yml logs -f backend
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: siriwattana-postgres-prod
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: chatbot_prod
+      POSTGRES_USER: chatbot
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    ports:
+      - "127.0.0.1:5434:5432"
+    volumes:
+      - siriwattana_pg_prod_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U chatbot -d chatbot_prod"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: ./backend
+    container_name: siriwattana-backend-prod
+    ports:
+      - "8010:8000"
+    env_file:
+      - ./backend/.env.prod
+    environment:
+      - UPLOAD_DIR=/app/data/uploads
+    volumes:
+      - ./backend/data-prod:/app/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        # Baked into the JS bundle at build time. Team's browser hits this URL.
+        NEXT_PUBLIC_API_BASE: http://192.168.5.32:8010
+    container_name: siriwattana-frontend-prod
+    ports:
+      - "3031:3000"
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+volumes:
+  siriwattana_pg_prod_data:
+    name: siriwattana_pg_prod_data
