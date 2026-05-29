@@ -524,10 +524,15 @@ def main() -> None:
     print()
 
     if args.dry_run:
-        # Monkey-patch add_knowledge and update_metadata into no-ops for dry-run.
+        # Make BOTH add_knowledge and update_metadata into no-ops for dry-run.
+        # Important: `from rag import add_knowledge` binds the name in THIS module's
+        # globals, so patching only rag.add_knowledge does nothing — we have to
+        # overwrite the local binding too. Also patch rag's copy for completeness.
         import rag
 
-        rag.add_knowledge = lambda q, a, uid, source="admin": 0  # type: ignore
+        noop_add = lambda q, a, uid, source="admin": 0  # type: ignore
+        rag.add_knowledge = noop_add
+        globals()["add_knowledge"] = noop_add
         globals()["update_metadata"] = lambda kid, meta: None
 
     metadata_map: dict[str, dict] = {}
