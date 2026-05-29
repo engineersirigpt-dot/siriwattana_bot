@@ -37,6 +37,7 @@ import {
   sendChat,
 } from "@/lib/api";
 import { AlertModal, ConfirmModal, PromptModal } from "@/components/Modal";
+import { MarkdownMessage } from "@/components/MarkdownMessage";
 
 type Attachment = {
   id: number;
@@ -908,12 +909,14 @@ export default function ChatPage() {
                       <AttachmentList attachments={m.attachments} onUserBubble={false} />
                     )}
                     {m.text && (
-                      <p className="leading-relaxed text-gray-800 whitespace-pre-wrap">
-                        {shownText}
-                        {isTyping && (
+                      isTyping ? (
+                        <p className="leading-relaxed text-gray-800 whitespace-pre-wrap">
+                          {shownText}
                           <span className="inline-block w-0.5 h-4 bg-purple-500 ml-0.5 align-middle animate-pulse" />
-                        )}
-                      </p>
+                        </p>
+                      ) : (
+                        <MarkdownMessage text={shownText} />
+                      )
                     )}
                   </div>
                 </div>
