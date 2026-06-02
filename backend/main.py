@@ -1229,6 +1229,102 @@ def get_session(session_id: int, user: dict = Depends(current_user)):
     return {**dict(s), "messages": _messages_with_attachments(conn, session_id)}
 
 
+@app.post("/chat/sessions/{session_id}/share")
+@limiter.limit("20/minute")
+def share_session(
+    session_id: int, request: Request, user: dict = Depends(current_user)
+):
+    """Mint (or reuse) a read-only share token for a session the user owns."""
+    if not use_postgres_auth():
+        raise HTTPException(501, "share is only available on postgres deployment")
+
+    from chat_pg import share_session_pg
+
+    token = share_session_pg(session_id, user["id"])
+    if not token:
+        raise HTTPException(404, "session not found")
+
+    audit_log(
+        "chat_session_shared",
+        user=user,
+        detail={"session_id": session_id, "token_prefix": token[:6]},
+        request=request,
+    )
+
+    return {"token": token, "path": f"/chat/shared/{token}"}
+
+
+@app.delete("/chat/sessions/{session_id}/share")
+def revoke_session_share(
+    session_id: int, request: Request, user: dict = Depends(current_user)
+):
+    if not use_postgres_auth():
+        raise HTTPException(501, "share is only available on postgres deployment")
+
+    from chat_pg import revoke_share_pg
+
+    revoked = revoke_share_pg(session_id, user["id"])
+    if not revoked:
+        raise HTTPException(404, "session not found or not currently shared")
+
+    audit_log(
+        "chat_session_share_revoked",
+        user=user,
+        detail={"session_id": session_id},
+        request=request,
+    )
+    return {"ok": True}
+
+
+@app.get("/chat/shared/{token}")
+def get_shared_session(token: str, user: dict = Depends(current_user)):
+    """Read-only view of a shared chat. Any signed-in user can open it."""
+    if not use_postgres_auth():
+        raise HTTPException(501, "share is only available on postgres deployment")
+
+    from chat_pg import get_shared_session_pg
+
+    session = get_shared_session_pg(token)
+    if not session:
+        raise HTTPException(404, "ลิงค์นี้ใช้งานไม่ได้แล้ว — เจ้าของอาจยกเลิกการแชร์")
+    # Flag whether the viewer is the owner so the UI can show "your own chat".
+    session["is_owner"] = session["owner_user_id"] == user["id"]
+    return session
+
+
+@app.post("/chat/shared/{token}/fork")
+@limiter.limit("10/minute")
+def fork_shared_session(
+    token: str, request: Request, user: dict = Depends(current_user)
+):
+    """Clone a shared chat into the viewer's own session list."""
+    if not use_postgres_auth():
+        raise HTTPException(501, "share is only available on postgres deployment")
+
+    from chat_pg import fork_shared_session_pg, get_shared_session_pg
+
+    original = get_shared_session_pg(token)
+    if not original:
+        raise HTTPException(404, "ลิงค์นี้ใช้งานไม่ได้แล้ว")
+
+    new_session_id = fork_shared_session_pg(token, user["id"])
+    if not new_session_id:
+        raise HTTPException(404, "ลิงค์นี้ใช้งานไม่ได้แล้ว")
+
+    audit_log(
+        "chat_session_forked",
+        user=user,
+        detail={
+            "source_session_id": original["id"],
+            "source_owner": original["owner_username"],
+            "new_session_id": new_session_id,
+        },
+        request=request,
+    )
+
+    return {"session_id": new_session_id}
+
+
 @app.patch("/chat/sessions/{session_id}")
 def rename_session(session_id: int, body: SessionRenameIn, user: dict = Depends(current_user)):
     title = body.title.strip()[:80]

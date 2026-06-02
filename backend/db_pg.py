@@ -130,10 +130,26 @@ def init_pg_schema() -> None:
                 """
             )
 
+            # Backfill `shared_token` — opaque, URL-safe per-session token used
+            # to share a chat read-only with teammates. NULL = not shared.
+            cur.execute(
+                """
+                ALTER TABLE chat_sessions
+                ADD COLUMN IF NOT EXISTS shared_token VARCHAR(64) UNIQUE;
+                """
+            )
+
             cur.execute(
                 """
                 CREATE INDEX IF NOT EXISTS idx_chat_sessions_user_updated
                 ON chat_sessions(user_id, updated_at DESC);
+                """
+            )
+
+            cur.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_chat_sessions_shared_token
+                ON chat_sessions(shared_token) WHERE shared_token IS NOT NULL;
                 """
             )
 

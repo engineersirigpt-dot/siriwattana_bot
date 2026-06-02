@@ -1,17 +1,22 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import {
   Bookmark,
   BookmarkCheck,
   ChevronDown,
   ChevronRight,
+  Check,
+  Copy,
   Download,
   Eye,
   FileDown,
   FileText,
+  Link2,
+  Link2Off,
   Loader2,
+  Share2,
   Folder,
   FolderOpen,
   ImageIcon,
@@ -38,7 +43,9 @@ import {
   getRole,
   getToken,
   getUsername,
+  revokeSessionShare,
   sendChat,
+  shareSession,
 } from "@/lib/api";
 import { AlertModal, ConfirmModal, PromptModal } from "@/components/Modal";
 import { MarkdownMessage } from "@/components/MarkdownMessage";
@@ -154,6 +161,7 @@ function groupByUser(sessions: TeamSession[]) {
 
 export default function ChatPage() {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const [sessions, setSessions] = useState<Session[]>([]);
   const [teamSessions, setTeamSessions] = useState<TeamSession[]>([]);
   const [currentSid, setCurrentSid] = useState<number | null>(null);
@@ -188,6 +196,10 @@ export default function ChatPage() {
   // turnLimit comes from the server so we don't hardcode it in the UI.
   const [turnCount, setTurnCount] = useState<number>(0);
   const [turnLimit, setTurnLimit] = useState<number>(20);
+  // Share state. sharedToken is null when the chat isn't shared. shareOpen
+  // controls the visibility of the Share modal.
+  const [sharedToken, setSharedToken] = useState<string | null>(null);
+  const [shareOpen, setShareOpen] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -201,6 +213,22 @@ export default function ChatPage() {
     setRole(getRole());
     setUsername(getUsername());
     refreshSessions();
+
+    // Deep-link support: /chat?sid=N opens a specific session immediately.
+    // Used by the fork flow (/chat/shared/{token}/fork redirects here) so
+    // the user lands in the cloned chat instead of an empty new chat screen.
+    const sidParam = searchParams?.get("sid");
+    if (sidParam) {
+      const sid = parseInt(sidParam, 10);
+      if (!Number.isNaN(sid)) {
+        loadSession(sid);
+        // Clean the URL so refreshing doesn't keep re-loading.
+        if (typeof window !== "undefined") {
+          window.history.replaceState({}, "", "/chat");
+        }
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [router]);
 
   useEffect(() => {
@@ -300,6 +328,7 @@ export default function ChatPage() {
         messages: LoadedMessage[];
         mode?: "normal" | "company";
         turn_count?: number;
+        shared_token?: string | null;
       }>(`/chat/sessions/${sid}`);
       setMessages(hydrateMessages(data.messages));
       // Restore the toggle to whatever mode the user was last in on this session.
@@ -307,10 +336,12 @@ export default function ChatPage() {
       // Reseed the per-session counter from server so the UI is correct even
       // if the user reopens a chat from another tab/device.
       setTurnCount(data.turn_count ?? 0);
+      setSharedToken(data.shared_token ?? null);
     } catch {
       setMessages([]);
       setChatMode("normal");
       setTurnCount(0);
+      setSharedToken(null);
     }
   }
 
@@ -338,6 +369,24 @@ export default function ChatPage() {
     setTypingIndex(null);
     setChatMode(mode);
     setTurnCount(0);
+    setSharedToken(null);
+  }
+
+  async function handleShareToggle() {
+    if (!currentSid) return;
+    try {
+      if (sharedToken) {
+        await revokeSessionShare(currentSid);
+        setSharedToken(null);
+      } else {
+        const { token } = await shareSession(currentSid);
+        setSharedToken(token);
+      }
+    } catch (e: unknown) {
+      setAlertMsg(
+        "ทำรายการแชร์ไม่สำเร็จ: " + (e instanceof Error ? e.message : ""),
+      );
+    }
   }
 
   function addFiles(files: File[]) {
@@ -902,6 +951,20 @@ export default function ChatPage() {
             {!readOnlyOwner && currentSid !== null && (
               <TurnCounter count={turnCount} limit={turnLimit} onNewChat={() => newChat(chatMode)} />
             )}
+            {!readOnlyOwner && currentSid !== null && messages.length > 0 && (
+              <button
+                onClick={() => setShareOpen(true)}
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm transition-all border ${
+                  sharedToken
+                    ? "bg-green-50 text-green-700 border-green-300 hover:bg-green-100"
+                    : "bg-white text-gray-700 border-gray-200 hover:bg-gray-50 hover:border-gray-300"
+                }`}
+                title={sharedToken ? "แชทนี้ถูกแชร์อยู่ — กดเพื่อจัดการ" : "แชร์แชทนี้ให้เพื่อน"}
+              >
+                <Share2 size={14} />
+                <span>{sharedToken ? "แชร์อยู่" : "แชร์"}</span>
+              </button>
+            )}
             {chatMode === "company" && !readOnlyOwner && (
               <button
                 onClick={() => setChatMode("normal")}
@@ -1183,6 +1246,180 @@ export default function ChatPage() {
         description={alertMsg ?? ""}
         variant="error"
       />
+
+      <ShareModal
+        open={shareOpen}
+        sharedToken={sharedToken}
+        onClose={() => setShareOpen(false)}
+        onToggleShare={handleShareToggle}
+      />
+    </div>
+  );
+}
+
+function ShareModal({
+  open,
+  sharedToken,
+  onClose,
+  onToggleShare,
+}: {
+  open: boolean;
+  sharedToken: string | null;
+  onClose: () => void;
+  onToggleShare: () => Promise<void>;
+}) {
+  const [copied, setCopied] = useState(false);
+  const [busy, setBusy] = useState(false);
+
+  // Build the full URL on the client so it carries the current origin and
+  // works correctly across :3032 / behind a reverse proxy / etc.
+  const url =
+    typeof window !== "undefined" && sharedToken
+      ? `${window.location.origin}/chat/shared/${sharedToken}`
+      : "";
+
+  async function handleToggle() {
+    setBusy(true);
+    try {
+      await onToggleShare();
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function copyUrl() {
+    if (!url) return;
+    try {
+      await navigator.clipboard.writeText(url);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1800);
+    } catch {
+      // clipboard API may be blocked on plain http — fall back to select+copy
+      const ta = document.createElement("textarea");
+      ta.value = url;
+      document.body.appendChild(ta);
+      ta.select();
+      try {
+        document.execCommand("copy");
+        setCopied(true);
+        setTimeout(() => setCopied(false), 1800);
+      } catch {
+        // ignore
+      }
+      ta.remove();
+    }
+  }
+
+  if (!open) return null;
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4"
+      onClick={onClose}
+    >
+      <div
+        className="w-full max-w-md bg-white rounded-2xl shadow-2xl border border-gray-100 p-6"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between mb-4">
+          <h3 className="text-lg font-semibold text-gray-800 flex items-center gap-2">
+            <Share2 size={18} className="text-purple-600" />
+            แชร์แชทนี้ให้เพื่อน
+          </h3>
+          <button
+            onClick={onClose}
+            className="text-gray-400 hover:text-gray-600"
+            aria-label="close"
+          >
+            <X size={20} />
+          </button>
+        </div>
+
+        {sharedToken ? (
+          <>
+            <p className="text-sm text-gray-600 mb-3">
+              ส่งลิงค์นี้ให้เพื่อน — เพื่อนจะดูแชทแบบ <strong>read-only</strong> ได้
+              และกด "รับเป็นแชทของฉัน" เพื่อถามต่อในบัญชีตัวเอง
+              <br />
+              <span className="text-xs text-gray-500">
+                การถามของเพื่อนจะ <strong>ไม่กระทบ</strong> แชทของคุณ
+              </span>
+            </p>
+
+            <div className="flex items-center gap-2 mb-4">
+              <input
+                type="text"
+                readOnly
+                value={url}
+                onFocus={(e) => e.currentTarget.select()}
+                className="flex-1 px-3 py-2 text-sm bg-gray-50 border border-gray-200 rounded-lg font-mono text-gray-700 focus:outline-none focus:ring-2 focus:ring-purple-500"
+              />
+              <button
+                onClick={copyUrl}
+                className="flex-shrink-0 flex items-center gap-1 px-3 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition-all text-sm"
+              >
+                {copied ? (
+                  <>
+                    <Check size={14} />
+                    คัดลอกแล้ว
+                  </>
+                ) : (
+                  <>
+                    <Copy size={14} />
+                    คัดลอก
+                  </>
+                )}
+              </button>
+            </div>
+
+            <div className="flex items-center justify-between pt-3 border-t border-gray-100">
+              <span className="text-xs text-gray-500 flex items-center gap-1.5">
+                <Link2 size={12} className="text-green-600" />
+                แชทนี้กำลังถูกแชร์อยู่
+              </span>
+              <button
+                onClick={handleToggle}
+                disabled={busy}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-lg border border-red-200 bg-red-50 text-red-700 hover:bg-red-100 transition-all disabled:opacity-60"
+              >
+                {busy ? (
+                  <Loader2 size={14} className="animate-spin" />
+                ) : (
+                  <Link2Off size={14} />
+                )}
+                ยกเลิกการแชร์
+              </button>
+            </div>
+          </>
+        ) : (
+          <>
+            <p className="text-sm text-gray-600 mb-4">
+              สร้างลิงค์เพื่อแชร์แชทนี้ให้เพื่อนในทีม — เพื่อนจะดูแชทแบบ read-only
+              และนำไปถามต่อเป็นของตัวเองได้ <strong>โดยไม่กระทบของคุณ</strong>
+            </p>
+            <button
+              onClick={handleToggle}
+              disabled={busy}
+              className="w-full flex items-center justify-center gap-2 px-4 py-3 bg-gradient-to-r from-purple-500 to-purple-600 text-white rounded-xl hover:from-purple-600 hover:to-purple-700 transition-all shadow-md disabled:opacity-60"
+            >
+              {busy ? (
+                <>
+                  <Loader2 size={16} className="animate-spin" />
+                  กำลังสร้างลิงค์…
+                </>
+              ) : (
+                <>
+                  <Link2 size={16} />
+                  สร้างลิงค์แชร์
+                </>
+              )}
+            </button>
+            <p className="mt-3 text-xs text-gray-500">
+              💡 เฉพาะคนที่ login เข้าระบบนี้แล้วเท่านั้นที่จะเปิดลิงค์ได้
+            </p>
+          </>
+        )}
+      </div>
     </div>
   );
 }

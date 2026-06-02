@@ -107,6 +107,32 @@ export function attachmentUrl(id: number): string {
   return `${API_BASE}/attachments/${id}`;
 }
 
+export async function shareSession(
+  sessionId: number,
+): Promise<{ token: string; url: string }> {
+  const data = await api<{ token: string; path: string }>(
+    `/chat/sessions/${sessionId}/share`,
+    { method: "POST" },
+  );
+  // Build the full URL relative to the current origin so the recipient
+  // doesn't need to know API_BASE.
+  const origin =
+    typeof window !== "undefined" ? window.location.origin : "";
+  return { token: data.token, url: `${origin}${data.path}` };
+}
+
+export async function revokeSessionShare(sessionId: number): Promise<void> {
+  await api(`/chat/sessions/${sessionId}/share`, { method: "DELETE" });
+}
+
+export async function forkSharedSession(
+  token: string,
+): Promise<{ session_id: number }> {
+  return api<{ session_id: number }>(`/chat/shared/${token}/fork`, {
+    method: "POST",
+  });
+}
+
 export async function exportAnswerPdf(opts: {
   content: string;
   title?: string;

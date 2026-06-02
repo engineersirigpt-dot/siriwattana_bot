@@ -169,6 +169,19 @@ def init_schema(conn: sqlite3.Connection) -> None:
     except sqlite3.OperationalError:
         pass
 
+    # Migration: shared_token lets the session owner mint a read-only link
+    # other signed-in users can open + fork into their own chat.
+    try:
+        cur.execute(
+            "ALTER TABLE chat_sessions ADD COLUMN shared_token TEXT"
+        )
+    except sqlite3.OperationalError:
+        pass
+    cur.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_chat_sessions_shared_token "
+        "ON chat_sessions(shared_token) WHERE shared_token IS NOT NULL"
+    )
+
     cur.execute(
         "CREATE INDEX IF NOT EXISTS idx_chat_history_session "
         "ON chat_history(session_id, asked_at)"

@@ -1,3 +1,5 @@
+import secrets
+
 from db_pg import get_pg_conn
 
 
@@ -215,7 +217,8 @@ def get_session_messages_pg(session_id: int, user_id: int) -> dict | None:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT id, title, created_at, COALESCE(mode, 'normal') AS mode
+                SELECT id, title, created_at, COALESCE(mode, 'normal') AS mode,
+                       shared_token
                 FROM chat_sessions
                 WHERE id = %s AND user_id = %s
                 """,
@@ -276,6 +279,7 @@ def get_session_messages_pg(session_id: int, user_id: int) -> dict | None:
         "title": session[1],
         "created_at": session[2].isoformat() if session[2] else None,
         "mode": session[3],
+        "shared_token": session[4],
         "messages": list(messages.values()),
         "turn_count": turn_count,
     }
@@ -368,6 +372,160 @@ def delete_session_pg(session_id: int, user_id: int) -> list[str] | None:
             )
 
     return file_paths
+
+
+# ─────────────────────── Sharing (read-only + fork) ─────────────────────────
+
+
+def share_session_pg(session_id: int, user_id: int) -> str | None:
+    """Generate (or reuse) a share token for a session the user owns.
+
+    Returns the token string, or None if the user doesn't own the session.
+    Tokens are URL-safe and ~22 chars (16 bytes base64). The owner can revoke
+    them via `revoke_share_pg`; once cleared, the old URL stops working.
+    """
+    with get_pg_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT id, shared_token FROM chat_sessions "
+                "WHERE id = %s AND user_id = %s",
+                (session_id, user_id),
+            )
+            row = cur.fetchone()
+            if not row:
+                return None
+            if row[1]:
+                # Already shared — return the existing token so the URL is stable.
+                return row[1]
+
+            token = secrets.token_urlsafe(16)
+            cur.execute(
+                "UPDATE chat_sessions SET shared_token = %s WHERE id = %s",
+                (token, session_id),
+            )
+    return token
+
+
+def revoke_share_pg(session_id: int, user_id: int) -> bool:
+    with get_pg_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE chat_sessions SET shared_token = NULL "
+                "WHERE id = %s AND user_id = %s AND shared_token IS NOT NULL",
+                (session_id, user_id),
+            )
+            return cur.rowcount > 0
+
+
+def get_shared_session_pg(token: str) -> dict | None:
+    """Look up a shared session by token. Any signed-in user can read it.
+
+    Returns owner info + the full message thread, similar to
+    get_session_messages_pg but keyed by token instead of (session_id, user_id).
+    Returns None if the token is unknown / has been revoked.
+    """
+    with get_pg_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT s.id, s.title, s.created_at, s.updated_at,
+                       COALESCE(s.mode, 'normal') AS mode,
+                       s.user_id, u.username
+                FROM chat_sessions s
+                JOIN users u ON u.id = s.user_id
+                WHERE s.shared_token = %s
+                """,
+                (token,),
+            )
+            session = cur.fetchone()
+            if not session:
+                return None
+
+            cur.execute(
+                """
+                SELECT h.id, h.question, h.answer, h.source, h.asked_at,
+                       h.knowledge_id, k.source_file
+                FROM chat_history h
+                LEFT JOIN knowledge k ON k.id = h.knowledge_id
+                WHERE h.session_id = %s
+                ORDER BY h.id ASC
+                """,
+                (session[0],),
+            )
+            rows = cur.fetchall()
+
+    messages = [
+        {
+            "id": r[0],
+            "question": r[1],
+            "answer": r[2],
+            "source": r[3],
+            "asked_at": r[4].isoformat() if r[4] else None,
+            "source_knowledge_id": r[5],
+            "source_file": r[6],
+        }
+        for r in rows
+    ]
+
+    return {
+        "id": session[0],
+        "title": session[1],
+        "created_at": session[2].isoformat() if session[2] else None,
+        "updated_at": session[3].isoformat() if session[3] else None,
+        "mode": session[4],
+        "owner_user_id": session[5],
+        "owner_username": session[6],
+        "messages": messages,
+    }
+
+
+def fork_shared_session_pg(token: str, new_user_id: int) -> int | None:
+    """Clone a shared session into a new chat owned by `new_user_id`.
+
+    The clone copies every message (question + answer + source link) into a
+    brand-new session, prefixed "📋 " so the recipient can spot forked chats
+    at a glance. Returns the new session id, or None if the token is invalid.
+    Attachments are NOT copied — they belong to the original owner.
+    """
+    with get_pg_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT id, title, COALESCE(mode, 'normal') "
+                "FROM chat_sessions WHERE shared_token = %s",
+                (token,),
+            )
+            src = cur.fetchone()
+            if not src:
+                return None
+            src_id, src_title, src_mode = src
+
+            forked_title = ("📋 " + (src_title or "บทสนทนา"))[:80]
+
+            cur.execute(
+                """
+                INSERT INTO chat_sessions (user_id, title, mode)
+                VALUES (%s, %s, %s)
+                RETURNING id
+                """,
+                (new_user_id, forked_title, src_mode),
+            )
+            new_session_id = cur.fetchone()[0]
+
+            cur.execute(
+                """
+                INSERT INTO chat_history
+                    (user_id, session_id, question, answer, source, knowledge_id)
+                SELECT %s, %s, question, answer, source, knowledge_id
+                FROM chat_history
+                WHERE session_id = %s
+                ORDER BY id ASC
+                """,
+                (new_user_id, new_session_id, src_id),
+            )
+
+    return new_session_id
+
+
 import csv
 import io
 
