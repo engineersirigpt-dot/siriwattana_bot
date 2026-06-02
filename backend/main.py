@@ -142,6 +142,14 @@ class SessionSaveIn(BaseModel):
     is_saved: bool
 
 
+class UserRoleIn(BaseModel):
+    role: str  # 'user' | 'admin'
+
+
+class UserStatusIn(BaseModel):
+    is_disabled: bool
+
+
 @app.post("/auth/register")
 @limiter.limit("5/minute")
 def register(request: Request, form: OAuth2PasswordRequestForm = Depends()):
@@ -200,11 +208,22 @@ def login(request: Request, form: OAuth2PasswordRequestForm = Depends()):
         row = get_user_by_username_pg(form.username)
     else:
         row = get_db().execute(
-            "SELECT id, username, password_hash, role FROM users WHERE username = ?",
+            "SELECT id, username, password_hash, role, "
+            "COALESCE(is_disabled, 0) AS is_disabled "
+            "FROM users WHERE username = ?",
             (form.username,),
         ).fetchone()
 
     if row and verify_password(form.password, row["password_hash"]):
+        if row["is_disabled"]:
+            audit_log(
+                "login_blocked_disabled",
+                user={"id": row["id"], "username": row["username"], "role": row["role"]},
+                detail={"auth_source": "local"},
+                request=request,
+            )
+            raise HTTPException(403, "บัญชีนี้ถูกระงับการใช้งาน กรุณาติดต่อ admin")
+
         token = create_token(row["id"], row["username"], row["role"])
 
         audit_log(
@@ -229,6 +248,20 @@ def login(request: Request, form: OAuth2PasswordRequestForm = Depends()):
         mi_user = verify_mi_credentials(form.username, form.password)
         if mi_user:
             user_row = _ensure_mi_user_provisioned(mi_user["username"])
+
+            if user_row.get("is_disabled"):
+                audit_log(
+                    "login_blocked_disabled",
+                    user={
+                        "id": user_row["id"],
+                        "username": user_row["username"],
+                        "role": user_row["role"],
+                    },
+                    detail={"auth_source": "mi", "mi_emp_id": mi_user.get("emp_id")},
+                    request=request,
+                )
+                raise HTTPException(403, "บัญชีนี้ถูกระงับการใช้งาน กรุณาติดต่อ admin")
+
             token = create_token(
                 user_row["id"], user_row["username"], user_row["role"]
             )
@@ -291,13 +324,17 @@ def _ensure_mi_user_provisioned(username: str) -> dict:
                 "id": existing["id"],
                 "username": existing["username"],
                 "role": existing["role"],
+                "is_disabled": existing.get("is_disabled", False),
             }
 
-        return create_user_pg(username, sentinel_hash, role="user")
+        created = create_user_pg(username, sentinel_hash, role="user")
+        created.setdefault("is_disabled", False)
+        return created
 
     conn = get_db()
     existing = conn.execute(
-        "SELECT id, username, role FROM users WHERE username = ?",
+        "SELECT id, username, role, COALESCE(is_disabled, 0) AS is_disabled "
+        "FROM users WHERE username = ?",
         (username,),
     ).fetchone()
     if existing:
@@ -305,6 +342,7 @@ def _ensure_mi_user_provisioned(username: str) -> dict:
             "id": existing["id"],
             "username": existing["username"],
             "role": existing["role"],
+            "is_disabled": bool(existing["is_disabled"]),
         }
 
     cur = conn.execute(
@@ -313,7 +351,7 @@ def _ensure_mi_user_provisioned(username: str) -> dict:
     )
     conn.commit()
     new_id = cur.lastrowid
-    return {"id": new_id, "username": username, "role": "user"}
+    return {"id": new_id, "username": username, "role": "user", "is_disabled": False}
 
 
 @app.get("/auth/me")
@@ -1572,3 +1610,180 @@ def delete_knowledge(request: Request, kid: int, user: dict = Depends(require_ad
     )
 
     return {"ok": True}
+
+
+# ───────────────────────── User Management (admin only) ─────────────────────
+
+
+@app.get("/admin/users")
+def admin_list_users(user: dict = Depends(require_admin)):
+    if use_postgres_auth():
+        from admin_pg import admin_list_users_pg
+
+        return admin_list_users_pg()
+
+    rows = get_db().execute(
+        """
+        SELECT
+            u.id, u.username, u.role,
+            COALESCE(u.is_disabled, 0) AS is_disabled,
+            u.created_at,
+            (SELECT COUNT(*) FROM chat_sessions s WHERE s.user_id = u.id) AS chat_count,
+            (SELECT MAX(s.updated_at) FROM chat_sessions s WHERE s.user_id = u.id) AS last_active
+        FROM users u
+        ORDER BY u.id ASC
+        """
+    ).fetchall()
+    return [
+        {
+            "id": r["id"],
+            "username": r["username"],
+            "role": r["role"],
+            "is_disabled": bool(r["is_disabled"]),
+            "created_at": r["created_at"],
+            "chat_count": r["chat_count"] or 0,
+            "last_active": r["last_active"],
+        }
+        for r in rows
+    ]
+
+
+@app.patch("/admin/users/{user_id}/role")
+def admin_set_user_role(
+    user_id: int,
+    body: UserRoleIn,
+    request: Request,
+    user: dict = Depends(require_admin),
+):
+    new_role = body.role.strip().lower()
+    if new_role not in {"user", "admin"}:
+        raise HTTPException(400, "role must be 'user' or 'admin'")
+
+    if use_postgres_auth():
+        from admin_pg import (
+            admin_count_active_admins_pg,
+            admin_get_user_pg,
+            admin_set_user_role_pg,
+        )
+
+        target = admin_get_user_pg(user_id)
+        if not target:
+            raise HTTPException(404, "user not found")
+
+        # Block demoting the last active admin (otherwise nobody can manage).
+        if target["role"] == "admin" and new_role == "user":
+            others = admin_count_active_admins_pg(exclude_user_id=user_id)
+            if others == 0:
+                raise HTTPException(
+                    400, "ไม่สามารถลดสิทธิ์ admin คนสุดท้ายได้ — ต้องมี admin ที่ใช้งานอย่างน้อย 1 คน"
+                )
+
+        # Don't let an admin demote themselves into a corner.
+        if user_id == user["id"] and new_role == "user":
+            raise HTTPException(400, "ไม่สามารถลดสิทธิ์ตัวเองได้")
+
+        admin_set_user_role_pg(user_id, new_role)
+
+        audit_log(
+            "admin_user_role_changed",
+            user=user,
+            detail={
+                "target_user_id": user_id,
+                "target_username": target["username"],
+                "previous_role": target["role"],
+                "new_role": new_role,
+                "db_engine": "postgres",
+            },
+            request=request,
+        )
+        return {"ok": True, "role": new_role}
+
+    raise HTTPException(501, "sqlite path not implemented")
+
+
+@app.patch("/admin/users/{user_id}/status")
+def admin_set_user_status(
+    user_id: int,
+    body: UserStatusIn,
+    request: Request,
+    user: dict = Depends(require_admin),
+):
+    if use_postgres_auth():
+        from admin_pg import (
+            admin_count_active_admins_pg,
+            admin_get_user_pg,
+            admin_set_user_status_pg,
+        )
+
+        target = admin_get_user_pg(user_id)
+        if not target:
+            raise HTTPException(404, "user not found")
+
+        if user_id == user["id"]:
+            raise HTTPException(400, "ไม่สามารถปิดบัญชีตัวเองได้")
+
+        # Block disabling the last active admin.
+        if body.is_disabled and target["role"] == "admin" and not target["is_disabled"]:
+            others = admin_count_active_admins_pg(exclude_user_id=user_id)
+            if others == 0:
+                raise HTTPException(
+                    400, "ไม่สามารถปิดบัญชี admin คนสุดท้ายได้"
+                )
+
+        admin_set_user_status_pg(user_id, body.is_disabled)
+
+        audit_log(
+            "admin_user_status_changed",
+            user=user,
+            detail={
+                "target_user_id": user_id,
+                "target_username": target["username"],
+                "is_disabled": body.is_disabled,
+                "db_engine": "postgres",
+            },
+            request=request,
+        )
+        return {"ok": True, "is_disabled": body.is_disabled}
+
+    raise HTTPException(501, "sqlite path not implemented")
+
+
+@app.delete("/admin/users/{user_id}/chats")
+def admin_delete_user_chats(
+    user_id: int,
+    request: Request,
+    user: dict = Depends(require_admin),
+):
+    """Bulk-delete every chat session owned by `user_id`."""
+    if use_postgres_auth():
+        from admin_pg import admin_delete_user_chats_pg, admin_get_user_pg
+
+        target = admin_get_user_pg(user_id)
+        if not target:
+            raise HTTPException(404, "user not found")
+
+        result = admin_delete_user_chats_pg(user_id)
+
+        deleted_files = sum(
+            1 for fp in result["file_paths"] if _safe_unlink_attachment(fp)
+        )
+
+        audit_log(
+            "admin_user_chats_bulk_deleted",
+            user=user,
+            detail={
+                "target_user_id": user_id,
+                "target_username": target["username"],
+                "sessions_deleted": result["sessions_deleted"],
+                "deleted_files": deleted_files,
+                "db_engine": "postgres",
+            },
+            request=request,
+        )
+        return {
+            "ok": True,
+            "sessions_deleted": result["sessions_deleted"],
+            "deleted_files": deleted_files,
+        }
+
+    raise HTTPException(501, "sqlite path not implemented")

@@ -159,6 +159,16 @@ def init_schema(conn: sqlite3.Connection) -> None:
     except sqlite3.OperationalError:
         pass
 
+    # Migration: admin can disable a user to revoke chatbot access without
+    # losing their chat history. Login checks this flag before issuing a JWT.
+    try:
+        cur.execute(
+            "ALTER TABLE users "
+            "ADD COLUMN is_disabled INTEGER NOT NULL DEFAULT 0"
+        )
+    except sqlite3.OperationalError:
+        pass
+
     cur.execute(
         "CREATE INDEX IF NOT EXISTS idx_chat_history_session "
         "ON chat_history(session_id, asked_at)"

@@ -4,13 +4,19 @@ import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
   ArrowLeft,
+  ChevronDown,
+  ChevronUp,
   CheckCircle2,
   Download,
   HelpCircle,
   History,
+  Lock,
   Plus,
+  ShieldCheck,
   Sparkles,
   Trash2,
+  Unlock,
+  Users,
   X,
 } from "lucide-react";
 import { API_BASE, api, getRole, getToken } from "@/lib/api";
@@ -59,7 +65,24 @@ type AdminSessionDetail = {
   messages: AdminMessage[];
 };
 
-type Tab = "pending" | "knowledge" | "history";
+type AdminUser = {
+  id: number;
+  username: string;
+  role: "user" | "admin";
+  is_disabled: boolean;
+  created_at: string | null;
+  chat_count: number;
+  last_active: string | null;
+};
+
+type UserActionKind = "promote" | "demote" | "disable" | "enable" | "delete_chats";
+
+type UserActionTarget = {
+  kind: UserActionKind;
+  user: AdminUser;
+};
+
+type Tab = "pending" | "knowledge" | "history" | "users";
 
 export default function AdminPage() {
   const router = useRouter();
@@ -72,22 +95,110 @@ export default function AdminPage() {
   const [newQ, setNewQ] = useState("");
   const [newA, setNewA] = useState("");
   const [deleteKnowledgeId, setDeleteKnowledgeId] = useState<number | null>(null);
+  const [users, setUsers] = useState<AdminUser[]>([]);
+  const [userAction, setUserAction] = useState<UserActionTarget | null>(null);
+  const [currentUserId, setCurrentUserId] = useState<number | null>(null);
 
   useEffect(() => {
     if (!getToken()) return router.replace("/login");
     if (getRole() !== "admin") return router.replace("/chat");
+    api<{ id: number }>("/auth/me")
+      .then((u) => setCurrentUserId(u.id))
+      .catch(() => {});
     refresh();
   }, [router]);
 
   async function refresh() {
-    const [p, k, h] = await Promise.all([
+    const [p, k, h, u] = await Promise.all([
       api<Pending[]>("/admin/pending"),
       api<Knowledge[]>("/admin/knowledge"),
       api<AdminSession[]>("/admin/chat-history"),
+      api<AdminUser[]>("/admin/users").catch(() => [] as AdminUser[]),
     ]);
     setPending(p);
     setKnowledge(k);
     setAdminSessions(h);
+    setUsers(u);
+  }
+
+  async function performUserAction() {
+    if (!userAction) return;
+    const { kind, user: target } = userAction;
+    try {
+      if (kind === "promote") {
+        await api(`/admin/users/${target.id}/role`, {
+          method: "PATCH",
+          body: JSON.stringify({ role: "admin" }),
+        });
+      } else if (kind === "demote") {
+        await api(`/admin/users/${target.id}/role`, {
+          method: "PATCH",
+          body: JSON.stringify({ role: "user" }),
+        });
+      } else if (kind === "disable") {
+        await api(`/admin/users/${target.id}/status`, {
+          method: "PATCH",
+          body: JSON.stringify({ is_disabled: true }),
+        });
+      } else if (kind === "enable") {
+        await api(`/admin/users/${target.id}/status`, {
+          method: "PATCH",
+          body: JSON.stringify({ is_disabled: false }),
+        });
+      } else if (kind === "delete_chats") {
+        await api(`/admin/users/${target.id}/chats`, { method: "DELETE" });
+      }
+      setUserAction(null);
+      refresh();
+    } catch (e: unknown) {
+      alert(
+        "ทำรายการไม่สำเร็จ: " +
+          (e instanceof Error ? e.message : "เกิดข้อผิดพลาด"),
+      );
+    }
+  }
+
+  function userActionLabel(t: UserActionTarget): {
+    title: string;
+    description: string;
+    confirmLabel: string;
+    danger: boolean;
+  } {
+    const name = t.user.username;
+    if (t.kind === "promote")
+      return {
+        title: `แต่งตั้ง ${name} เป็น Admin?`,
+        description: `${name} จะมีสิทธิ์เข้าหน้านี้และจัดการระบบทั้งหมด`,
+        confirmLabel: "แต่งตั้ง",
+        danger: false,
+      };
+    if (t.kind === "demote")
+      return {
+        title: `ลดสิทธิ์ ${name} เป็น User?`,
+        description: `${name} จะไม่สามารถเข้าหน้า Admin Dashboard ได้อีก`,
+        confirmLabel: "ลดสิทธิ์",
+        danger: true,
+      };
+    if (t.kind === "disable")
+      return {
+        title: `ระงับการใช้งานของ ${name}?`,
+        description: `${name} จะไม่สามารถ login เข้าระบบได้ — แต่ประวัติแชทยังคงอยู่`,
+        confirmLabel: "ระงับ",
+        danger: true,
+      };
+    if (t.kind === "enable")
+      return {
+        title: `เปิดใช้งาน ${name} อีกครั้ง?`,
+        description: `${name} จะสามารถ login เข้าระบบได้`,
+        confirmLabel: "เปิดใช้งาน",
+        danger: false,
+      };
+    return {
+      title: `ลบ chat ทั้งหมดของ ${name}?`,
+      description: `chat ทั้ง ${t.user.chat_count} บทสนทนาจะถูกลบถาวร — บัญชี user ยังคงอยู่`,
+      confirmLabel: "ลบทั้งหมด",
+      danger: true,
+    };
   }
 
   async function answerPending(id: number) {
@@ -195,6 +306,13 @@ export default function AdminPage() {
             icon={<History size={18} />}
             label="ประวัติแชท"
             count={adminSessions.length}
+          />
+          <TabButton
+            active={tab === "users"}
+            onClick={() => setTab("users")}
+            icon={<Users size={18} />}
+            label="จัดการ User"
+            count={users.length}
           />
         </div>
 
@@ -442,6 +560,15 @@ export default function AdminPage() {
             )}
           </div>
         )}
+
+        {/* Users tab */}
+        {tab === "users" && (
+          <UsersPanel
+            users={users}
+            currentUserId={currentUserId}
+            onAction={(target) => setUserAction(target)}
+          />
+        )}
       </div>
 
       <ConfirmModal
@@ -455,6 +582,15 @@ export default function AdminPage() {
         confirmLabel="ลบ"
         danger
       />
+
+      {userAction && (
+        <ConfirmModal
+          open={userAction !== null}
+          onClose={() => setUserAction(null)}
+          onConfirm={performUserAction}
+          {...userActionLabel(userAction)}
+        />
+      )}
     </div>
   );
 }
@@ -509,5 +645,229 @@ function EmptyState({
       <h3 className="text-gray-800 font-medium mb-1">{title}</h3>
       <p className="text-sm text-gray-500">{description}</p>
     </div>
+  );
+}
+
+function formatLastActive(iso: string | null): string {
+  if (!iso) return "ยังไม่เคยใช้";
+  const d = new Date(iso.endsWith("Z") ? iso : iso + "Z");
+  const diff = Date.now() - d.getTime();
+  const min = Math.floor(diff / 60000);
+  if (min < 1) return "เพิ่งใช้";
+  if (min < 60) return `${min} นาทีก่อน`;
+  const hr = Math.floor(min / 60);
+  if (hr < 24) return `${hr} ชม.ก่อน`;
+  const day = Math.floor(hr / 24);
+  if (day < 30) return `${day} วันก่อน`;
+  return d.toLocaleDateString("th-TH");
+}
+
+function UsersPanel({
+  users,
+  currentUserId,
+  onAction,
+}: {
+  users: AdminUser[];
+  currentUserId: number | null;
+  onAction: (target: UserActionTarget) => void;
+}) {
+  const total = users.length;
+  const adminCount = users.filter((u) => u.role === "admin" && !u.is_disabled).length;
+  const activeCount = users.filter((u) => !u.is_disabled).length;
+  const disabledCount = total - activeCount;
+
+  if (total === 0) {
+    return (
+      <EmptyState
+        icon={<Users className="text-purple-400" size={48} />}
+        title="ยังไม่มี user"
+        description="user คนแรกจะมาโผล่ที่นี่หลัง login ครั้งแรก"
+      />
+    );
+  }
+
+  return (
+    <div className="space-y-4">
+      {/* Stats */}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+        <StatCard label="รวม user" value={total} color="purple" />
+        <StatCard label="Admin" value={adminCount} color="indigo" />
+        <StatCard label="ใช้งานได้" value={activeCount} color="green" />
+        <StatCard label="ถูกระงับ" value={disabledCount} color="red" />
+      </div>
+
+      {/* Table */}
+      <div className="bg-white rounded-2xl border border-gray-100 shadow-sm overflow-hidden">
+        <div className="overflow-x-auto">
+          <table className="min-w-full text-sm">
+            <thead className="bg-purple-50 text-purple-900">
+              <tr>
+                <th className="px-4 py-3 text-left font-semibold">Username</th>
+                <th className="px-4 py-3 text-left font-semibold">Role</th>
+                <th className="px-4 py-3 text-left font-semibold">สถานะ</th>
+                <th className="px-4 py-3 text-left font-semibold">ใช้งานล่าสุด</th>
+                <th className="px-4 py-3 text-right font-semibold">Chats</th>
+                <th className="px-4 py-3 text-right font-semibold">Actions</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-gray-100">
+              {users.map((u) => {
+                const isSelf = u.id === currentUserId;
+                return (
+                  <tr key={u.id} className="hover:bg-gray-50/60">
+                    <td className="px-4 py-3 font-medium text-gray-800">
+                      {u.username}
+                      {isSelf && (
+                        <span className="ml-2 text-[10px] bg-blue-100 text-blue-700 px-1.5 py-0.5 rounded">
+                          คุณ
+                        </span>
+                      )}
+                    </td>
+                    <td className="px-4 py-3">
+                      {u.role === "admin" ? (
+                        <span className="inline-flex items-center gap-1 bg-indigo-100 text-indigo-800 px-2 py-0.5 rounded text-xs font-medium">
+                          <ShieldCheck size={12} />
+                          admin
+                        </span>
+                      ) : (
+                        <span className="text-gray-600 text-xs">user</span>
+                      )}
+                    </td>
+                    <td className="px-4 py-3">
+                      {u.is_disabled ? (
+                        <span className="inline-flex items-center gap-1 bg-red-100 text-red-700 px-2 py-0.5 rounded text-xs">
+                          <Lock size={12} />
+                          ระงับ
+                        </span>
+                      ) : (
+                        <span className="inline-flex items-center gap-1 bg-green-100 text-green-700 px-2 py-0.5 rounded text-xs">
+                          <CheckCircle2 size={12} />
+                          ใช้งานได้
+                        </span>
+                      )}
+                    </td>
+                    <td className="px-4 py-3 text-gray-500 text-xs">
+                      {formatLastActive(u.last_active)}
+                    </td>
+                    <td className="px-4 py-3 text-right text-gray-600">
+                      {u.chat_count}
+                    </td>
+                    <td className="px-4 py-3">
+                      <div className="flex items-center justify-end gap-1">
+                        {u.role === "user" ? (
+                          <IconAction
+                            icon={<ChevronUp size={14} />}
+                            color="indigo"
+                            title="แต่งตั้งเป็น admin"
+                            disabled={u.is_disabled}
+                            onClick={() => onAction({ kind: "promote", user: u })}
+                          />
+                        ) : (
+                          <IconAction
+                            icon={<ChevronDown size={14} />}
+                            color="gray"
+                            title="ลดสิทธิ์เป็น user"
+                            disabled={isSelf}
+                            onClick={() => onAction({ kind: "demote", user: u })}
+                          />
+                        )}
+                        {u.is_disabled ? (
+                          <IconAction
+                            icon={<Unlock size={14} />}
+                            color="green"
+                            title="เปิดใช้งานอีกครั้ง"
+                            onClick={() => onAction({ kind: "enable", user: u })}
+                          />
+                        ) : (
+                          <IconAction
+                            icon={<Lock size={14} />}
+                            color="red"
+                            title="ระงับการใช้งาน"
+                            disabled={isSelf}
+                            onClick={() => onAction({ kind: "disable", user: u })}
+                          />
+                        )}
+                        <IconAction
+                          icon={<Trash2 size={14} />}
+                          color="red"
+                          title={`ลบ chat ทั้งหมด (${u.chat_count})`}
+                          disabled={u.chat_count === 0}
+                          onClick={() => onAction({ kind: "delete_chats", user: u })}
+                        />
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <p className="text-xs text-gray-400 px-2">
+        💡 MI users ไม่สามารถ reset password จากที่นี่ได้ — ระงับการใช้งานแทนหากต้องการบล็อก
+      </p>
+    </div>
+  );
+}
+
+function StatCard({
+  label,
+  value,
+  color,
+}: {
+  label: string;
+  value: number;
+  color: "purple" | "indigo" | "green" | "red";
+}) {
+  const colors: Record<typeof color, string> = {
+    purple: "from-purple-50 to-purple-100 text-purple-800 border-purple-200",
+    indigo: "from-indigo-50 to-indigo-100 text-indigo-800 border-indigo-200",
+    green: "from-green-50 to-green-100 text-green-800 border-green-200",
+    red: "from-red-50 to-red-100 text-red-800 border-red-200",
+  };
+  return (
+    <div
+      className={`bg-gradient-to-br ${colors[color]} border rounded-xl p-3`}
+    >
+      <p className="text-xs opacity-80">{label}</p>
+      <p className="text-2xl font-semibold mt-0.5">{value}</p>
+    </div>
+  );
+}
+
+function IconAction({
+  icon,
+  color,
+  title,
+  disabled,
+  onClick,
+}: {
+  icon: React.ReactNode;
+  color: "indigo" | "gray" | "green" | "red";
+  title: string;
+  disabled?: boolean;
+  onClick: () => void;
+}) {
+  const colors: Record<typeof color, string> = {
+    indigo: "text-indigo-600 hover:bg-indigo-50",
+    gray: "text-gray-500 hover:bg-gray-100",
+    green: "text-green-600 hover:bg-green-50",
+    red: "text-red-600 hover:bg-red-50",
+  };
+  return (
+    <button
+      type="button"
+      title={title}
+      disabled={disabled}
+      onClick={onClick}
+      className={`p-1.5 rounded-md transition-all ${
+        disabled
+          ? "text-gray-300 cursor-not-allowed"
+          : colors[color]
+      }`}
+    >
+      {icon}
+    </button>
   );
 }

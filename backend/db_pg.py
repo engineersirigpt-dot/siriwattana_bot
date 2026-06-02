@@ -48,8 +48,17 @@ def init_pg_schema() -> None:
                     username TEXT UNIQUE NOT NULL,
                     password_hash TEXT NOT NULL,
                     role TEXT NOT NULL DEFAULT 'user',
-                    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    is_disabled BOOLEAN NOT NULL DEFAULT false
                 );
+                """
+            )
+
+            # Backfill is_disabled for DBs created before this column existed.
+            cur.execute(
+                """
+                ALTER TABLE users
+                ADD COLUMN IF NOT EXISTS is_disabled BOOLEAN NOT NULL DEFAULT false;
                 """
             )
 
