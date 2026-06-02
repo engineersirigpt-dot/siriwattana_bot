@@ -127,6 +127,10 @@ class ChatResponse(BaseModel):
     # Frontend uses these to render the "📎 ดาวน์โหลดเอกสารต้นฉบับ" button.
     source_knowledge_id: int | None = None
     source_file: str | None = None
+    # Per-session turn budget — frontend renders a "5/20" counter and nudges
+    # the user toward a new chat as the limit approaches.
+    turn_count: int | None = None
+    turn_limit: int | None = None
 
 
 class KnowledgeIn(BaseModel):
@@ -426,6 +430,36 @@ def _is_export_request(text: str) -> bool:
 
 HISTORY_TURNS = 6
 
+# Hard cap on number of question turns per chat session. Once exceeded, /chat
+# returns 429 and the UI nudges the user to open a fresh chat. Bounds token
+# cost (history is already capped at HISTORY_TURNS but the cap doesn't help
+# if someone hammers the same session) and keeps long chats from hurting
+# page-render performance. Export-offer turns don't count.
+MAX_TURNS_PER_SESSION = 20
+
+
+def _count_session_turns(session_id: int) -> int:
+    """Number of real Q&A turns in a session (export_offer rows excluded)."""
+    if use_postgres_auth():
+        from db_pg import get_pg_conn
+
+        with get_pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT COUNT(*) FROM chat_history "
+                    "WHERE session_id = %s AND source <> 'export_offer'",
+                    (session_id,),
+                )
+                row = cur.fetchone()
+        return int(row[0]) if row else 0
+
+    row = get_db().execute(
+        "SELECT COUNT(*) AS n FROM chat_history "
+        "WHERE session_id = ? AND source <> 'export_offer'",
+        (session_id,),
+    ).fetchone()
+    return int(row["n"]) if row else 0
+
 
 def _get_session_history(conn, session_id: int | None, user_id: int) -> list[dict]:
     if not session_id:
@@ -572,6 +606,29 @@ async def chat(
                 session_id=session_id or 0,
                 session_title="",
                 attachments=[],
+            )
+
+    # Enforce per-session turn cap. Export-intent messages are allowed even
+    # at the limit so the user can still save their work, then start a fresh
+    # chat. Counted on session_id supplied by the client — a brand-new chat
+    # (session_id=None) is never blocked.
+    if session_id is not None and question and not _is_export_request(question):
+        used = _count_session_turns(session_id)
+        if used >= MAX_TURNS_PER_SESSION:
+            audit_log(
+                "session_turn_limit_hit",
+                user=user,
+                detail={
+                    "session_id": session_id,
+                    "used": used,
+                    "limit": MAX_TURNS_PER_SESSION,
+                },
+                request=request,
+            )
+            raise HTTPException(
+                429,
+                f"แชทนี้ครบ {MAX_TURNS_PER_SESSION} คำถามแล้ว — กรุณาเปิด 'แชทใหม่' "
+                "เพื่อถามต่อค่ะ (ช่วยให้ระบบเร็วและประหยัด token)",
             )
 
     # Intent: user is asking to export the previous answer as PDF.
@@ -816,6 +873,8 @@ async def chat(
                 attachments=attachment_rows,
                 source_knowledge_id=knowledge_id,
                 source_file=source_file_hit,
+                turn_count=_count_session_turns(sid),
+                turn_limit=MAX_TURNS_PER_SESSION,
             )
         conn = get_db()
         sid, stitle = _ensure_session(
@@ -955,6 +1014,8 @@ async def chat(
             attachments=attachment_rows,
             source_knowledge_id=knowledge_id,
             source_file=source_file_hit,
+            turn_count=_count_session_turns(sid),
+            turn_limit=MAX_TURNS_PER_SESSION,
         )
 
     except HTTPException:

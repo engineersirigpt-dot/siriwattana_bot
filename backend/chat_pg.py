@@ -265,12 +265,19 @@ def get_session_messages_pg(session_id: int, user_id: int) -> dict | None:
                 "size_bytes": row[8],
             })
 
+    # turn_count for the per-session quota UI. Excludes export_offer messages
+    # so the user's "ขอ PDF" requests don't burn against their question budget.
+    turn_count = sum(
+        1 for m in messages.values() if m.get("source") != "export_offer"
+    )
+
     return {
         "id": session[0],
         "title": session[1],
         "created_at": session[2].isoformat() if session[2] else None,
         "mode": session[3],
         "messages": list(messages.values()),
+        "turn_count": turn_count,
     }
 def rename_session_pg(session_id: int, user_id: int, title: str) -> bool:
     with get_pg_conn() as conn:

@@ -183,6 +183,11 @@ export default function ChatPage() {
   const [typingIndex, setTypingIndex] = useState<number | null>(null);
   const [typedChars, setTypedChars] = useState(0);
   const [chatMode, setChatMode] = useState<"normal" | "company">("normal");
+  // Per-session question budget. Server is the source of truth: every /chat
+  // response refreshes turnCount, and loadSession seeds it from the GET.
+  // turnLimit comes from the server so we don't hardcode it in the UI.
+  const [turnCount, setTurnCount] = useState<number>(0);
+  const [turnLimit, setTurnLimit] = useState<number>(20);
   const scrollRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -291,15 +296,21 @@ export default function ChatPage() {
     setReadOnlyOwner(null);
     setTypingIndex(null);
     try {
-      const data = await api<{ messages: LoadedMessage[]; mode?: "normal" | "company" }>(
-        `/chat/sessions/${sid}`,
-      );
+      const data = await api<{
+        messages: LoadedMessage[];
+        mode?: "normal" | "company";
+        turn_count?: number;
+      }>(`/chat/sessions/${sid}`);
       setMessages(hydrateMessages(data.messages));
       // Restore the toggle to whatever mode the user was last in on this session.
       setChatMode(data.mode === "company" ? "company" : "normal");
+      // Reseed the per-session counter from server so the UI is correct even
+      // if the user reopens a chat from another tab/device.
+      setTurnCount(data.turn_count ?? 0);
     } catch {
       setMessages([]);
       setChatMode("normal");
+      setTurnCount(0);
     }
   }
 
@@ -326,6 +337,7 @@ export default function ChatPage() {
     setPendingFiles([]);
     setTypingIndex(null);
     setChatMode(mode);
+    setTurnCount(0);
   }
 
   function addFiles(files: File[]) {
@@ -459,6 +471,10 @@ export default function ChatPage() {
       setTypedChars(0);
       setTypingIndex(newBotIdx);
       setCurrentSid(res.session_id);
+      // Server-driven counter so the badge stays accurate even if export-offer
+      // messages don't count against the quota.
+      if (typeof res.turn_count === "number") setTurnCount(res.turn_count);
+      if (typeof res.turn_limit === "number") setTurnLimit(res.turn_limit);
       refreshSessions();
       if (role === "admin") refreshTeamSessions();
     } catch (e: unknown) {
@@ -883,6 +899,9 @@ export default function ChatPage() {
         <header className="bg-white border-b border-gray-200 px-8 py-4 shadow-sm flex items-center justify-between gap-4">
           <h2 className="text-gray-800 font-medium truncate flex-1">{currentTitle}</h2>
           <div className="flex items-center gap-3">
+            {!readOnlyOwner && currentSid !== null && (
+              <TurnCounter count={turnCount} limit={turnLimit} onNewChat={() => newChat(chatMode)} />
+            )}
             {chatMode === "company" && !readOnlyOwner && (
               <button
                 onClick={() => setChatMode("normal")}
@@ -1047,7 +1066,12 @@ export default function ChatPage() {
               <button
                 type="button"
                 onClick={() => fileInputRef.current?.click()}
-                disabled={sending || !!readOnlyOwner || pendingFiles.length >= 5}
+                disabled={
+                  sending ||
+                  !!readOnlyOwner ||
+                  pendingFiles.length >= 5 ||
+                  turnCount >= turnLimit
+                }
                 className="flex-shrink-0 p-3 bg-gray-50 border border-gray-200 rounded-2xl hover:bg-gray-100 transition-all text-gray-600 disabled:opacity-50 disabled:cursor-not-allowed"
                 title="แนบไฟล์ (รูป, PDF, Word, Excel, PowerPoint, Text/Code — สูงสุด 5 ไฟล์)"
               >
@@ -1062,11 +1086,13 @@ export default function ChatPage() {
                 placeholder={
                   readOnlyOwner
                     ? "ไม่สามารถส่งข้อความในโหมดอ่านได้"
+                    : turnCount >= turnLimit
+                    ? `แชทนี้ครบ ${turnLimit} คำถามแล้ว — เปิดแชทใหม่เพื่อถามต่อ`
                     : pendingFiles.length > 0
                     ? "เขียนคำถามเกี่ยวกับไฟล์"
                     : "พิมพ์คำถาม…"
                 }
-                disabled={sending || !!readOnlyOwner}
+                disabled={sending || !!readOnlyOwner || turnCount >= turnLimit}
                 className="flex-1 px-6 py-4 bg-gray-50 border border-gray-200 rounded-2xl focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-transparent transition-all disabled:opacity-60 disabled:cursor-not-allowed resize-none overflow-y-auto leading-6"
               />
               {sending ? (
@@ -1084,7 +1110,8 @@ export default function ChatPage() {
                   type="submit"
                   disabled={
                     !!readOnlyOwner ||
-                    (!input.trim() && pendingFiles.length === 0)
+                    (!input.trim() && pendingFiles.length === 0) ||
+                    turnCount >= turnLimit
                   }
                   className="flex-shrink-0 px-8 py-4 bg-gradient-to-r from-purple-400 to-purple-500 text-white rounded-2xl hover:from-purple-500 hover:to-purple-600 transition-all shadow-md hover:shadow-lg transform hover:-translate-y-0.5 flex items-center gap-2 disabled:opacity-60 disabled:transform-none disabled:cursor-not-allowed"
                 >
@@ -1156,6 +1183,47 @@ export default function ChatPage() {
         description={alertMsg ?? ""}
         variant="error"
       />
+    </div>
+  );
+}
+
+function TurnCounter({
+  count,
+  limit,
+  onNewChat,
+}: {
+  count: number;
+  limit: number;
+  onNewChat: () => void;
+}) {
+  const remaining = Math.max(0, limit - count);
+  const atLimit = count >= limit;
+  const nearLimit = !atLimit && remaining <= 5;
+
+  let style = "bg-gray-100 text-gray-600 border-gray-200";
+  if (atLimit) style = "bg-red-100 text-red-700 border-red-300";
+  else if (nearLimit) style = "bg-amber-100 text-amber-800 border-amber-300";
+
+  return (
+    <div
+      className={`flex items-center gap-2 px-3 py-1.5 rounded-lg border text-xs ${style}`}
+      title={
+        atLimit
+          ? "แชทนี้ครบจำนวนคำถามแล้ว — เปิดแชทใหม่เพื่อถามต่อ"
+          : `ใช้ไป ${count} / ${limit} คำถามต่อแชท`
+      }
+    >
+      <span className="font-medium">{count}/{limit}</span>
+      {nearLimit && <span className="hidden sm:inline">เหลือ {remaining}</span>}
+      {atLimit && (
+        <button
+          type="button"
+          onClick={onNewChat}
+          className="ml-1 px-2 py-0.5 rounded bg-white border border-red-300 text-red-700 hover:bg-red-50 transition-all font-medium"
+        >
+          + แชทใหม่
+        </button>
+      )}
     </div>
   );
 }

@@ -79,6 +79,9 @@ export async function sendChat(opts: {
   // เอกสารต้นฉบับ" button. Null for LLM-only answers and blocked questions.
   source_knowledge_id?: number | null;
   source_file?: string | null;
+  // Per-session quota — frontend renders "X/20" counter from these.
+  turn_count?: number | null;
+  turn_limit?: number | null;
 }> {
   const fd = new FormData();
   fd.append("message", opts.message);
