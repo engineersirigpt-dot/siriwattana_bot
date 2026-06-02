@@ -182,6 +182,16 @@ def init_schema(conn: sqlite3.Connection) -> None:
         "ON chat_sessions(shared_token) WHERE shared_token IS NOT NULL"
     )
 
+    # Migration: is_forked marks rows copied in from a shared chat so the
+    # per-session 20-turn counter doesn't bill them against the recipient.
+    try:
+        cur.execute(
+            "ALTER TABLE chat_history "
+            "ADD COLUMN is_forked INTEGER NOT NULL DEFAULT 0"
+        )
+    except sqlite3.OperationalError:
+        pass
+
     cur.execute(
         "CREATE INDEX IF NOT EXISTS idx_chat_history_session "
         "ON chat_history(session_id, asked_at)"

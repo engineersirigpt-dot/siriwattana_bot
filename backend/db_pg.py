@@ -163,8 +163,17 @@ def init_pg_schema() -> None:
                     answer TEXT NOT NULL,
                     source TEXT NOT NULL,
                     knowledge_id BIGINT REFERENCES knowledge(id),
-                    asked_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                    asked_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    is_forked BOOLEAN NOT NULL DEFAULT false
                 );
+                """
+            )
+
+            # Backfill is_forked for tables created before the share/fork feature.
+            cur.execute(
+                """
+                ALTER TABLE chat_history
+                ADD COLUMN IF NOT EXISTS is_forked BOOLEAN NOT NULL DEFAULT false;
                 """
             )
 

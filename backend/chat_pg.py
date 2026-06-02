@@ -233,7 +233,8 @@ def get_session_messages_pg(session_id: int, user_id: int) -> dict | None:
                 """
                 SELECT h.id, h.question, h.answer, h.source, h.asked_at,
                        a.id, a.filename, a.content_type, a.size_bytes,
-                       h.knowledge_id, k.source_file
+                       h.knowledge_id, k.source_file,
+                       COALESCE(h.is_forked, false) AS is_forked
                 FROM chat_history h
                 LEFT JOIN attachments a ON a.message_id = h.id
                 LEFT JOIN knowledge k ON k.id = h.knowledge_id
@@ -259,6 +260,7 @@ def get_session_messages_pg(session_id: int, user_id: int) -> dict | None:
                 # "📎 ดาวน์โหลดเอกสารต้นฉบับ" button when an old session is reopened.
                 "source_knowledge_id": row[9],
                 "source_file": row[10],
+                "is_forked": bool(row[11]),
             }
         if row[5] is not None:
             messages[msg_id]["attachments"].append({
@@ -268,10 +270,14 @@ def get_session_messages_pg(session_id: int, user_id: int) -> dict | None:
                 "size_bytes": row[8],
             })
 
-    # turn_count for the per-session quota UI. Excludes export_offer messages
-    # so the user's "ขอ PDF" requests don't burn against their question budget.
+    # turn_count for the per-session quota UI. Excludes:
+    #   - export_offer rows (user's "ขอ PDF" intent, not a real Q)
+    #   - is_forked rows    (cloned from a shared chat, didn't cost this user)
+    # Must match the WHERE clause in main._count_session_turns.
     turn_count = sum(
-        1 for m in messages.values() if m.get("source") != "export_offer"
+        1
+        for m in messages.values()
+        if m.get("source") != "export_offer" and not m.get("is_forked")
     )
 
     return {
@@ -511,11 +517,14 @@ def fork_shared_session_pg(token: str, new_user_id: int) -> int | None:
             )
             new_session_id = cur.fetchone()[0]
 
+            # is_forked=TRUE on every cloned row so the 20-turn budget on the
+            # forked chat starts fresh — these messages weren't asked by the
+            # new owner, they're context inherited from the shared link.
             cur.execute(
                 """
                 INSERT INTO chat_history
-                    (user_id, session_id, question, answer, source, knowledge_id)
-                SELECT %s, %s, question, answer, source, knowledge_id
+                    (user_id, session_id, question, answer, source, knowledge_id, is_forked)
+                SELECT %s, %s, question, answer, source, knowledge_id, TRUE
                 FROM chat_history
                 WHERE session_id = %s
                 ORDER BY id ASC

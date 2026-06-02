@@ -439,7 +439,13 @@ MAX_TURNS_PER_SESSION = 20
 
 
 def _count_session_turns(session_id: int) -> int:
-    """Number of real Q&A turns in a session (export_offer rows excluded)."""
+    """Number of real Q&A turns in a session.
+
+    Excludes:
+    - export_offer rows  — they're "ขอ PDF" requests, not real questions.
+    - is_forked rows     — messages cloned from a shared chat aren't ones
+      this user asked, so they shouldn't burn the 20-turn budget.
+    """
     if use_postgres_auth():
         from db_pg import get_pg_conn
 
@@ -447,7 +453,9 @@ def _count_session_turns(session_id: int) -> int:
             with conn.cursor() as cur:
                 cur.execute(
                     "SELECT COUNT(*) FROM chat_history "
-                    "WHERE session_id = %s AND source <> 'export_offer'",
+                    "WHERE session_id = %s "
+                    "  AND source <> 'export_offer' "
+                    "  AND COALESCE(is_forked, false) = false",
                     (session_id,),
                 )
                 row = cur.fetchone()
@@ -455,7 +463,9 @@ def _count_session_turns(session_id: int) -> int:
 
     row = get_db().execute(
         "SELECT COUNT(*) AS n FROM chat_history "
-        "WHERE session_id = ? AND source <> 'export_offer'",
+        "WHERE session_id = ? "
+        "  AND source <> 'export_offer' "
+        "  AND COALESCE(is_forked, 0) = 0",
         (session_id,),
     ).fetchone()
     return int(row["n"]) if row else 0
