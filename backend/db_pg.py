@@ -107,8 +107,17 @@ def init_pg_schema() -> None:
                     title TEXT NOT NULL DEFAULT 'แชทใหม่',
                     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
                     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-                    is_saved BOOLEAN NOT NULL DEFAULT false
+                    is_saved BOOLEAN NOT NULL DEFAULT false,
+                    mode VARCHAR(20) NOT NULL DEFAULT 'normal'
                 );
+                """
+            )
+
+            # Backfill `mode` for DBs created before this column existed.
+            cur.execute(
+                """
+                ALTER TABLE chat_sessions
+                ADD COLUMN IF NOT EXISTS mode VARCHAR(20) NOT NULL DEFAULT 'normal';
                 """
             )
 

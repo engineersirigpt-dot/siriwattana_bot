@@ -149,6 +149,16 @@ def init_schema(conn: sqlite3.Connection) -> None:
     except sqlite3.OperationalError:
         pass
 
+    # Migration: remember whether the session was last used in 'normal' or
+    # 'company' mode, so the UI can restore the right toggle on revisit.
+    try:
+        cur.execute(
+            "ALTER TABLE chat_sessions "
+            "ADD COLUMN mode TEXT NOT NULL DEFAULT 'normal'"
+        )
+    except sqlite3.OperationalError:
+        pass
+
     cur.execute(
         "CREATE INDEX IF NOT EXISTS idx_chat_history_session "
         "ON chat_history(session_id, asked_at)"

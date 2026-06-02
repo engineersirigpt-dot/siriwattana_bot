@@ -264,12 +264,16 @@ export default function ChatPage() {
     setSearchResults(null);
     setReadOnlyOwner(null);
     setTypingIndex(null);
-    setChatMode("normal");
     try {
-      const data = await api<{ messages: LoadedMessage[] }>(`/chat/sessions/${sid}`);
+      const data = await api<{ messages: LoadedMessage[]; mode?: "normal" | "company" }>(
+        `/chat/sessions/${sid}`,
+      );
       setMessages(hydrateMessages(data.messages));
+      // Restore the toggle to whatever mode the user was last in on this session.
+      setChatMode(data.mode === "company" ? "company" : "normal");
     } catch {
       setMessages([]);
+      setChatMode("normal");
     }
   }
 

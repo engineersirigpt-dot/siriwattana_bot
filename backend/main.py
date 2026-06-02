@@ -373,6 +373,7 @@ def _ensure_session(
     user_id: int,
     session_id: int | None,
     first_question: str,
+    mode: str = "normal",
 ) -> tuple[int, str]:
     if session_id is not None:
         row = conn.execute(
@@ -384,8 +385,8 @@ def _ensure_session(
 
     title = _title_from_question(first_question)
     cur = conn.execute(
-        "INSERT INTO chat_sessions (user_id, title) VALUES (?, ?)",
-        (user_id, title),
+        "INSERT INTO chat_sessions (user_id, title, mode) VALUES (?, ?, ?)",
+        (user_id, title, mode),
     )
     return cur.lastrowid, title
 
@@ -487,6 +488,7 @@ async def chat(
                 user_id=user["id"],
                 session_id=session_id,
                 first_question=question or saved_files[0]["filename"],
+                mode=mode,
             )
 
             history = get_session_history_pg(
@@ -577,6 +579,7 @@ async def chat(
                 answer=answer,
                 source=source,
                 knowledge_id=knowledge_id,
+                mode=mode,
             )
 
             attachment_rows: list[dict] = []
@@ -620,7 +623,7 @@ async def chat(
             )
         conn = get_db()
         sid, stitle = _ensure_session(
-            conn, user["id"], session_id, question or saved_files[0]["filename"]
+            conn, user["id"], session_id, question or saved_files[0]["filename"], mode=mode
         )
 
         history = _get_session_history(conn, session_id, user["id"])
@@ -725,7 +728,10 @@ async def chat(
                 }
             )
 
-        conn.execute("UPDATE chat_sessions SET updated_at = datetime('now') WHERE id = ?", (sid,))
+        conn.execute(
+            "UPDATE chat_sessions SET updated_at = datetime('now'), mode = ? WHERE id = ?",
+            (mode, sid),
+        )
         conn.commit()
 
         audit_log(
@@ -951,7 +957,8 @@ def get_session(session_id: int, user: dict = Depends(current_user)):
     conn = get_db()
 
     s = conn.execute(
-        "SELECT id, title, created_at FROM chat_sessions WHERE id = ? AND user_id = ?",
+        "SELECT id, title, created_at, COALESCE(mode, 'normal') AS mode "
+        "FROM chat_sessions WHERE id = ? AND user_id = ?",
         (session_id, user["id"]),
     ).fetchone()
 

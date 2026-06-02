@@ -10,6 +10,7 @@ def ensure_session_pg(
     user_id: int,
     session_id: int | None,
     first_question: str,
+    mode: str = "normal",
 ) -> tuple[int, str]:
     with get_pg_conn() as conn:
         with conn.cursor() as cur:
@@ -30,11 +31,11 @@ def ensure_session_pg(
             title = title_from_question_pg(first_question)
             cur.execute(
                 """
-                INSERT INTO chat_sessions (user_id, title)
-                VALUES (%s, %s)
+                INSERT INTO chat_sessions (user_id, title, mode)
+                VALUES (%s, %s, %s)
                 RETURNING id, title
                 """,
-                (user_id, title),
+                (user_id, title, mode),
             )
             row = cur.fetchone()
 
@@ -79,6 +80,7 @@ def save_chat_message_pg(
     answer: str,
     source: str,
     knowledge_id: int | None,
+    mode: str = "normal",
 ) -> int:
     with get_pg_conn() as conn:
         with conn.cursor() as cur:
@@ -94,13 +96,17 @@ def save_chat_message_pg(
             )
             message_id = cur.fetchone()[0]
 
+            # Sync session-level state on every message: timestamp + the mode the
+            # user is currently in. The UI uses `mode` to restore the toggle when
+            # the session is reopened.
             cur.execute(
                 """
                 UPDATE chat_sessions
-                SET updated_at = now()
+                SET updated_at = now(),
+                    mode = %s
                 WHERE id = %s
                 """,
-                (session_id,),
+                (mode, session_id),
             )
 
     return message_id
@@ -209,7 +215,7 @@ def get_session_messages_pg(session_id: int, user_id: int) -> dict | None:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT id, title, created_at
+                SELECT id, title, created_at, COALESCE(mode, 'normal') AS mode
                 FROM chat_sessions
                 WHERE id = %s AND user_id = %s
                 """,
@@ -257,6 +263,7 @@ def get_session_messages_pg(session_id: int, user_id: int) -> dict | None:
         "id": session[0],
         "title": session[1],
         "created_at": session[2].isoformat() if session[2] else None,
+        "mode": session[3],
         "messages": list(messages.values()),
     }
 def rename_session_pg(session_id: int, user_id: int, title: str) -> bool:
