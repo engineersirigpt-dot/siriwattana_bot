@@ -153,6 +153,11 @@ export default function ChatPage() {
   const [searchResults, setSearchResults] = useState<SearchHit[] | null>(null);
   const [renameTarget, setRenameTarget] = useState<Session | null>(null);
   const [deleteTargetId, setDeleteTargetId] = useState<number | null>(null);
+  const [adminDeleteTarget, setAdminDeleteTarget] = useState<{
+    sid: number;
+    owner: string;
+    title: string;
+  } | null>(null);
   const [alertMsg, setAlertMsg] = useState<string | null>(null);
   const [teamExpanded, setTeamExpanded] = useState(false);
   const [folderOpen, setFolderOpen] = useState<Record<string, boolean>>({
@@ -473,6 +478,18 @@ export default function ChatPage() {
     }
   }
 
+  async function performAdminDelete(sid: number) {
+    try {
+      await api(`/admin/chat-history/${sid}`, { method: "DELETE" });
+      if (sid === currentSid && readOnlyOwner) {
+        exitReadOnly();
+      }
+      refreshTeamSessions();
+    } catch (e: unknown) {
+      setAlertMsg("ลบไม่สำเร็จ: " + (e instanceof Error ? e.message : ""));
+    }
+  }
+
   async function performToggleSave(sid: number, currentSaved: boolean) {
     try {
       await api(`/chat/sessions/${sid}/save`, {
@@ -623,10 +640,10 @@ export default function ChatPage() {
                     {list.map((s) => {
                       const active = s.id === currentSid && readOnlyOwner === uname;
                       return (
-                        <button
+                        <div
                           key={s.id}
                           onClick={() => loadTeamSession(s.id, uname)}
-                          className={`w-full flex items-center gap-2 px-2 py-1.5 rounded text-left transition-all text-xs ${
+                          className={`group w-full flex items-center gap-2 px-2 py-1.5 rounded text-left transition-all text-xs cursor-pointer ${
                             active
                               ? "bg-purple-400 text-white"
                               : "text-white hover:bg-white/10"
@@ -635,7 +652,21 @@ export default function ChatPage() {
                         >
                           <Eye size={12} className="flex-shrink-0 opacity-70" />
                           <span className="flex-1 truncate">{s.title}</span>
-                        </button>
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setAdminDeleteTarget({
+                                sid: s.id,
+                                owner: uname,
+                                title: s.title,
+                              });
+                            }}
+                            className="hidden group-hover:flex p-0.5 text-white/85 hover:text-red-300 flex-shrink-0"
+                            title={`ลบบทสนทนานี้ของ ${uname}`}
+                          >
+                            <Trash2 size={12} />
+                          </button>
+                        </div>
                       );
                     })}
                   </div>
@@ -1060,6 +1091,22 @@ export default function ChatPage() {
         }}
         title="ลบบทสนทนานี้?"
         description="ข้อความทั้งหมดในบทสนทนานี้จะหายไปและไม่สามารถกู้คืนได้"
+        confirmLabel="ลบ"
+        danger
+      />
+
+      <ConfirmModal
+        open={adminDeleteTarget !== null}
+        onClose={() => setAdminDeleteTarget(null)}
+        onConfirm={() => {
+          if (adminDeleteTarget) performAdminDelete(adminDeleteTarget.sid);
+        }}
+        title="ลบบทสนทนาของทีม?"
+        description={
+          adminDeleteTarget
+            ? `Admin action: คุณกำลังจะลบบทสนทนา "${adminDeleteTarget.title}" ของ ${adminDeleteTarget.owner} — การลบนี้ถาวร ไม่สามารถกู้คืนได้ และจะถูกบันทึกใน audit log`
+            : ""
+        }
         confirmLabel="ลบ"
         danger
       />

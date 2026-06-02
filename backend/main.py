@@ -1257,6 +1257,87 @@ def admin_session_messages(session_id: int, user: dict = Depends(require_admin))
     return {**dict(s), "messages": _messages_with_attachments(conn, session_id)}
 
 
+@app.delete("/admin/chat-history/{session_id}")
+def admin_delete_session(
+    session_id: int,
+    request: Request,
+    user: dict = Depends(require_admin),
+):
+    """Admin override delete — bypasses user_id check so admins can clean up
+    any team member's session. The owner's attachments on disk are unlinked
+    after the DB rows are gone (best-effort)."""
+    if use_postgres_auth():
+        from admin_pg import admin_delete_session_pg
+
+        result = admin_delete_session_pg(session_id)
+        if result is None:
+            raise HTTPException(404, "session not found")
+
+        deleted_files = sum(
+            1 for fp in result["file_paths"] if _safe_unlink_attachment(fp)
+        )
+
+        audit_log(
+            "admin_session_deleted",
+            user=user,
+            detail={
+                "deleted_session_id": session_id,
+                "owner_user_id": result["user_id"],
+                "owner_username": result["username"],
+                "session_title": result["title"],
+                "deleted_files": deleted_files,
+                "db_engine": "postgres",
+            },
+            request=request,
+        )
+        return {"ok": True, "deleted_files": deleted_files}
+
+    conn = get_db()
+    row = conn.execute(
+        "SELECT s.id, s.title, s.user_id, u.username "
+        "FROM chat_sessions s JOIN users u ON u.id = s.user_id "
+        "WHERE s.id = ?",
+        (session_id,),
+    ).fetchone()
+    if not row:
+        raise HTTPException(404, "session not found")
+
+    file_paths = [
+        r["file_path"]
+        for r in conn.execute(
+            "SELECT a.file_path FROM attachments a "
+            "JOIN chat_history h ON h.id = a.message_id "
+            "WHERE h.session_id = ?",
+            (session_id,),
+        ).fetchall()
+    ]
+
+    conn.execute(
+        "DELETE FROM attachments WHERE message_id IN "
+        "(SELECT id FROM chat_history WHERE session_id = ?)",
+        (session_id,),
+    )
+    conn.execute("DELETE FROM chat_history WHERE session_id = ?", (session_id,))
+    conn.execute("DELETE FROM chat_sessions WHERE id = ?", (session_id,))
+    conn.commit()
+
+    deleted_files = sum(1 for fp in file_paths if _safe_unlink_attachment(fp))
+
+    audit_log(
+        "admin_session_deleted",
+        user=user,
+        detail={
+            "deleted_session_id": session_id,
+            "owner_user_id": row["user_id"],
+            "owner_username": row["username"],
+            "session_title": row["title"],
+            "deleted_files": deleted_files,
+        },
+        request=request,
+    )
+    return {"ok": True, "deleted_files": deleted_files}
+
+
 @app.get("/admin/chat-history/export/all")
 @limiter.limit("5/minute")
 def admin_export_all(request: Request, user: dict = Depends(require_admin)):

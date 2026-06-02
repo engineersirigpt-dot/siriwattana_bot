@@ -271,3 +271,69 @@ def admin_export_all_chat_history_pg() -> tuple[str, str]:
         )
 
     return "all-chat-history.csv", buf.getvalue()
+
+
+def admin_delete_session_pg(session_id: int) -> dict | None:
+    """
+    Delete any chat session (admin override — bypasses user_id check).
+
+    Returns:
+        {"username": ..., "title": ..., "user_id": ..., "file_paths": [...]}
+            on success — caller uses file_paths to unlink attachments from disk.
+        None if the session doesn't exist.
+
+    Mirrors delete_session_pg but without the WHERE user_id = ... guard so
+    admins can clean up any user's chat.
+    """
+    with get_pg_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT s.id, s.title, s.user_id, u.username
+                FROM chat_sessions s
+                JOIN users u ON u.id = s.user_id
+                WHERE s.id = %s
+                """,
+                (session_id,),
+            )
+            session = cur.fetchone()
+
+            if not session:
+                return None
+
+            cur.execute(
+                """
+                SELECT a.file_path
+                FROM attachments a
+                JOIN chat_history h ON h.id = a.message_id
+                WHERE h.session_id = %s
+                """,
+                (session_id,),
+            )
+            file_paths = [row[0] for row in cur.fetchall()]
+
+            cur.execute(
+                """
+                DELETE FROM attachments
+                WHERE message_id IN (
+                    SELECT id FROM chat_history WHERE session_id = %s
+                )
+                """,
+                (session_id,),
+            )
+            cur.execute(
+                "DELETE FROM chat_history WHERE session_id = %s",
+                (session_id,),
+            )
+            cur.execute(
+                "DELETE FROM chat_sessions WHERE id = %s",
+                (session_id,),
+            )
+
+    return {
+        "id": session[0],
+        "title": session[1],
+        "user_id": session[2],
+        "username": session[3],
+        "file_paths": file_paths,
+    }
