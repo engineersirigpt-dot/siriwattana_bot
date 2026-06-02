@@ -150,6 +150,12 @@ class UserStatusIn(BaseModel):
     is_disabled: bool
 
 
+class ExportPdfIn(BaseModel):
+    content: str            # markdown body
+    title: str | None = None
+    user_question: str | None = None
+
+
 @app.post("/auth/register")
 @limiter.limit("5/minute")
 def register(request: Request, form: OAuth2PasswordRequestForm = Depends()):
@@ -1165,6 +1171,67 @@ def delete_session(request: Request, session_id: int, user: dict = Depends(curre
     )
 
     return {"ok": True, "deleted_files": deleted_files}
+
+
+@app.post("/chat/export-pdf")
+@limiter.limit("20/minute")
+def export_pdf(
+    request: Request,
+    body: ExportPdfIn,
+    user: dict = Depends(current_user),
+):
+    """Render arbitrary markdown content as a styled PDF (Thai + emoji ready).
+
+    Any signed-in user can export their own chat answers — there's no admin
+    gate. The endpoint takes the markdown straight from the client (the bot's
+    answer is the typical caller) so the request payload is self-contained
+    and we don't have to fetch + authorize a specific message id.
+    """
+    content = (body.content or "").strip()
+    if not content:
+        raise HTTPException(400, "content is required")
+
+    from pdf_export import export_markdown_to_pdf
+
+    try:
+        pdf_bytes = export_markdown_to_pdf(
+            content_md=content,
+            title=body.title,
+            user_question=body.user_question,
+            generated_by=user.get("username"),
+        )
+    except Exception as exc:
+        audit_log(
+            "pdf_export_failed",
+            user=user,
+            detail={
+                "error": str(exc)[:300],
+                "content_length": len(content),
+            },
+            request=request,
+        )
+        raise HTTPException(500, f"pdf generation failed: {exc}") from exc
+
+    audit_log(
+        "pdf_export_success",
+        user=user,
+        detail={
+            "content_length": len(content),
+            "had_question": bool(body.user_question),
+            "pdf_bytes": len(pdf_bytes),
+        },
+        request=request,
+    )
+
+    safe_filename = "Sirivatana_chat.pdf"
+    return StreamingResponse(
+        iter([pdf_bytes]),
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": f'attachment; filename="{safe_filename}"',
+            "Content-Length": str(len(pdf_bytes)),
+        },
+    )
 
 
 @app.get("/chat/search")

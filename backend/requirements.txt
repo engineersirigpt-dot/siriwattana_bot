@@ -52,3 +52,5 @@ xlsxwriter==3.2.9
 psycopg[binary]
 pgvector
 pymssql==2.3.0
+weasyprint==63.0
+markdown==3.7
