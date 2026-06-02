@@ -47,6 +47,7 @@ from llm import (
 from mi_auth import mi_enabled, verify_mi_credentials
 from rag import add_knowledge, embed, log_pending_question, resolve_pending, search_knowledge
 from sensitive import BLOCKED_RESPONSE, is_sensitive
+from sensitivity_classifier import classify_sensitivity
 
 
 limiter = Limiter(key_func=get_remote_address)
@@ -426,6 +427,10 @@ async def chat(
 
     # Pre-filter: block sensitive questions before any upload / RAG / LLM call.
     # Saves OpenAI tokens and prevents the chatbot from ever attempting to answer.
+    #
+    # Two layers — keyword filter catches the obvious cases instantly and for free;
+    # LLM classifier catches paraphrased / novel attempts that don't trip any
+    # keyword (e.g. "ข้อมูลส่วนตัวของ X", "พี่ B รายได้กี่หมื่น").
     matched_kw = is_sensitive(question)
     if matched_kw is not None:
         audit_log(
@@ -446,6 +451,30 @@ async def chat(
             session_title="",
             attachments=[],
         )
+
+    if question:
+        classification = classify_sensitivity(question)
+        if classification is not None:
+            category, reason = classification
+            audit_log(
+                "sensitive_blocked_classifier",
+                user=user,
+                detail={
+                    "category": category,
+                    "reason": reason,
+                    "message_length": len(question),
+                    "had_files": bool(files),
+                },
+                request=request,
+            )
+            return ChatResponse(
+                answer=BLOCKED_RESPONSE,
+                source="blocked",
+                similarity=None,
+                session_id=session_id or 0,
+                session_title="",
+                attachments=[],
+            )
 
     saved_files: list[dict] = []
 
