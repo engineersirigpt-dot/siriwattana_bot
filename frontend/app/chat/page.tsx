@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { useRouter, useSearchParams } from "next/navigation";
+import { useRouter } from "next/navigation";
 import {
   Bookmark,
   BookmarkCheck,
@@ -49,13 +49,6 @@ import {
 } from "@/lib/api";
 import { AlertModal, ConfirmModal, PromptModal } from "@/components/Modal";
 import { MarkdownMessage } from "@/components/MarkdownMessage";
-
-// /chat is auth-gated and entirely interactive — there's no value in trying
-// to statically prerender it. Forcing dynamic also satisfies the Next.js
-// requirement that useSearchParams() either sits inside a Suspense boundary
-// or runs in a dynamic page, so we can read ?sid=N from the fork redirect
-// without splitting the component.
-export const dynamic = "force-dynamic";
 
 type Attachment = {
   id: number;
@@ -168,7 +161,6 @@ function groupByUser(sessions: TeamSession[]) {
 
 export default function ChatPage() {
   const router = useRouter();
-  const searchParams = useSearchParams();
   const [sessions, setSessions] = useState<Session[]>([]);
   const [teamSessions, setTeamSessions] = useState<TeamSession[]>([]);
   const [currentSid, setCurrentSid] = useState<number | null>(null);
@@ -224,13 +216,17 @@ export default function ChatPage() {
     // Deep-link support: /chat?sid=N opens a specific session immediately.
     // Used by the fork flow (/chat/shared/{token}/fork redirects here) so
     // the user lands in the cloned chat instead of an empty new chat screen.
-    const sidParam = searchParams?.get("sid");
-    if (sidParam) {
-      const sid = parseInt(sidParam, 10);
-      if (!Number.isNaN(sid)) {
-        loadSession(sid);
-        // Clean the URL so refreshing doesn't keep re-loading.
-        if (typeof window !== "undefined") {
+    //
+    // Read directly from window.location instead of next/navigation's
+    // useSearchParams to avoid the Next.js 16 static-prerender requirement
+    // that useSearchParams sit inside a Suspense boundary — this useEffect
+    // only runs client-side, so window.location is always defined here.
+    if (typeof window !== "undefined") {
+      const sidParam = new URLSearchParams(window.location.search).get("sid");
+      if (sidParam) {
+        const sid = parseInt(sidParam, 10);
+        if (!Number.isNaN(sid)) {
+          loadSession(sid);
           window.history.replaceState({}, "", "/chat");
         }
       }
