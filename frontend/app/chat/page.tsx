@@ -50,6 +50,13 @@ import {
 import { AlertModal, ConfirmModal, PromptModal } from "@/components/Modal";
 import { MarkdownMessage } from "@/components/MarkdownMessage";
 
+// /chat is auth-gated and entirely interactive — there's no value in trying
+// to statically prerender it. Forcing dynamic also satisfies the Next.js
+// requirement that useSearchParams() either sits inside a Suspense boundary
+// or runs in a dynamic page, so we can read ?sid=N from the fork redirect
+// without splitting the component.
+export const dynamic = "force-dynamic";
+
 type Attachment = {
   id: number;
   filename: string;
