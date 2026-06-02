@@ -650,7 +650,11 @@ function EmptyState({
 
 function formatLastActive(iso: string | null): string {
   if (!iso) return "ยังไม่เคยใช้";
-  const d = new Date(iso.endsWith("Z") ? iso : iso + "Z");
+  // PG `.isoformat()` already includes a tz offset like "+00:00"; only
+  // append "Z" if the string truly has no tz marker (legacy SQLite path).
+  const hasTz = /Z$|[+-]\d{2}:?\d{2}$/.test(iso);
+  const d = new Date(hasTz ? iso : iso + "Z");
+  if (isNaN(d.getTime())) return "—";
   const diff = Date.now() - d.getTime();
   const min = Math.floor(diff / 60000);
   if (min < 1) return "เพิ่งใช้";
