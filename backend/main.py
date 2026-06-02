@@ -374,6 +374,56 @@ def _title_from_question(question: str, max_len: int = 40) -> str:
     return one_line if len(one_line) <= max_len else one_line[: max_len - 1] + "…"
 
 
+# Phrases that signal "I want the previous answer exported as PDF". Matched
+# case-insensitively as substrings, so e.g. "ขอเป็น pdf ได้มั้ย" still hits
+# "ขอเป็น pdf". Length capped at 80 chars on the input side so the user
+# can't slip an export keyword into the middle of a normal long question.
+_EXPORT_INTENT_KEYWORDS = (
+    # Thai
+    "ขอ pdf",
+    "ขอเป็น pdf",
+    "ขอไฟล์ pdf",
+    "ขอเป็นไฟล์ pdf",
+    "ทำเป็น pdf",
+    "ส่งออกเป็น pdf",
+    "เป็นไฟล์ pdf",
+    "ดาวน์โหลด pdf",
+    "ดาวน์โหลดเป็น pdf",
+    "เซฟเป็น pdf",
+    "เซฟไฟล์ pdf",
+    "บันทึกเป็น pdf",
+    "ขอไฟล์",
+    "ขอเซฟ",
+    "ขอดาวน์โหลด",
+    "ขอ export",
+    "ขอ download",
+    # English
+    "export pdf",
+    "export as pdf",
+    "export to pdf",
+    "save as pdf",
+    "download as pdf",
+    "download pdf",
+    "give me a pdf",
+    "make a pdf",
+)
+
+
+def _is_export_request(text: str) -> bool:
+    """Detect a user message that's asking to export the previous answer.
+
+    Short queries only (≤ 80 chars) so a normal long question that happens to
+    contain "pdf" doesn't get hijacked into the export flow.
+    """
+    if not text:
+        return False
+    stripped = text.strip()
+    if not stripped or len(stripped) > 80:
+        return False
+    lowered = stripped.lower()
+    return any(kw in lowered for kw in _EXPORT_INTENT_KEYWORDS)
+
+
 HISTORY_TURNS = 6
 
 
@@ -523,6 +573,67 @@ async def chat(
                 session_title="",
                 attachments=[],
             )
+
+    # Intent: user is asking to export the previous answer as PDF.
+    # Short-circuit before RAG/LLM so we don't waste tokens; the frontend
+    # renders the export controls when it sees source="export_offer".
+    if question and not files and _is_export_request(question):
+        audit_log(
+            "export_intent_detected",
+            user=user,
+            detail={"message": question[:200]},
+            request=request,
+        )
+        # We still create a session row + save the offer message so the
+        # interaction shows up in chat history with a proper id.
+        offer_text = (
+            "ได้ค่ะ! กดปุ่มด้านล่างเพื่อบันทึกคำตอบล่าสุดเป็น PDF — "
+            "หรือดาวน์โหลดเอกสารต้นฉบับ (ถ้ามี) ก็ได้ค่ะ"
+        )
+        if use_postgres_auth():
+            from chat_pg import ensure_session_pg, save_chat_message_pg
+
+            sid, stitle = ensure_session_pg(
+                user_id=user["id"],
+                session_id=session_id,
+                first_question=question,
+                mode=mode,
+            )
+            save_chat_message_pg(
+                user_id=user["id"],
+                session_id=sid,
+                question=question,
+                answer=offer_text,
+                source="export_offer",
+                knowledge_id=None,
+                mode=mode,
+            )
+        else:
+            conn = get_db()
+            sid, stitle = _ensure_session(
+                conn, user["id"], session_id, question, mode=mode
+            )
+            conn.execute(
+                "INSERT INTO chat_history "
+                "(user_id, session_id, question, answer, source, knowledge_id) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (user["id"], sid, question, offer_text, "export_offer", None),
+            )
+            conn.execute(
+                "UPDATE chat_sessions SET updated_at = datetime('now'), mode = ? "
+                "WHERE id = ?",
+                (mode, sid),
+            )
+            conn.commit()
+
+        return ChatResponse(
+            answer=offer_text,
+            source="export_offer",
+            similarity=None,
+            session_id=sid,
+            session_title=stitle,
+            attachments=[],
+        )
 
     saved_files: list[dict] = []
     # Initialised here so it's defined regardless of which branch (files vs RAG

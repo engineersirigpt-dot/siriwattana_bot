@@ -980,17 +980,14 @@ export default function ChatPage() {
                         <MarkdownMessage text={shownText} />
                       )
                     )}
-                    {/* Export controls — only on completed bot messages.
-                        Hidden while typewriter is animating so the user
-                        doesn't try to export a half-written answer. */}
-                    {m.text && !isTyping && (
-                      <BotMessageActions
-                        msg={m}
-                        userQuestion={
-                          i > 0 && messages[i - 1].role === "user"
-                            ? messages[i - 1].text
-                            : undefined
-                        }
+                    {/* Export controls — only when the bot's reply is an
+                        export offer (user asked "ขอ PDF" etc.). Buttons act
+                        on the most recent prior bot answer (the actual
+                        content the user wants saved). */}
+                    {m.text && !isTyping && m.source === "export_offer" && (
+                      <ExportOfferActions
+                        targetMessage={findPriorBotMessage(messages, i)}
+                        targetQuestion={findPriorUserQuestion(messages, i)}
                         onAlert={(msg) => setAlertMsg(msg)}
                       />
                     )}
@@ -1163,31 +1160,65 @@ export default function ChatPage() {
   );
 }
 
-function BotMessageActions({
-  msg,
-  userQuestion,
+function findPriorBotMessage(messages: Msg[], offerIdx: number): Msg | null {
+  // Walk backwards from the export-offer message to find the most recent
+  // bot answer — that's the content the user wants saved.
+  for (let i = offerIdx - 1; i >= 0; i--) {
+    const m = messages[i];
+    if (m.role === "bot" && m.source !== "export_offer" && m.source !== "blocked") {
+      return m;
+    }
+  }
+  return null;
+}
+
+function findPriorUserQuestion(messages: Msg[], offerIdx: number): string | undefined {
+  // The user question that produced the prior bot answer — used as PDF title.
+  // Walk back: offer (bot) → request (user) → answer (bot) → real question (user).
+  const priorBot = findPriorBotMessage(messages, offerIdx);
+  if (!priorBot) return undefined;
+  const botIdx = messages.indexOf(priorBot);
+  for (let i = botIdx - 1; i >= 0; i--) {
+    if (messages[i].role === "user") return messages[i].text;
+  }
+  return undefined;
+}
+
+function ExportOfferActions({
+  targetMessage,
+  targetQuestion,
   onAlert,
 }: {
-  msg: Msg;
-  userQuestion?: string;
+  targetMessage: Msg | null;
+  targetQuestion?: string;
   onAlert: (msg: string) => void;
 }) {
   const [exporting, setExporting] = useState(false);
   const [downloading, setDownloading] = useState(false);
 
-  const hasSource = !!msg.source_knowledge_id && !!msg.source_file;
+  if (!targetMessage) {
+    return (
+      <p className="mt-2 text-xs text-gray-500 italic">
+        ยังไม่มีคำตอบล่าสุดให้บันทึก — ลองถามคำถามก่อน แล้วพิมพ์ "ขอ PDF" อีกครั้งค่ะ
+      </p>
+    );
+  }
+
+  const hasSource =
+    !!targetMessage.source_knowledge_id && !!targetMessage.source_file;
 
   async function handleExportPdf() {
-    if (exporting) return;
+    if (exporting || !targetMessage) return;
     setExporting(true);
     try {
-      const titleBase = userQuestion?.trim() || "Sirivatana chat";
-      const safeTitle = titleBase.length > 60 ? titleBase.slice(0, 57) + "..." : titleBase;
+      const titleBase = targetQuestion?.trim() || "Sirivatana chat";
+      const safeTitle =
+        titleBase.length > 60 ? titleBase.slice(0, 57) + "..." : titleBase;
       const filename = `Sirivatana_${sanitizeFilename(safeTitle)}.pdf`;
       await exportAnswerPdf({
-        content: msg.text,
+        content: targetMessage.text,
         title: safeTitle,
-        userQuestion,
+        userQuestion: targetQuestion,
         filename,
       });
     } catch (e: unknown) {
@@ -1198,35 +1229,38 @@ function BotMessageActions({
   }
 
   async function handleDownloadSource() {
-    if (!msg.source_knowledge_id || downloading) return;
+    if (!targetMessage?.source_knowledge_id || downloading) return;
     setDownloading(true);
     try {
-      await downloadSourceFile(msg.source_knowledge_id);
+      await downloadSourceFile(targetMessage.source_knowledge_id);
     } catch (e: unknown) {
-      onAlert("ดาวน์โหลดเอกสารต้นฉบับไม่สำเร็จ: " + (e instanceof Error ? e.message : ""));
+      onAlert(
+        "ดาวน์โหลดเอกสารต้นฉบับไม่สำเร็จ: " +
+          (e instanceof Error ? e.message : ""),
+      );
     } finally {
       setDownloading(false);
     }
   }
 
   return (
-    <div className="mt-2 flex flex-wrap items-center gap-2">
+    <div className="mt-3 flex flex-wrap items-center gap-2">
       <button
         type="button"
         onClick={handleExportPdf}
         disabled={exporting}
-        className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-lg border border-purple-200 bg-purple-50 text-purple-700 hover:bg-purple-100 hover:border-purple-300 transition-all disabled:opacity-60 disabled:cursor-wait"
-        title="บันทึกคำตอบนี้เป็น PDF"
+        className="inline-flex items-center gap-1.5 px-4 py-2 text-sm rounded-xl border border-purple-300 bg-purple-50 text-purple-700 hover:bg-purple-100 hover:border-purple-400 transition-all disabled:opacity-60 disabled:cursor-wait shadow-sm"
+        title="บันทึกคำตอบล่าสุดเป็น PDF"
       >
         {exporting ? (
           <>
-            <Loader2 size={13} className="animate-spin" />
+            <Loader2 size={15} className="animate-spin" />
             กำลังสร้าง PDF…
           </>
         ) : (
           <>
-            <FileDown size={13} />
-            Export PDF
+            <FileDown size={15} />
+            ดาวน์โหลด PDF
           </>
         )}
       </button>
@@ -1236,18 +1270,18 @@ function BotMessageActions({
           type="button"
           onClick={handleDownloadSource}
           disabled={downloading}
-          className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-lg border border-gray-200 bg-white text-gray-700 hover:bg-gray-50 hover:border-gray-300 transition-all disabled:opacity-60 disabled:cursor-wait max-w-[320px]"
-          title={`ดาวน์โหลด: ${msg.source_file}`}
+          className="inline-flex items-center gap-1.5 px-4 py-2 text-sm rounded-xl border border-gray-300 bg-white text-gray-700 hover:bg-gray-50 hover:border-gray-400 transition-all disabled:opacity-60 disabled:cursor-wait shadow-sm max-w-[360px]"
+          title={`ดาวน์โหลด: ${targetMessage.source_file}`}
         >
           {downloading ? (
             <>
-              <Loader2 size={13} className="animate-spin" />
+              <Loader2 size={15} className="animate-spin" />
               กำลังดาวน์โหลด…
             </>
           ) : (
             <>
-              <FileText size={13} className="flex-shrink-0 text-purple-500" />
-              <span className="truncate">📎 {msg.source_file}</span>
+              <FileText size={15} className="flex-shrink-0 text-purple-500" />
+              <span className="truncate">📎 {targetMessage.source_file}</span>
             </>
           )}
         </button>
