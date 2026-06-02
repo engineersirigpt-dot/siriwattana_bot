@@ -9,7 +9,9 @@ import {
   ChevronRight,
   Download,
   Eye,
+  FileDown,
   FileText,
+  Loader2,
   Folder,
   FolderOpen,
   ImageIcon,
@@ -30,6 +32,8 @@ import {
   API_BASE,
   api,
   clearAuth,
+  downloadSourceFile,
+  exportAnswerPdf,
   fetchAttachmentBlobUrl,
   getRole,
   getToken,
@@ -51,6 +55,15 @@ type Msg = {
   text: string;
   source?: string;
   attachments?: Attachment[];
+  // For bot messages backed by a KB chunk: lets the UI surface the
+  // "📎 ดาวน์โหลดเอกสารต้นฉบับ" button. Optional — LLM-only answers won't
+  // have these fields and the button won't render.
+  source_knowledge_id?: number | null;
+  source_file?: string | null;
+  // Carries the matching user question (the previous Msg) so the export
+  // PDF can include it in the document header without re-deriving from
+  // message order.
+  question?: string;
 };
 
 type Session = {
@@ -253,13 +266,21 @@ export default function ChatPage() {
     answer: string;
     source: string;
     attachments?: Attachment[];
+    source_knowledge_id?: number | null;
+    source_file?: string | null;
   };
 
   function hydrateMessages(loaded: LoadedMessage[]): Msg[] {
     const result: Msg[] = [];
     for (const m of loaded) {
       result.push({ role: "user", text: m.question, attachments: m.attachments ?? [] });
-      result.push({ role: "bot", text: m.answer, source: m.source });
+      result.push({
+        role: "bot",
+        text: m.answer,
+        source: m.source,
+        source_knowledge_id: m.source_knowledge_id ?? null,
+        source_file: m.source_file ?? null,
+      });
     }
     return result;
   }
@@ -425,7 +446,13 @@ export default function ChatPage() {
         if (copy[lastUserIdx]?.role === "user") {
           copy[lastUserIdx] = { ...copy[lastUserIdx], attachments: res.attachments };
         }
-        copy.push({ role: "bot", text: res.answer, source: res.source });
+        copy.push({
+          role: "bot",
+          text: res.answer,
+          source: res.source,
+          source_knowledge_id: res.source_knowledge_id ?? null,
+          source_file: res.source_file ?? null,
+        });
         newBotIdx = copy.length - 1;
         return copy;
       });
@@ -953,6 +980,20 @@ export default function ChatPage() {
                         <MarkdownMessage text={shownText} />
                       )
                     )}
+                    {/* Export controls — only on completed bot messages.
+                        Hidden while typewriter is animating so the user
+                        doesn't try to export a half-written answer. */}
+                    {m.text && !isTyping && (
+                      <BotMessageActions
+                        msg={m}
+                        userQuestion={
+                          i > 0 && messages[i - 1].role === "user"
+                            ? messages[i - 1].text
+                            : undefined
+                        }
+                        onAlert={(msg) => setAlertMsg(msg)}
+                      />
+                    )}
                   </div>
                 </div>
               );
@@ -1120,6 +1161,105 @@ export default function ChatPage() {
       />
     </div>
   );
+}
+
+function BotMessageActions({
+  msg,
+  userQuestion,
+  onAlert,
+}: {
+  msg: Msg;
+  userQuestion?: string;
+  onAlert: (msg: string) => void;
+}) {
+  const [exporting, setExporting] = useState(false);
+  const [downloading, setDownloading] = useState(false);
+
+  const hasSource = !!msg.source_knowledge_id && !!msg.source_file;
+
+  async function handleExportPdf() {
+    if (exporting) return;
+    setExporting(true);
+    try {
+      const titleBase = userQuestion?.trim() || "Sirivatana chat";
+      const safeTitle = titleBase.length > 60 ? titleBase.slice(0, 57) + "..." : titleBase;
+      const filename = `Sirivatana_${sanitizeFilename(safeTitle)}.pdf`;
+      await exportAnswerPdf({
+        content: msg.text,
+        title: safeTitle,
+        userQuestion,
+        filename,
+      });
+    } catch (e: unknown) {
+      onAlert("Export PDF ไม่สำเร็จ: " + (e instanceof Error ? e.message : ""));
+    } finally {
+      setExporting(false);
+    }
+  }
+
+  async function handleDownloadSource() {
+    if (!msg.source_knowledge_id || downloading) return;
+    setDownloading(true);
+    try {
+      await downloadSourceFile(msg.source_knowledge_id);
+    } catch (e: unknown) {
+      onAlert("ดาวน์โหลดเอกสารต้นฉบับไม่สำเร็จ: " + (e instanceof Error ? e.message : ""));
+    } finally {
+      setDownloading(false);
+    }
+  }
+
+  return (
+    <div className="mt-2 flex flex-wrap items-center gap-2">
+      <button
+        type="button"
+        onClick={handleExportPdf}
+        disabled={exporting}
+        className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-lg border border-purple-200 bg-purple-50 text-purple-700 hover:bg-purple-100 hover:border-purple-300 transition-all disabled:opacity-60 disabled:cursor-wait"
+        title="บันทึกคำตอบนี้เป็น PDF"
+      >
+        {exporting ? (
+          <>
+            <Loader2 size={13} className="animate-spin" />
+            กำลังสร้าง PDF…
+          </>
+        ) : (
+          <>
+            <FileDown size={13} />
+            Export PDF
+          </>
+        )}
+      </button>
+
+      {hasSource && (
+        <button
+          type="button"
+          onClick={handleDownloadSource}
+          disabled={downloading}
+          className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-lg border border-gray-200 bg-white text-gray-700 hover:bg-gray-50 hover:border-gray-300 transition-all disabled:opacity-60 disabled:cursor-wait max-w-[320px]"
+          title={`ดาวน์โหลด: ${msg.source_file}`}
+        >
+          {downloading ? (
+            <>
+              <Loader2 size={13} className="animate-spin" />
+              กำลังดาวน์โหลด…
+            </>
+          ) : (
+            <>
+              <FileText size={13} className="flex-shrink-0 text-purple-500" />
+              <span className="truncate">📎 {msg.source_file}</span>
+            </>
+          )}
+        </button>
+      )}
+    </div>
+  );
+}
+
+function sanitizeFilename(name: string): string {
+  // Strip characters Windows / OSX can't have in a filename, plus any whitespace
+  // that survives. Keep Thai chars intact so the file name stays meaningful.
+  return name.replace(/[\\/:*?"<>|]+/g, "").replace(/\s+/g, "_").slice(0, 80) || "chat";
 }
 
 function PendingFileChip({ file, onRemove }: { file: File; onRemove: () => void }) {

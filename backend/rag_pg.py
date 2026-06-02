@@ -191,7 +191,9 @@ def search_knowledge_pg(
                         k.id,
                         k.question,
                         k.answer,
-                        kv.embedding <-> %s::vector AS distance
+                        kv.embedding <-> %s::vector AS distance,
+                        k.source_file,
+                        k.source_dept
                     FROM knowledge_vec kv
                     JOIN knowledge k ON k.id = kv.knowledge_id
                     {where_clause}
@@ -202,14 +204,16 @@ def search_knowledge_pg(
                 )
                 rows = cur.fetchall()
             except Exception:
-                # Filter columns don't exist yet (pre-migration). Fall back to no filter.
+                # Pre-migration fallback: schema doesn't have source_file/dept yet.
                 cur.execute(
                     """
                     SELECT
                         k.id,
                         k.question,
                         k.answer,
-                        kv.embedding <-> %s::vector AS distance
+                        kv.embedding <-> %s::vector AS distance,
+                        NULL::text AS source_file,
+                        NULL::text AS source_dept
                     FROM knowledge_vec kv
                     JOIN knowledge k ON k.id = kv.knowledge_id
                     ORDER BY kv.embedding <-> %s::vector
@@ -239,6 +243,8 @@ def search_knowledge_pg(
         "question": top[1],
         "answer": top[2],
         "similarity": sim,
+        "source_file": top[4],
+        "source_dept": top[5],
     }
 
 

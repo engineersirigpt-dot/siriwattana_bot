@@ -123,6 +123,10 @@ class ChatResponse(BaseModel):
     session_id: int
     session_title: str
     attachments: list[dict] = []
+    # Set when the answer came from a KB chunk (source='rag' / 'rag-calc').
+    # Frontend uses these to render the "📎 ดาวน์โหลดเอกสารต้นฉบับ" button.
+    source_knowledge_id: int | None = None
+    source_file: str | None = None
 
 
 class KnowledgeIn(BaseModel):
@@ -521,6 +525,10 @@ async def chat(
             )
 
     saved_files: list[dict] = []
+    # Initialised here so it's defined regardless of which branch (files vs RAG
+    # vs LLM-only) runs below. Only the RAG-hit path sets a real value.
+    knowledge_id: int | None = None
+    source_file_hit: str | None = None
 
     try:
         for f in files or []:
@@ -630,6 +638,7 @@ async def chat(
                     source = "rag" if category == "general" else "rag-calc"
                     knowledge_id = hit["id"]
                     similarity = hit["similarity"]
+                    source_file_hit = hit.get("source_file")
                 else:
                     log_pending_question(question, vec)
 
@@ -644,6 +653,7 @@ async def chat(
                     source = "llm" if category == "general" else "llm-calc"
                     knowledge_id = None
                     similarity = None
+                    source_file_hit = None
 
             message_id = save_chat_message_pg(
                 user_id=user["id"],
@@ -693,6 +703,8 @@ async def chat(
                 session_id=sid,
                 session_title=stitle,
                 attachments=attachment_rows,
+                source_knowledge_id=knowledge_id,
+                source_file=source_file_hit,
             )
         conn = get_db()
         sid, stitle = _ensure_session(
@@ -752,6 +764,7 @@ async def chat(
                 source = "rag" if category == "general" else "rag-calc"
                 knowledge_id = hit["id"]
                 similarity = hit["similarity"]
+                source_file_hit = hit.get("source_file")
 
             else:
                 log_pending_question(question, vec)
@@ -767,6 +780,7 @@ async def chat(
                 source = "llm" if category == "general" else "llm-calc"
                 knowledge_id = None
                 similarity = None
+                source_file_hit = None
 
         cur = conn.execute(
             "INSERT INTO chat_history (user_id, session_id, question, answer, source, knowledge_id) "
@@ -828,6 +842,8 @@ async def chat(
             session_id=sid,
             session_title=stitle,
             attachments=attachment_rows,
+            source_knowledge_id=knowledge_id,
+            source_file=source_file_hit,
         )
 
     except HTTPException:
@@ -1171,6 +1187,150 @@ def delete_session(request: Request, session_id: int, user: dict = Depends(curre
     )
 
     return {"ok": True, "deleted_files": deleted_files}
+
+
+@app.get("/chat/source/{knowledge_id}")
+@limiter.limit("30/minute")
+def download_source_document(
+    knowledge_id: int,
+    request: Request,
+    user: dict = Depends(current_user),
+):
+    """Stream the original .docx / .pdf / .pptx that produced a KB chunk.
+
+    `source_file` is stored as a bare filename; we walk `data/kb_sources/`
+    (preferring the subfolder named by `source_dept`) to find the actual file
+    on disk so the resolution is robust to subfolder renames.
+    """
+    import mimetypes
+    from pathlib import Path
+    from urllib.parse import quote
+
+    if use_postgres_auth():
+        from db_pg import get_pg_conn
+
+        with get_pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT source_file, source_dept, COALESCE(confidentiality, 'internal')
+                    FROM knowledge
+                    WHERE id = %s
+                    """,
+                    (knowledge_id,),
+                )
+                row = cur.fetchone()
+    else:
+        conn = get_db()
+        sql_row = conn.execute(
+            """
+            SELECT source_file, source_dept,
+                   COALESCE(confidentiality, 'internal') AS confidentiality
+            FROM knowledge WHERE id = ?
+            """,
+            (knowledge_id,),
+        ).fetchone()
+        row = (
+            (sql_row["source_file"], sql_row["source_dept"], sql_row["confidentiality"])
+            if sql_row
+            else None
+        )
+
+    if not row or not row[0]:
+        raise HTTPException(404, "ไม่พบเอกสารต้นฉบับ")
+
+    source_file, source_dept, confidentiality = row
+
+    # Confidential rows: admin-only download. Internal/public: any signed-in
+    # user — same rule we already use elsewhere for KB visibility.
+    if confidentiality == "confidential" and user.get("role") != "admin":
+        audit_log(
+            "source_download_denied_confidential",
+            user=user,
+            detail={"knowledge_id": knowledge_id, "source_file": source_file},
+            request=request,
+        )
+        raise HTTPException(403, "เอกสารนี้เป็น confidential — เฉพาะ admin เท่านั้น")
+
+    # Resolve the file. Start under <KB_ROOT>/<source_dept>/ if dept is set;
+    # fall back to a recursive walk so dept renames / nested subfolders don't
+    # break things.
+    kb_root = Path("data/kb_sources").resolve()
+    if not kb_root.exists():
+        raise HTTPException(500, "KB source directory not configured")
+
+    resolved: Path | None = None
+
+    def _candidate_match(p: Path) -> bool:
+        return p.is_file() and p.name == source_file
+
+    if source_dept:
+        # Search inside data/kb_sources/**/<source_dept>/...
+        for parent in kb_root.rglob(source_dept):
+            if not parent.is_dir():
+                continue
+            for child in parent.rglob(source_file):
+                if _candidate_match(child):
+                    resolved = child
+                    break
+            if resolved:
+                break
+
+    if resolved is None:
+        # Last-resort fallback: scan the whole tree.
+        for child in kb_root.rglob(source_file):
+            if _candidate_match(child):
+                resolved = child
+                break
+
+    if resolved is None:
+        audit_log(
+            "source_download_missing",
+            user=user,
+            detail={
+                "knowledge_id": knowledge_id,
+                "source_file": source_file,
+                "source_dept": source_dept,
+            },
+            request=request,
+        )
+        raise HTTPException(404, f"เอกสารต้นฉบับหายไปจาก server: {source_file}")
+
+    # Path-traversal guard: the resolved path must still be inside kb_root.
+    try:
+        resolved.resolve().relative_to(kb_root)
+    except ValueError:
+        raise HTTPException(400, "invalid source path")
+
+    mime, _ = mimetypes.guess_type(resolved.name)
+    if not mime:
+        mime = "application/octet-stream"
+
+    audit_log(
+        "source_download",
+        user=user,
+        detail={
+            "knowledge_id": knowledge_id,
+            "source_file": source_file,
+            "source_dept": source_dept,
+            "size_bytes": resolved.stat().st_size,
+        },
+        request=request,
+    )
+
+    # RFC 5987 filename* keeps Thai filenames intact across browsers.
+    safe_ascii = source_file.encode("ascii", "replace").decode("ascii")
+    cd = (
+        f'attachment; filename="{safe_ascii}"; '
+        f"filename*=UTF-8''{quote(source_file)}"
+    )
+
+    return FileResponse(
+        path=str(resolved),
+        media_type=mime,
+        filename=source_file,
+        headers={"Content-Disposition": cd},
+    )
 
 
 @app.post("/chat/export-pdf")

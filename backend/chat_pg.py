@@ -229,9 +229,11 @@ def get_session_messages_pg(session_id: int, user_id: int) -> dict | None:
             cur.execute(
                 """
                 SELECT h.id, h.question, h.answer, h.source, h.asked_at,
-                       a.id, a.filename, a.content_type, a.size_bytes
+                       a.id, a.filename, a.content_type, a.size_bytes,
+                       h.knowledge_id, k.source_file
                 FROM chat_history h
                 LEFT JOIN attachments a ON a.message_id = h.id
+                LEFT JOIN knowledge k ON k.id = h.knowledge_id
                 WHERE h.session_id = %s
                 ORDER BY h.id ASC, a.id ASC
                 """,
@@ -250,6 +252,10 @@ def get_session_messages_pg(session_id: int, user_id: int) -> dict | None:
                 "source": row[3],
                 "asked_at": row[4].isoformat() if row[4] else None,
                 "attachments": [],
+                # Carry the source doc info so the chat UI can re-render the
+                # "📎 ดาวน์โหลดเอกสารต้นฉบับ" button when an old session is reopened.
+                "source_knowledge_id": row[9],
+                "source_file": row[10],
             }
         if row[5] is not None:
             messages[msg_id]["attachments"].append({

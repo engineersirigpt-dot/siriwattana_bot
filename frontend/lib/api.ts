@@ -75,6 +75,10 @@ export async function sendChat(opts: {
   session_id: number;
   session_title: string;
   attachments: Array<{ id: number; filename: string; content_type: string; size_bytes: number }>;
+  // RAG hits carry the source document so the UI can offer a "📎 ดาวน์โหลด
+  // เอกสารต้นฉบับ" button. Null for LLM-only answers and blocked questions.
+  source_knowledge_id?: number | null;
+  source_file?: string | null;
 }> {
   const fd = new FormData();
   fd.append("message", opts.message);
@@ -98,6 +102,74 @@ export async function sendChat(opts: {
 
 export function attachmentUrl(id: number): string {
   return `${API_BASE}/attachments/${id}`;
+}
+
+export async function exportAnswerPdf(opts: {
+  content: string;
+  title?: string;
+  userQuestion?: string;
+  filename?: string;
+}): Promise<void> {
+  const token = getToken();
+  const res = await fetch(`${API_BASE}/chat/export-pdf`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    body: JSON.stringify({
+      content: opts.content,
+      title: opts.title,
+      user_question: opts.userQuestion,
+    }),
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(text || "สร้าง PDF ไม่สำเร็จ");
+  }
+  triggerDownload(await res.blob(), opts.filename ?? "Sirivatana_chat.pdf");
+}
+
+export async function downloadSourceFile(knowledgeId: number): Promise<void> {
+  const token = getToken();
+  const res = await fetch(`${API_BASE}/chat/source/${knowledgeId}`, {
+    headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(text || "ดาวน์โหลดเอกสารต้นฉบับไม่สำเร็จ");
+  }
+  // Preserve the server-provided filename so Thai-named docs land with the
+  // right name on the user's disk instead of "download.docx".
+  const cd = res.headers.get("Content-Disposition") || "";
+  const filename = parseFilenameFromContentDisposition(cd) || "source-document";
+  triggerDownload(await res.blob(), filename);
+}
+
+function triggerDownload(blob: Blob, filename: string): void {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  // Give the browser a beat to start the download before revoking.
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+function parseFilenameFromContentDisposition(cd: string): string | null {
+  // RFC 5987 filename* takes precedence for non-ASCII names (Thai!).
+  const utf8 = /filename\*=UTF-8''([^;]+)/i.exec(cd);
+  if (utf8) {
+    try {
+      return decodeURIComponent(utf8[1]);
+    } catch {
+      // fall through
+    }
+  }
+  const ascii = /filename="?([^";]+)"?/i.exec(cd);
+  return ascii ? ascii[1] : null;
 }
 
 export async function fetchAttachmentBlobUrl(id: number): Promise<string> {
