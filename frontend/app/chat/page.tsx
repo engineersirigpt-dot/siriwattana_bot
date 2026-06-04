@@ -1596,17 +1596,19 @@ export default function ChatPage() {
                         />
                         <span className="ml-2 text-sm text-gray-500">กำลังคิด…</span>
                       </div>
+                    ) : isTyping ? (
+                      // Fake char-by-char typing (used by the file/non-stream
+                      // path): render plain since slicing markdown mid-token
+                      // would look broken.
+                      <p className="leading-relaxed text-gray-800 whitespace-pre-wrap text-[15px]">
+                        {shownText}
+                        <span className="inline-block w-0.5 h-4 bg-purple-500 ml-0.5 align-middle animate-pulse" />
+                      </p>
                     ) : (
-                      (m.text || isStreaming) && (
-                        animating ? (
-                          <p className="leading-relaxed text-gray-800 whitespace-pre-wrap text-[15px]">
-                            {shownText}
-                            <span className="inline-block w-0.5 h-4 bg-purple-500 ml-0.5 align-middle animate-pulse" />
-                          </p>
-                        ) : (
-                          <MarkdownMessage text={shownText} />
-                        )
-                      )
+                      // Real streaming + finished answers: render Markdown live
+                      // so tables/bold/headings look formatted as they stream in
+                      // (instead of raw "| col | col |" text).
+                      (m.text || isStreaming) && <MarkdownMessage text={shownText} />
                     )}
                     {/* Export controls — only when the bot's reply is an
                         export offer (user asked "ขอ PDF" etc.). Buttons act
