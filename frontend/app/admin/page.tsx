@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
   ArrowLeft,
+  BarChart3,
   ChevronDown,
   ChevronUp,
   CheckCircle2,
@@ -11,9 +12,12 @@ import {
   HelpCircle,
   History,
   Lock,
+  MessageSquare,
   Plus,
   ShieldCheck,
   Sparkles,
+  ThumbsDown,
+  ThumbsUp,
   Trash2,
   Unlock,
   Users,
@@ -82,11 +86,33 @@ type UserActionTarget = {
   user: AdminUser;
 };
 
-type Tab = "pending" | "knowledge" | "history" | "users";
+type Analytics = {
+  totals: {
+    messages: number;
+    sessions: number;
+    users: number;
+    messages_7d: number;
+    feedback_up: number;
+    feedback_down: number;
+  };
+  source_breakdown: { source: string; count: number }[];
+  daily_volume: { day: string; count: number }[];
+  top_unanswered: { question: string; ask_count: number }[];
+  recent_downvotes: {
+    question: string;
+    reason: string | null;
+    username: string;
+    created_at: string | null;
+  }[];
+  top_users: { username: string; count: number }[];
+};
+
+type Tab = "analytics" | "pending" | "knowledge" | "history" | "users";
 
 export default function AdminPage() {
   const router = useRouter();
-  const [tab, setTab] = useState<Tab>("pending");
+  const [tab, setTab] = useState<Tab>("analytics");
+  const [analytics, setAnalytics] = useState<Analytics | null>(null);
   const [pending, setPending] = useState<Pending[]>([]);
   const [knowledge, setKnowledge] = useState<Knowledge[]>([]);
   const [adminSessions, setAdminSessions] = useState<AdminSession[]>([]);
@@ -109,16 +135,18 @@ export default function AdminPage() {
   }, [router]);
 
   async function refresh() {
-    const [p, k, h, u] = await Promise.all([
+    const [p, k, h, u, a] = await Promise.all([
       api<Pending[]>("/admin/pending"),
       api<Knowledge[]>("/admin/knowledge"),
       api<AdminSession[]>("/admin/chat-history"),
       api<AdminUser[]>("/admin/users").catch(() => [] as AdminUser[]),
+      api<Analytics>("/admin/analytics").catch(() => null),
     ]);
     setPending(p);
     setKnowledge(k);
     setAdminSessions(h);
     setUsers(u);
+    setAnalytics(a);
   }
 
   async function performUserAction() {
@@ -287,6 +315,12 @@ export default function AdminPage() {
         {/* Tabs */}
         <div className="flex gap-2 mb-6 bg-white/60 backdrop-blur-sm p-1.5 rounded-2xl shadow-sm border border-white/40 w-fit">
           <TabButton
+            active={tab === "analytics"}
+            onClick={() => setTab("analytics")}
+            icon={<BarChart3 size={18} />}
+            label="ภาพรวม"
+          />
+          <TabButton
             active={tab === "pending"}
             onClick={() => setTab("pending")}
             icon={<HelpCircle size={18} />}
@@ -315,6 +349,9 @@ export default function AdminPage() {
             count={users.length}
           />
         </div>
+
+        {/* Analytics / overview tab */}
+        {tab === "analytics" && <AnalyticsView data={analytics} />}
 
         {/* Pending tab */}
         {tab === "pending" && (
@@ -606,7 +643,7 @@ function TabButton({
   onClick: () => void;
   icon: React.ReactNode;
   label: string;
-  count: number;
+  count?: number;
 }) {
   return (
     <button
@@ -619,13 +656,15 @@ function TabButton({
     >
       {icon}
       <span>{label}</span>
-      <span
-        className={`px-2 py-0.5 rounded-full text-xs ${
-          active ? "bg-white/20 text-white" : "bg-gray-100 text-gray-600"
-        }`}
-      >
-        {count}
-      </span>
+      {count !== undefined && (
+        <span
+          className={`px-2 py-0.5 rounded-full text-xs ${
+            active ? "bg-white/20 text-white" : "bg-gray-100 text-gray-600"
+          }`}
+        >
+          {count}
+        </span>
+      )}
     </button>
   );
 }
@@ -873,5 +912,274 @@ function IconAction({
     >
       {icon}
     </button>
+  );
+}
+
+const SOURCE_LABELS: Record<string, string> = {
+  rag: "ฐานความรู้ (KB)",
+  "rag-calc": "ฐานความรู้ (คำนวณ)",
+  llm: "AI ทั่วไป",
+  blocked: "ถูกบล็อก",
+  export_offer: "ขอ export",
+};
+
+function MetricCard({
+  label,
+  value,
+  accent,
+  icon,
+}: {
+  label: string;
+  value: number | string;
+  accent: string;
+  icon: React.ReactNode;
+}) {
+  return (
+    <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-4 flex items-center gap-3">
+      <div className={`p-2.5 rounded-xl ${accent}`}>{icon}</div>
+      <div className="min-w-0">
+        <div className="text-2xl font-semibold text-gray-800 leading-tight">
+          {value}
+        </div>
+        <div className="text-xs text-gray-500 truncate">{label}</div>
+      </div>
+    </div>
+  );
+}
+
+function BarRow({
+  label,
+  count,
+  max,
+  color = "bg-purple-500",
+  sub,
+}: {
+  label: string;
+  count: number;
+  max: number;
+  color?: string;
+  sub?: string;
+}) {
+  const pct = max > 0 ? Math.max(4, Math.round((count / max) * 100)) : 0;
+  return (
+    <div className="flex items-center gap-3 text-sm">
+      <div className="w-32 shrink-0 truncate text-gray-600" title={label}>
+        {label}
+      </div>
+      <div className="flex-1 bg-gray-100 rounded-full h-5 overflow-hidden">
+        <div
+          className={`h-full ${color} rounded-full transition-all`}
+          style={{ width: `${pct}%` }}
+        />
+      </div>
+      <div className="w-16 shrink-0 text-right text-gray-700 tabular-nums">
+        {count}
+        {sub && <span className="text-gray-400 text-xs ml-1">{sub}</span>}
+      </div>
+    </div>
+  );
+}
+
+function AnalyticsView({ data }: { data: Analytics | null }) {
+  if (!data) {
+    return (
+      <EmptyState
+        icon={<BarChart3 className="text-purple-400" size={48} />}
+        title="ยังไม่มีข้อมูลภาพรวม"
+        description="เมื่อมีการใช้งานแชทและการให้คะแนนคำตอบ สถิติจะแสดงที่นี่"
+      />
+    );
+  }
+
+  const t = data.totals;
+  const totalFeedback = t.feedback_up + t.feedback_down;
+  const downRate =
+    totalFeedback > 0 ? Math.round((t.feedback_down / totalFeedback) * 100) : 0;
+  const maxDaily = Math.max(1, ...data.daily_volume.map((d) => d.count));
+  const maxSource = Math.max(1, ...data.source_breakdown.map((s) => s.count));
+  const maxUser = Math.max(1, ...data.top_users.map((u) => u.count));
+
+  return (
+    <div className="space-y-6">
+      {/* Stat cards */}
+      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
+        <MetricCard
+          label="ข้อความทั้งหมด"
+          value={t.messages.toLocaleString()}
+          accent="bg-purple-100 text-purple-600"
+          icon={<MessageSquare size={18} />}
+        />
+        <MetricCard
+          label="บทสนทนา"
+          value={t.sessions.toLocaleString()}
+          accent="bg-blue-100 text-blue-600"
+          icon={<History size={18} />}
+        />
+        <MetricCard
+          label="ผู้ใช้"
+          value={t.users.toLocaleString()}
+          accent="bg-amber-100 text-amber-600"
+          icon={<Users size={18} />}
+        />
+        <MetricCard
+          label="ข้อความ 7 วัน"
+          value={t.messages_7d.toLocaleString()}
+          accent="bg-green-100 text-green-600"
+          icon={<BarChart3 size={18} />}
+        />
+        <MetricCard
+          label="ถูกใจ (👍)"
+          value={t.feedback_up.toLocaleString()}
+          accent="bg-green-100 text-green-600"
+          icon={<ThumbsUp size={18} />}
+        />
+        <MetricCard
+          label={`ไม่ถูกใจ — ${downRate}% ของโหวต`}
+          value={t.feedback_down.toLocaleString()}
+          accent="bg-red-100 text-red-600"
+          icon={<ThumbsDown size={18} />}
+        />
+      </div>
+
+      <div className="grid lg:grid-cols-2 gap-6">
+        {/* Daily volume */}
+        <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-5">
+          <h3 className="font-medium text-gray-800 mb-4">
+            ปริมาณข้อความ (14 วันล่าสุด)
+          </h3>
+          {data.daily_volume.length === 0 ? (
+            <p className="text-sm text-gray-400">ยังไม่มีข้อมูล</p>
+          ) : (
+            <div className="flex items-end gap-1 h-40">
+              {data.daily_volume.map((d) => (
+                <div
+                  key={d.day}
+                  className="flex-1 flex flex-col items-center justify-end gap-1 group"
+                  title={`${d.day}: ${d.count}`}
+                >
+                  <span className="text-[10px] text-gray-400 opacity-0 group-hover:opacity-100">
+                    {d.count}
+                  </span>
+                  <div
+                    className="w-full bg-purple-400 group-hover:bg-purple-600 rounded-t transition-all"
+                    style={{
+                      height: `${Math.max(4, (d.count / maxDaily) * 100)}%`,
+                    }}
+                  />
+                  <span className="text-[9px] text-gray-400">
+                    {d.day.slice(5)}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* Source breakdown */}
+        <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-5">
+          <h3 className="font-medium text-gray-800 mb-4">ที่มาของคำตอบ</h3>
+          {data.source_breakdown.length === 0 ? (
+            <p className="text-sm text-gray-400">ยังไม่มีข้อมูล</p>
+          ) : (
+            <div className="space-y-2.5">
+              {data.source_breakdown.map((s) => (
+                <BarRow
+                  key={s.source}
+                  label={SOURCE_LABELS[s.source] ?? s.source}
+                  count={s.count}
+                  max={maxSource}
+                  color={
+                    s.source === "blocked"
+                      ? "bg-red-400"
+                      : s.source.startsWith("rag")
+                      ? "bg-green-500"
+                      : "bg-purple-500"
+                  }
+                />
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Top unanswered = KB gaps */}
+      <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-5">
+        <h3 className="font-medium text-gray-800 mb-1">
+          คำถามที่ตอบไม่ได้บ่อย (ช่องว่างความรู้)
+        </h3>
+        <p className="text-xs text-gray-500 mb-4">
+          ควรเพิ่มคำตอบเหล่านี้เข้าฐานความรู้ — ดูที่แท็บ “คำถามรอตอบ”
+        </p>
+        {data.top_unanswered.length === 0 ? (
+          <p className="text-sm text-gray-400">ไม่มี — เยี่ยมมาก! 🎉</p>
+        ) : (
+          <div className="space-y-2">
+            {data.top_unanswered.map((q, i) => (
+              <div
+                key={i}
+                className="flex items-center justify-between gap-3 text-sm border-b border-gray-50 pb-2 last:border-0"
+              >
+                <span className="text-gray-700 truncate">{q.question}</span>
+                <span className="shrink-0 bg-amber-100 text-amber-700 px-2 py-0.5 rounded-full text-xs">
+                  ถูกถาม {q.ask_count} ครั้ง
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Recent downvotes */}
+      <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-5">
+        <h3 className="font-medium text-gray-800 mb-4 flex items-center gap-2">
+          <ThumbsDown size={16} className="text-red-500" />
+          คำตอบที่โดน 👎 ล่าสุด
+        </h3>
+        {data.recent_downvotes.length === 0 ? (
+          <p className="text-sm text-gray-400">ยังไม่มี</p>
+        ) : (
+          <div className="space-y-3">
+            {data.recent_downvotes.map((d, i) => (
+              <div key={i} className="border-b border-gray-50 pb-3 last:border-0">
+                <p className="text-sm text-gray-800 font-medium">{d.question}</p>
+                {d.reason && (
+                  <p className="text-sm text-red-600 mt-0.5">เหตุผล: {d.reason}</p>
+                )}
+                <p className="text-xs text-gray-400 mt-0.5">
+                  โดย {d.username}
+                  {d.created_at &&
+                    " · " +
+                      new Date(
+                        d.created_at.endsWith("Z") || d.created_at.includes("+")
+                          ? d.created_at
+                          : d.created_at + "Z",
+                      ).toLocaleString("th-TH")}
+                </p>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Top users */}
+      <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-5">
+        <h3 className="font-medium text-gray-800 mb-4">ผู้ใช้ที่ถามมากที่สุด</h3>
+        {data.top_users.length === 0 ? (
+          <p className="text-sm text-gray-400">ยังไม่มีข้อมูล</p>
+        ) : (
+          <div className="space-y-2.5">
+            {data.top_users.map((u) => (
+              <BarRow
+                key={u.username}
+                label={u.username}
+                count={u.count}
+                max={maxUser}
+                color="bg-blue-500"
+              />
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
   );
 }

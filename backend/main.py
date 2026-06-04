@@ -2086,6 +2086,110 @@ def admin_export_all(request: Request, user: dict = Depends(require_admin)):
     )
 
 
+def _admin_analytics_sqlite() -> dict:
+    """SQLite mirror of admin_pg.admin_analytics_pg — keep shapes in sync."""
+    conn = get_db()
+
+    def scalar(sql: str) -> int:
+        row = conn.execute(sql).fetchone()
+        return int(row[0]) if row else 0
+
+    total_messages = scalar("SELECT COUNT(*) FROM chat_history")
+    total_sessions = scalar("SELECT COUNT(*) FROM chat_sessions")
+    total_users = scalar("SELECT COUNT(*) FROM users")
+    messages_7d = scalar(
+        "SELECT COUNT(*) FROM chat_history "
+        "WHERE asked_at >= datetime('now', '-7 days')"
+    )
+
+    votes = {
+        r["vote"]: r["c"]
+        for r in conn.execute(
+            "SELECT vote, COUNT(*) c FROM answer_feedback GROUP BY vote"
+        ).fetchall()
+    }
+
+    source_breakdown = [
+        {"source": r["source"], "count": r["c"]}
+        for r in conn.execute(
+            "SELECT source, COUNT(*) c FROM chat_history "
+            "GROUP BY source ORDER BY c DESC"
+        ).fetchall()
+    ]
+
+    daily_volume = [
+        {"day": r["d"], "count": r["c"]}
+        for r in conn.execute(
+            "SELECT date(asked_at) d, COUNT(*) c FROM chat_history "
+            "WHERE asked_at >= datetime('now', '-13 days') "
+            "GROUP BY d ORDER BY d"
+        ).fetchall()
+    ]
+
+    top_unanswered = [
+        {"question": r["question"], "ask_count": r["ask_count"]}
+        for r in conn.execute(
+            "SELECT question, ask_count FROM pending_questions "
+            "WHERE status = 'pending' "
+            "ORDER BY ask_count DESC, last_asked_at DESC LIMIT 10"
+        ).fetchall()
+    ]
+
+    recent_downvotes = [
+        {
+            "question": r["question"],
+            "reason": r["reason"],
+            "username": r["username"],
+            "created_at": r["created_at"],
+        }
+        for r in conn.execute(
+            """
+            SELECT h.question, af.reason, u.username, af.created_at
+            FROM answer_feedback af
+            JOIN chat_history h ON h.id = af.message_id
+            JOIN users u ON u.id = af.user_id
+            WHERE af.vote = 'down'
+            ORDER BY af.created_at DESC LIMIT 10
+            """
+        ).fetchall()
+    ]
+
+    top_users = [
+        {"username": r["username"], "count": r["c"]}
+        for r in conn.execute(
+            "SELECT u.username, COUNT(*) c FROM chat_history h "
+            "JOIN users u ON u.id = h.user_id "
+            "GROUP BY u.username ORDER BY c DESC LIMIT 10"
+        ).fetchall()
+    ]
+
+    return {
+        "totals": {
+            "messages": total_messages,
+            "sessions": total_sessions,
+            "users": total_users,
+            "messages_7d": messages_7d,
+            "feedback_up": votes.get("up", 0),
+            "feedback_down": votes.get("down", 0),
+        },
+        "source_breakdown": source_breakdown,
+        "daily_volume": daily_volume,
+        "top_unanswered": top_unanswered,
+        "recent_downvotes": recent_downvotes,
+        "top_users": top_users,
+    }
+
+
+@app.get("/admin/analytics")
+def admin_analytics(user: dict = Depends(require_admin)):
+    """Usage + answer-quality overview for the admin dashboard."""
+    if use_postgres_auth():
+        from admin_pg import admin_analytics_pg
+
+        return admin_analytics_pg()
+    return _admin_analytics_sqlite()
+
+
 @app.get("/admin/pending")
 def list_pending(user: dict = Depends(require_admin)):
     if use_postgres_auth():

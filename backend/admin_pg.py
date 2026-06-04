@@ -488,3 +488,103 @@ def admin_delete_user_chats_pg(user_id: int) -> dict:
             )
 
     return {"sessions_deleted": len(session_ids), "file_paths": file_paths}
+
+
+def admin_analytics_pg() -> dict:
+    """Aggregate usage stats for the admin dashboard (postgres).
+
+    Read-only. Mirrors the sqlite branch in main._admin_analytics_sqlite —
+    keep the two in sync when changing the shape.
+    """
+    with get_pg_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM chat_history")
+            total_messages = cur.fetchone()[0]
+
+            cur.execute("SELECT COUNT(*) FROM chat_sessions")
+            total_sessions = cur.fetchone()[0]
+
+            cur.execute("SELECT COUNT(*) FROM users")
+            total_users = cur.fetchone()[0]
+
+            cur.execute(
+                "SELECT COUNT(*) FROM chat_history "
+                "WHERE asked_at >= now() - interval '7 days'"
+            )
+            messages_7d = cur.fetchone()[0]
+
+            cur.execute("SELECT vote, COUNT(*) FROM answer_feedback GROUP BY vote")
+            votes = {row[0]: row[1] for row in cur.fetchall()}
+
+            cur.execute(
+                "SELECT source, COUNT(*) c FROM chat_history "
+                "GROUP BY source ORDER BY c DESC"
+            )
+            source_breakdown = [
+                {"source": r[0], "count": r[1]} for r in cur.fetchall()
+            ]
+
+            cur.execute(
+                """
+                SELECT to_char(date_trunc('day', asked_at), 'YYYY-MM-DD') d,
+                       COUNT(*) c
+                FROM chat_history
+                WHERE asked_at >= now() - interval '13 days'
+                GROUP BY d ORDER BY d
+                """
+            )
+            daily_volume = [{"day": r[0], "count": r[1]} for r in cur.fetchall()]
+
+            cur.execute(
+                "SELECT question, ask_count FROM pending_questions "
+                "WHERE status = 'pending' "
+                "ORDER BY ask_count DESC, last_asked_at DESC LIMIT 10"
+            )
+            top_unanswered = [
+                {"question": r[0], "ask_count": r[1]} for r in cur.fetchall()
+            ]
+
+            cur.execute(
+                """
+                SELECT h.question, af.reason, u.username, af.created_at
+                FROM answer_feedback af
+                JOIN chat_history h ON h.id = af.message_id
+                JOIN users u ON u.id = af.user_id
+                WHERE af.vote = 'down'
+                ORDER BY af.created_at DESC LIMIT 10
+                """
+            )
+            recent_downvotes = [
+                {
+                    "question": r[0],
+                    "reason": r[1],
+                    "username": r[2],
+                    "created_at": r[3].isoformat() if r[3] else None,
+                }
+                for r in cur.fetchall()
+            ]
+
+            cur.execute(
+                """
+                SELECT u.username, COUNT(*) c
+                FROM chat_history h JOIN users u ON u.id = h.user_id
+                GROUP BY u.username ORDER BY c DESC LIMIT 10
+                """
+            )
+            top_users = [{"username": r[0], "count": r[1]} for r in cur.fetchall()]
+
+    return {
+        "totals": {
+            "messages": total_messages,
+            "sessions": total_sessions,
+            "users": total_users,
+            "messages_7d": messages_7d,
+            "feedback_up": votes.get("up", 0),
+            "feedback_down": votes.get("down", 0),
+        },
+        "source_breakdown": source_breakdown,
+        "daily_volume": daily_volume,
+        "top_unanswered": top_unanswered,
+        "recent_downvotes": recent_downvotes,
+        "top_users": top_users,
+    }
