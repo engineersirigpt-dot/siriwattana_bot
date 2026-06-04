@@ -226,6 +226,69 @@ def answer_freely(
     return (res.choices[0].message.content or "").strip()
 
 
+def stream_from_context(
+    question: str,
+    context_question: str,
+    context_answer: str,
+    model: str | None = None,
+    history: list[dict] | None = None,
+):
+    """Streaming twin of answer_from_context — yields text deltas as the model
+    produces them. Same prompt/messages so output matches the non-stream path."""
+    messages: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT_RAG}]
+    if history:
+        messages.extend(history)
+    messages.append(
+        {
+            "role": "user",
+            "content": (
+                f"ข้อมูลในระบบ:\nคำถาม: {context_question}\nคำตอบ: {context_answer}\n\n"
+                f"คำถามจากผู้ใช้: {question}"
+            ),
+        }
+    )
+    chosen = model or LLM_MODEL
+    stream = _get_client().chat.completions.create(
+        model=chosen,
+        messages=messages,
+        stream=True,
+        **_token_kwargs(chosen, 2048),
+    )
+    for chunk in stream:
+        if not chunk.choices:
+            continue
+        delta = chunk.choices[0].delta.content
+        if delta:
+            yield delta
+
+
+def stream_freely(
+    question: str,
+    model: str | None = None,
+    history: list[dict] | None = None,
+    company_only: bool = False,
+):
+    """Streaming twin of answer_freely — yields text deltas."""
+    system_prompt = SYSTEM_PROMPT_COMPANY_FREE if company_only else SYSTEM_PROMPT_FREE
+    messages: list[dict] = [{"role": "system", "content": system_prompt}]
+    if history:
+        messages.extend(history)
+    messages.append({"role": "user", "content": question})
+    chosen = model or LLM_MODEL
+    stream = _get_client().chat.completions.create(
+        model=chosen,
+        messages=messages,
+        stream=True,
+        **_token_kwargs(chosen, 2048),
+    )
+    for chunk in stream:
+        if not chunk.choices:
+            continue
+        delta = chunk.choices[0].delta.content
+        if delta:
+            yield delta
+
+
 def answer_with_files(
     question: str,
     image_data_urls: list[str],

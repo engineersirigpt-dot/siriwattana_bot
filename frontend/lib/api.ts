@@ -105,6 +105,83 @@ export async function sendChat(opts: {
   return res.json();
 }
 
+export type StreamDone = {
+  type: "done";
+  source: string;
+  session_id: number;
+  session_title: string;
+  message_id: number | null;
+  source_knowledge_id?: number | null;
+  source_file?: string | null;
+  turn_count?: number | null;
+  turn_limit?: number | null;
+};
+
+// Streaming twin of sendChat for text-only questions. Calls onDelta for each
+// token chunk and onDone with the final metadata. Throws if the request can't
+// start (e.g. 501 on sqlite, 4xx) so the caller can fall back to sendChat.
+export async function sendChatStream(
+  opts: {
+    message: string;
+    sessionId: number | null;
+    mode?: "normal" | "company";
+    signal?: AbortSignal;
+  },
+  handlers: {
+    onDelta: (text: string) => void;
+    onDone: (meta: StreamDone) => void;
+    onError: (detail: string, code?: string) => void;
+  },
+): Promise<void> {
+  const fd = new FormData();
+  fd.append("message", opts.message);
+  if (opts.sessionId !== null) fd.append("session_id", String(opts.sessionId));
+  if (opts.mode && opts.mode !== "normal") fd.append("mode", opts.mode);
+
+  const token = getToken();
+  const res = await fetch(`${API_BASE}/chat/stream`, {
+    method: "POST",
+    headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+    body: fd,
+    signal: opts.signal,
+  });
+  if (!res.ok || !res.body) {
+    const text = await res.text().catch(() => "");
+    throw new Error(text || res.statusText);
+  }
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = "";
+
+  const handleLine = (line: string) => {
+    const trimmed = line.trim();
+    if (!trimmed) return;
+    let evt: Record<string, unknown>;
+    try {
+      evt = JSON.parse(trimmed);
+    } catch {
+      return; // ignore malformed partial lines
+    }
+    if (evt.type === "delta") handlers.onDelta(String(evt.v ?? ""));
+    else if (evt.type === "done") handlers.onDone(evt as unknown as StreamDone);
+    else if (evt.type === "error")
+      handlers.onError(String(evt.detail ?? "เกิดข้อผิดพลาด"), evt.code as string | undefined);
+  };
+
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    let nl: number;
+    while ((nl = buf.indexOf("\n")) >= 0) {
+      handleLine(buf.slice(0, nl));
+      buf = buf.slice(nl + 1);
+    }
+  }
+  if (buf.trim()) handleLine(buf);
+}
+
 export function attachmentUrl(id: number): string {
   return `${API_BASE}/attachments/${id}`;
 }

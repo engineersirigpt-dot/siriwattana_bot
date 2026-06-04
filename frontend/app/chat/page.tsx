@@ -49,6 +49,7 @@ import {
   getUsername,
   revokeSessionShare,
   sendChat,
+  sendChatStream,
   sendFeedback,
   shareSession,
 } from "@/lib/api";
@@ -233,6 +234,9 @@ export default function ChatPage() {
   const [isDragging, setIsDragging] = useState(false);
   const [typingIndex, setTypingIndex] = useState<number | null>(null);
   const [typedChars, setTypedChars] = useState(0);
+  // Index of the bot message currently being streamed token-by-token (real
+  // server streaming, not the fake typing animation). null when not streaming.
+  const [streamingIndex, setStreamingIndex] = useState<number | null>(null);
   const [chatMode, setChatMode] = useState<"normal" | "company">("normal");
   // Per-session question budget. Server is the source of truth: every /chat
   // response refreshes turnCount, and loadSession seeds it from the GET.
@@ -395,6 +399,7 @@ export default function ChatPage() {
     setReadOnlyOwner(null);
     setReadOnlyToken(null);
     setTypingIndex(null);
+    setStreamingIndex(null);
     try {
       const data = await api<{
         messages: LoadedMessage[];
@@ -568,6 +573,7 @@ export default function ChatPage() {
     setInput("");
     setPendingFiles([]);
     setTypingIndex(null);
+    setStreamingIndex(null);
     setChatMode(mode);
     setTurnCount(0);
     setSharedToken(null);
@@ -697,6 +703,27 @@ export default function ChatPage() {
     abortRef.current = controller;
 
     try {
+      // Files use the classic non-stream path (vision model, different shape).
+      // Plain text questions stream token-by-token; on any startup failure
+      // (e.g. sqlite → 501) we transparently fall back to non-stream.
+      if (filesToSend.length > 0) {
+        await runNonStream(text, filesToSend, controller);
+      } else {
+        await runStreaming(text, controller);
+      }
+    } finally {
+      setSending(false);
+      abortRef.current = null;
+    }
+  }
+
+  // Classic request/response: wait for the full answer, then fake-type it out.
+  async function runNonStream(
+    text: string,
+    filesToSend: File[],
+    controller: AbortController,
+  ) {
+    try {
       const res = await sendChat({
         message: text,
         sessionId: currentSid,
@@ -708,7 +735,7 @@ export default function ChatPage() {
       setMessages((m) => {
         const copy = [...m];
         const lastUserIdx = copy.length - 1;
-        if (copy[lastUserIdx]?.role === "user") {
+        if (filesToSend.length > 0 && copy[lastUserIdx]?.role === "user") {
           copy[lastUserIdx] = { ...copy[lastUserIdx], attachments: res.attachments };
         }
         copy.push({
@@ -727,15 +754,12 @@ export default function ChatPage() {
       setTypedChars(0);
       setTypingIndex(newBotIdx);
       setCurrentSid(res.session_id);
-      // Server-driven counter so the badge stays accurate even if export-offer
-      // messages don't count against the quota.
       if (typeof res.turn_count === "number") setTurnCount(res.turn_count);
       if (typeof res.turn_limit === "number") setTurnLimit(res.turn_limit);
       refreshSessions();
       if (role === "admin") refreshTeamSessions();
     } catch (e: unknown) {
-      const isAbort =
-        e instanceof DOMException && e.name === "AbortError";
+      const isAbort = e instanceof DOMException && e.name === "AbortError";
       setMessages((m) => [
         ...m,
         {
@@ -745,9 +769,104 @@ export default function ChatPage() {
             : `เกิดข้อผิดพลาด: ${e instanceof Error ? e.message : ""}`,
         },
       ]);
+    }
+  }
+
+  // Real server streaming: append an empty bot bubble, then fill it as tokens
+  // arrive. Falls back to runNonStream if the stream never starts.
+  async function runStreaming(text: string, controller: AbortController) {
+    let botIdx = -1;
+    setMessages((m) => {
+      const copy = [...m];
+      copy.push({ role: "bot", text: "", source: "", question: text, myVote: null });
+      botIdx = copy.length - 1;
+      return copy;
+    });
+    setStreamingIndex(botIdx);
+
+    const patchBot = (patch: Partial<Msg>) =>
+      setMessages((m) => {
+        const copy = [...m];
+        if (copy[botIdx]) copy[botIdx] = { ...copy[botIdx], ...patch };
+        return copy;
+      });
+    const appendBot = (t: string) =>
+      setMessages((m) => {
+        const copy = [...m];
+        if (copy[botIdx]) copy[botIdx] = { ...copy[botIdx], text: copy[botIdx].text + t };
+        return copy;
+      });
+
+    let receivedAny = false;
+    try {
+      await sendChatStream(
+        {
+          message: text,
+          sessionId: currentSid,
+          mode: chatMode,
+          signal: controller.signal,
+        },
+        {
+          onDelta: (t) => {
+            receivedAny = true;
+            appendBot(t);
+          },
+          onDone: (meta) => {
+            patchBot({
+              source: meta.source,
+              source_knowledge_id: meta.source_knowledge_id ?? null,
+              source_file: meta.source_file ?? null,
+              id: meta.message_id ?? undefined,
+            });
+            setCurrentSid(meta.session_id);
+            if (typeof meta.turn_count === "number") setTurnCount(meta.turn_count);
+            if (typeof meta.turn_limit === "number") setTurnLimit(meta.turn_limit);
+            refreshSessions();
+            if (role === "admin") refreshTeamSessions();
+          },
+          onError: (detail) => {
+            receivedAny = true;
+            // Append so any partial answer already streamed isn't lost.
+            setMessages((m) => {
+              const copy = [...m];
+              if (copy[botIdx]) {
+                const sep = copy[botIdx].text ? "\n\n" : "";
+                copy[botIdx] = {
+                  ...copy[botIdx],
+                  text: copy[botIdx].text + sep + `⚠️ ${detail}`,
+                };
+              }
+              return copy;
+            });
+          },
+        },
+      );
+    } catch (e: unknown) {
+      const isAbort = e instanceof DOMException && e.name === "AbortError";
+      if (isAbort) {
+        setMessages((m) => {
+          const copy = [...m];
+          if (copy[botIdx] && !copy[botIdx].text) {
+            copy[botIdx] = { ...copy[botIdx], text: "ยกเลิกการถามแล้ว" };
+          }
+          return copy;
+        });
+      } else if (!receivedAny) {
+        // Stream never produced anything (e.g. 501 on sqlite, network) — drop
+        // the empty bubble and retry through the classic non-stream path.
+        setMessages((m) => {
+          const copy = [...m];
+          if (copy[botIdx]?.role === "bot" && !copy[botIdx].text) copy.splice(botIdx, 1);
+          return copy;
+        });
+        setStreamingIndex(null);
+        await runNonStream(text, [], controller);
+        return;
+      } else {
+        appendBot("\n\n⚠️ การเชื่อมต่อขัดข้อง");
+      }
     } finally {
-      setSending(false);
-      abortRef.current = null;
+      setStreamingIndex(null);
     }
   }
 
@@ -1377,6 +1496,8 @@ export default function ChatPage() {
             )}
             {messages.map((m, i) => {
               const isTyping = i === typingIndex;
+              const isStreaming = i === streamingIndex;
+              const animating = isTyping || isStreaming;
               const shownText = isTyping ? m.text.slice(0, typedChars) : m.text;
 
               if (m.role === "user") {
@@ -1403,8 +1524,8 @@ export default function ChatPage() {
                     {m.attachments && m.attachments.length > 0 && (
                       <AttachmentList attachments={m.attachments} onUserBubble={false} />
                     )}
-                    {m.text && (
-                      isTyping ? (
+                    {(m.text || isStreaming) && (
+                      animating ? (
                         <p className="leading-relaxed text-gray-800 whitespace-pre-wrap">
                           {shownText}
                           <span className="inline-block w-0.5 h-4 bg-purple-500 ml-0.5 align-middle animate-pulse" />
@@ -1417,7 +1538,7 @@ export default function ChatPage() {
                         export offer (user asked "ขอ PDF" etc.). Buttons act
                         on the most recent prior bot answer (the actual
                         content the user wants saved). */}
-                    {m.text && !isTyping && m.source === "export_offer" && (
+                    {m.text && !animating && m.source === "export_offer" && (
                       <ExportOfferActions
                         targetMessage={findPriorBotMessage(messages, i)}
                         targetQuestion={findPriorUserQuestion(messages, i)}
@@ -1428,7 +1549,7 @@ export default function ChatPage() {
                         replies / while typing). Feedback needs the saved row id
                         and is hidden in read-only views. */}
                     {m.text &&
-                      !isTyping &&
+                      !animating &&
                       m.source !== "export_offer" &&
                       m.source !== "blocked" && (
                         <div className="mt-2 flex items-center gap-1">
@@ -1479,7 +1600,7 @@ export default function ChatPage() {
                 </div>
               );
             })}
-            {sending && (
+            {sending && streamingIndex === null && (
               <div className="flex justify-start gap-3">
                 <img
                   src="/Logo_siri.jpg"

@@ -1,5 +1,6 @@
 import csv
 import io
+import json
 import os
 
 from audit import audit_log
@@ -43,6 +44,8 @@ from llm import (
     answer_from_context,
     answer_with_files,
     classify_query,
+    stream_freely,
+    stream_from_context,
 )
 from mi_auth import mi_enabled, verify_mi_credentials
 from rag import add_knowledge, embed, log_pending_question, resolve_pending, search_knowledge
@@ -1048,6 +1051,186 @@ async def chat(
             request=request,
         )
         raise
+
+
+@app.post("/chat/stream")
+@limiter.limit("30/minute")
+async def chat_stream(
+    request: Request,
+    message: str = Form(...),
+    session_id: int | None = Form(None),
+    mode: str = Form("normal"),
+    user: dict = Depends(current_user),
+):
+    """Streaming twin of /chat for text questions (no file uploads).
+
+    Emits NDJSON: {"type":"delta","v":"..."} per token, then a final
+    {"type":"done", ...metadata} or {"type":"error","detail":...}. Reuses the
+    exact same pipeline (safety → turn budget → export intent → RAG → LLM) as
+    /chat; only the LLM call streams. Postgres only — the client falls back to
+    /chat for sqlite or when files are attached.
+    """
+    if not use_postgres_auth():
+        raise HTTPException(501, "streaming is only available on postgres deployment")
+
+    question = message.strip()
+    company_only = mode == "company"
+    if not question:
+        raise HTTPException(400, "empty message")
+
+    def ev(obj: dict) -> str:
+        return json.dumps(obj, ensure_ascii=False) + "\n"
+
+    def gen():
+        from chat_pg import (
+            ensure_session_pg,
+            get_session_history_pg,
+            save_chat_message_pg,
+        )
+
+        try:
+            # 1) Safety — keyword then classifier. Mirror /chat: blocked answers
+            #    are NOT persisted to history.
+            if is_sensitive(question) is not None or classify_sensitivity(question) is not None:
+                audit_log(
+                    "sensitive_blocked_stream",
+                    user=user,
+                    detail={"message_length": len(question)},
+                    request=request,
+                )
+                yield ev({"type": "delta", "v": BLOCKED_RESPONSE})
+                yield ev({
+                    "type": "done",
+                    "source": "blocked",
+                    "session_id": session_id or 0,
+                    "session_title": "",
+                    "message_id": None,
+                    "turn_count": None,
+                    "turn_limit": MAX_TURNS_PER_SESSION,
+                })
+                return
+
+            # 2) Per-session turn cap.
+            if session_id is not None and not _is_export_request(question):
+                used = _count_session_turns(session_id)
+                if used >= MAX_TURNS_PER_SESSION:
+                    yield ev({
+                        "type": "error",
+                        "code": "turn_limit",
+                        "detail": f"แชทนี้ครบ {MAX_TURNS_PER_SESSION} คำถามแล้ว — "
+                        "กรุณาเปิด 'แชทใหม่' เพื่อถามต่อค่ะ",
+                    })
+                    return
+
+            # 3) Export intent — save the offer, no token streaming.
+            if _is_export_request(question):
+                offer_text = (
+                    "ได้ค่ะ! กดปุ่มด้านล่างเพื่อบันทึกคำตอบล่าสุดเป็น PDF — "
+                    "หรือดาวน์โหลดเอกสารต้นฉบับ (ถ้ามี) ก็ได้ค่ะ"
+                )
+                sid, stitle = ensure_session_pg(
+                    user_id=user["id"], session_id=session_id,
+                    first_question=question, mode=mode,
+                )
+                mid = save_chat_message_pg(
+                    user_id=user["id"], session_id=sid, question=question,
+                    answer=offer_text, source="export_offer",
+                    knowledge_id=None, mode=mode,
+                )
+                yield ev({"type": "delta", "v": offer_text})
+                yield ev({
+                    "type": "done", "source": "export_offer", "session_id": sid,
+                    "session_title": stitle, "message_id": mid,
+                    "turn_count": _count_session_turns(sid),
+                    "turn_limit": MAX_TURNS_PER_SESSION,
+                })
+                return
+
+            # 4) Normal answer — stream the LLM tokens.
+            sid, stitle = ensure_session_pg(
+                user_id=user["id"], session_id=session_id,
+                first_question=question, mode=mode,
+            )
+            history = get_session_history_pg(
+                session_id=session_id, user_id=user["id"], limit=HISTORY_TURNS,
+            )
+            category = classify_query(question)
+            chosen_model = LLM_MODEL_CALC if category == "calc" else LLM_MODEL
+            vec = embed(question)
+            hit = search_knowledge(
+                vec,
+                include_confidential=(user.get("role") == "admin"),
+                company_mode=company_only,
+            )
+
+            knowledge_id: int | None = None
+            source_file_hit: str | None = None
+            similarity = None
+            if hit:
+                tokens = stream_from_context(
+                    question, hit["question"], hit["answer"],
+                    model=chosen_model, history=history,
+                )
+                source = "rag" if category == "general" else "rag-calc"
+                knowledge_id = hit["id"]
+                similarity = hit["similarity"]
+                source_file_hit = hit.get("source_file")
+            else:
+                log_pending_question(question, vec)
+                audit_log(
+                    "pending_question_created",
+                    user=user,
+                    detail={"question": question[:300], "db_engine": "postgres", "via": "stream"},
+                    request=request,
+                )
+                tokens = stream_freely(
+                    question, model=chosen_model, history=history, company_only=company_only,
+                )
+                source = "llm" if category == "general" else "llm-calc"
+
+            parts: list[str] = []
+            for delta in tokens:
+                parts.append(delta)
+                yield ev({"type": "delta", "v": delta})
+            answer = "".join(parts).strip()
+
+            mid = save_chat_message_pg(
+                user_id=user["id"], session_id=sid, question=question,
+                answer=answer, source=source, knowledge_id=knowledge_id, mode=mode,
+            )
+            audit_log(
+                "chat_message",
+                user=user,
+                detail={
+                    "session_id": sid, "message_id": mid, "source": source,
+                    "similarity": similarity, "has_files": False, "file_count": 0,
+                    "message_length": len(question), "db_engine": "postgres", "via": "stream",
+                },
+                request=request,
+            )
+            yield ev({
+                "type": "done", "source": source, "session_id": sid,
+                "session_title": stitle, "message_id": mid,
+                "source_knowledge_id": knowledge_id, "source_file": source_file_hit,
+                "turn_count": _count_session_turns(sid),
+                "turn_limit": MAX_TURNS_PER_SESSION,
+            })
+        except Exception as e:
+            audit_log(
+                "chat_stream_error",
+                user=user,
+                detail={"error_type": e.__class__.__name__, "error": str(e)},
+                request=request,
+            )
+            yield ev({"type": "error", "detail": "เกิดข้อผิดพลาดในการสร้างคำตอบ"})
+
+    return StreamingResponse(
+        gen(),
+        media_type="application/x-ndjson",
+        # Defeat reverse-proxy/response buffering so tokens reach the browser
+        # as they're produced rather than all at once at the end.
+        headers={"X-Accel-Buffering": "no", "Cache-Control": "no-cache"},
+    )
 
 
 class FeedbackIn(BaseModel):
