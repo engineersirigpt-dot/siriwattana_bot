@@ -116,6 +116,20 @@ app.add_middleware(
 def _startup() -> None:
     validate_jwt_secret()
     get_db()
+    # Apply postgres migrations on every boot so a deploy that adds a column or
+    # table (e.g. answer_feedback, shared_token) is live without a manual step.
+    # init_pg_schema is fully idempotent (CREATE/ALTER ... IF NOT EXISTS).
+    if use_postgres_auth():
+        try:
+            from db_pg import init_pg_schema
+
+            init_pg_schema()
+            audit_log("pg_schema_migrated", detail={"status": "ok"})
+        except Exception as e:
+            audit_log(
+                "pg_schema_migrate_failed",
+                detail={"error_type": e.__class__.__name__, "error": str(e)},
+            )
     audit_log("app_startup", detail={"status": "ok"})
 
 
