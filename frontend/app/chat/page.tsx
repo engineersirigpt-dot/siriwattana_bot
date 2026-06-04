@@ -42,6 +42,7 @@ import {
   api,
   clearAuth,
   downloadSourceFile,
+  exportAnswerDocx,
   exportAnswerPdf,
   exportAnswerXlsx,
   fetchAttachmentBlobUrl,
@@ -195,6 +196,20 @@ const STARTER_PROMPTS: Record<"normal" | "company", string[]> = {
     "ช่วยสรุปไฟล์เอกสารที่แนบเป็นข้อๆ",
   ],
 };
+
+// Which export format the user's request asked for (drives the download button
+// under the matching answer). Mirrors the backend keyword set. Returns null
+// when no format was requested — so nothing shows unless the user asked.
+function requestedExportFormat(
+  question: string | undefined,
+): "pdf" | "docx" | "xlsx" | null {
+  if (!question) return null;
+  const q = question.toLowerCase();
+  if (/excel|xlsx|เอ็กเซล|สเปรดชี/.test(q)) return "xlsx";
+  if (/word|docx|เวิร์ด|ไฟล์ doc/.test(q)) return "docx";
+  if (/pdf|พีดีเอฟ/.test(q)) return "pdf";
+  return null;
+}
 
 // True if the text contains a GitHub-flavoured Markdown table (a row of pipes
 // followed by a |---|---| separator). Drives the "Export Excel" button.
@@ -624,6 +639,26 @@ export default function ChatPage() {
     } catch (e: unknown) {
       setAlertMsg(
         "Export Excel ไม่สำเร็จ: " + (e instanceof Error ? e.message : ""),
+      );
+    }
+  }
+
+  async function exportPdf(m: Msg) {
+    try {
+      await exportAnswerPdf({ content: m.text, userQuestion: m.question });
+    } catch (e: unknown) {
+      setAlertMsg(
+        "Export PDF ไม่สำเร็จ: " + (e instanceof Error ? e.message : ""),
+      );
+    }
+  }
+
+  async function exportDocx(text: string) {
+    try {
+      await exportAnswerDocx({ content: text });
+    } catch (e: unknown) {
+      setAlertMsg(
+        "Export Word ไม่สำเร็จ: " + (e instanceof Error ? e.message : ""),
       );
     }
   }
@@ -1645,6 +1680,7 @@ export default function ChatPage() {
                       <ExportOfferActions
                         targetMessage={findPriorBotMessage(messages, i)}
                         targetQuestion={findPriorUserQuestion(messages, i)}
+                        format={requestedExportFormat(m.question) ?? "pdf"}
                         onAlert={(msg) => setAlertMsg(msg)}
                       />
                     )}
@@ -1670,16 +1706,39 @@ export default function ChatPage() {
                               <Copy size={13} />
                             )}
                           </button>
-                          {/* Excel export — only when the answer contains a
-                              Markdown table worth pulling into a spreadsheet. */}
-                          {hasMarkdownTable(m.text) && (
+                          {/* Export buttons appear only when the user's request
+                              asked for that format (e.g. "...เป็น pdf"), so the
+                              row stays clean otherwise. Excel also shows whenever
+                              the answer has a table (handy + the user liked it). */}
+                          {requestedExportFormat(m.question) === "pdf" && (
+                            <button
+                              onClick={() => exportPdf(m)}
+                              className="flex items-center gap-1 px-2 py-1 rounded-md text-xs text-red-600 bg-red-50 hover:bg-red-100 transition-all"
+                              title="ดาวน์โหลดคำตอบเป็น PDF"
+                            >
+                              <FileDown size={13} />
+                              <span>ดาวน์โหลด PDF</span>
+                            </button>
+                          )}
+                          {requestedExportFormat(m.question) === "docx" && (
+                            <button
+                              onClick={() => exportDocx(m.text)}
+                              className="flex items-center gap-1 px-2 py-1 rounded-md text-xs text-blue-600 bg-blue-50 hover:bg-blue-100 transition-all"
+                              title="ดาวน์โหลดคำตอบเป็น Word (.docx)"
+                            >
+                              <FileText size={13} />
+                              <span>ดาวน์โหลด Word</span>
+                            </button>
+                          )}
+                          {(requestedExportFormat(m.question) === "xlsx" ||
+                            hasMarkdownTable(m.text)) && (
                             <button
                               onClick={() => exportXlsx(m.text)}
-                              className="flex items-center gap-1 px-2 py-1 rounded-md text-xs text-gray-400 hover:text-green-700 hover:bg-green-50 transition-all"
+                              className="flex items-center gap-1 px-2 py-1 rounded-md text-xs text-green-700 bg-green-50 hover:bg-green-100 transition-all"
                               title="ดาวน์โหลดตารางเป็น Excel (.xlsx)"
                             >
                               <Sheet size={13} />
-                              <span>Excel</span>
+                              <span>ดาวน์โหลด Excel</span>
                             </button>
                           )}
                           {m.id && !readOnlyOwner && (
@@ -2146,10 +2205,12 @@ function findPriorUserQuestion(messages: Msg[], offerIdx: number): string | unde
 function ExportOfferActions({
   targetMessage,
   targetQuestion,
+  format = "pdf",
   onAlert,
 }: {
   targetMessage: Msg | null;
   targetQuestion?: string;
+  format?: "pdf" | "docx" | "xlsx";
   onAlert: (msg: string) => void;
 }) {
   const [exporting, setExporting] = useState(false);
@@ -2166,22 +2227,44 @@ function ExportOfferActions({
   const hasSource =
     !!targetMessage.source_knowledge_id && !!targetMessage.source_file;
 
-  async function handleExportPdf() {
+  const fmtMeta = {
+    pdf: { label: "PDF", verb: "สร้าง PDF" },
+    docx: { label: "Word", verb: "สร้าง Word" },
+    xlsx: { label: "Excel", verb: "สร้าง Excel" },
+  }[format];
+
+  async function handleExport() {
     if (exporting || !targetMessage) return;
     setExporting(true);
     try {
       const titleBase = targetQuestion?.trim() || "Sirivatana chat";
       const safeTitle =
         titleBase.length > 60 ? titleBase.slice(0, 57) + "..." : titleBase;
-      const filename = `Sirivatana_${sanitizeFilename(safeTitle)}.pdf`;
-      await exportAnswerPdf({
-        content: targetMessage.text,
-        title: safeTitle,
-        userQuestion: targetQuestion,
-        filename,
-      });
+      if (format === "docx") {
+        await exportAnswerDocx({
+          content: targetMessage.text,
+          title: safeTitle,
+          filename: `Sirivatana_${sanitizeFilename(safeTitle)}.docx`,
+        });
+      } else if (format === "xlsx") {
+        await exportAnswerXlsx({
+          content: targetMessage.text,
+          title: safeTitle,
+          filename: `Sirivatana_${sanitizeFilename(safeTitle)}.xlsx`,
+        });
+      } else {
+        await exportAnswerPdf({
+          content: targetMessage.text,
+          title: safeTitle,
+          userQuestion: targetQuestion,
+          filename: `Sirivatana_${sanitizeFilename(safeTitle)}.pdf`,
+        });
+      }
     } catch (e: unknown) {
-      onAlert("Export PDF ไม่สำเร็จ: " + (e instanceof Error ? e.message : ""));
+      onAlert(
+        `Export ${fmtMeta.label} ไม่สำเร็จ: ` +
+          (e instanceof Error ? e.message : ""),
+      );
     } finally {
       setExporting(false);
     }
@@ -2206,20 +2289,20 @@ function ExportOfferActions({
     <div className="mt-3 flex flex-wrap items-center gap-2">
       <button
         type="button"
-        onClick={handleExportPdf}
+        onClick={handleExport}
         disabled={exporting}
         className="inline-flex items-center gap-1.5 px-4 py-2 text-sm rounded-xl border border-purple-300 bg-purple-50 text-purple-700 hover:bg-purple-100 hover:border-purple-400 transition-all disabled:opacity-60 disabled:cursor-wait shadow-sm"
-        title="บันทึกคำตอบล่าสุดเป็น PDF"
+        title={`บันทึกคำตอบล่าสุดเป็น ${fmtMeta.label}`}
       >
         {exporting ? (
           <>
             <Loader2 size={15} className="animate-spin" />
-            กำลังสร้าง PDF…
+            กำลัง{fmtMeta.verb}…
           </>
         ) : (
           <>
             <FileDown size={15} />
-            ดาวน์โหลด PDF
+            ดาวน์โหลด {fmtMeta.label}
           </>
         )}
       </button>

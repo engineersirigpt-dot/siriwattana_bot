@@ -2,6 +2,7 @@ import csv
 import io
 import json
 import os
+import re
 
 from audit import audit_log
 from dotenv import load_dotenv
@@ -186,6 +187,11 @@ class ExportPdfIn(BaseModel):
 
 class ExportXlsxIn(BaseModel):
     content: str            # markdown body (its tables are exported)
+    title: str | None = None
+
+
+class ExportDocxIn(BaseModel):
+    content: str            # markdown body
     title: str | None = None
 
 
@@ -438,19 +444,38 @@ _EXPORT_INTENT_KEYWORDS = (
 )
 
 
-def _is_export_request(text: str) -> bool:
-    """Detect a user message that's asking to export the previous answer.
+# A format word anywhere means the user wants a file. A *content verb* means
+# they're also asking to produce something new ("สรุปเป็น pdf") — in that case
+# we GENERATE the answer (and the UI shows a download button) instead of
+# short-circuiting to "export the previous answer".
+_EXPORT_FORMAT_RE = re.compile(
+    r"\b(pdf|docx?|word|xlsx|excel)\b|พีดีเอฟ|เวิร์ด|เอ็กเซล|สเปรดชี",
+    re.IGNORECASE,
+)
+_CONTENT_VERB_RE = re.compile(
+    r"สรุป|แปล|เขียน|ร่าง|อธิบาย|เปรียบเทียบ|ตาราง|วิเคราะห์|คำนวณ|ออกแบบ|"
+    r"แต่ง|แปลง|รายการ|ขั้นตอน|จัดทำ|บอก|แนะนำ|ช่วย|list|summar|translat|write|"
+    r"explain|compar",
+    re.IGNORECASE,
+)
 
-    Short queries only (≤ 80 chars) so a normal long question that happens to
-    contain "pdf" doesn't get hijacked into the export flow.
+
+def _is_export_request(text: str) -> bool:
+    """True only for a *bare* request to export the previous answer (e.g.
+    "ขอ PDF", "export word"). Messages that also ask to produce content
+    ("สรุปเป็น pdf ให้หน่อย") return False so they go through normal generation
+    — the UI then offers a download button for the requested format.
     """
     if not text:
         return False
     stripped = text.strip()
-    if not stripped or len(stripped) > 80:
+    if not stripped or len(stripped) > 60:
         return False
-    lowered = stripped.lower()
-    return any(kw in lowered for kw in _EXPORT_INTENT_KEYWORDS)
+    if not _EXPORT_FORMAT_RE.search(stripped):
+        return False
+    if _CONTENT_VERB_RE.search(stripped):
+        return False
+    return True
 
 
 HISTORY_TURNS = 6
@@ -2061,6 +2086,49 @@ def export_xlsx(
         headers={
             "Content-Disposition": 'attachment; filename="Sirivatana_table.xlsx"',
             "Content-Length": str(len(xlsx_bytes)),
+        },
+    )
+
+
+@app.post("/chat/export-docx")
+@limiter.limit("20/minute")
+def export_docx(
+    request: Request,
+    body: ExportDocxIn,
+    user: dict = Depends(current_user),
+):
+    """Export an answer (markdown) as an editable Word .docx. Any signed-in
+    user can export their own answers."""
+    content = (body.content or "").strip()
+    if not content:
+        raise HTTPException(400, "content is required")
+
+    from docx_export import export_markdown_to_docx
+
+    try:
+        docx_bytes = export_markdown_to_docx(content, title=body.title)
+    except Exception as exc:
+        audit_log(
+            "docx_export_failed",
+            user=user,
+            detail={"error": str(exc)[:300], "content_length": len(content)},
+            request=request,
+        )
+        raise HTTPException(500, f"docx generation failed: {exc}") from exc
+
+    audit_log(
+        "docx_export_success",
+        user=user,
+        detail={"content_length": len(content), "docx_bytes": len(docx_bytes)},
+        request=request,
+    )
+
+    return StreamingResponse(
+        iter([docx_bytes]),
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        headers={
+            "Content-Disposition": 'attachment; filename="Sirivatana_chat.docx"',
+            "Content-Length": str(len(docx_bytes)),
         },
     )
 
