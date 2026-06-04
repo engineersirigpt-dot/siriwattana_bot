@@ -1564,14 +1564,34 @@ export default function ChatPage() {
                     {m.attachments && m.attachments.length > 0 && (
                       <AttachmentList attachments={m.attachments} onUserBubble={false} />
                     )}
-                    {(m.text || isStreaming) && (
-                      animating ? (
-                        <p className="leading-relaxed text-gray-800 whitespace-pre-wrap">
-                          {shownText}
-                          <span className="inline-block w-0.5 h-4 bg-purple-500 ml-0.5 align-middle animate-pulse" />
-                        </p>
-                      ) : (
-                        <MarkdownMessage text={shownText} />
+                    {isStreaming && !m.text ? (
+                      // Streaming but no token yet — show a "thinking" indicator
+                      // (classifier + RAG + first token take ~1-2s).
+                      <div className="flex items-center gap-1.5 py-1">
+                        <span
+                          className="w-2 h-2 bg-purple-400 rounded-full animate-bounce"
+                          style={{ animationDelay: "0ms" }}
+                        />
+                        <span
+                          className="w-2 h-2 bg-purple-400 rounded-full animate-bounce"
+                          style={{ animationDelay: "150ms" }}
+                        />
+                        <span
+                          className="w-2 h-2 bg-purple-400 rounded-full animate-bounce"
+                          style={{ animationDelay: "300ms" }}
+                        />
+                        <span className="ml-2 text-sm text-gray-500">กำลังคิด…</span>
+                      </div>
+                    ) : (
+                      (m.text || isStreaming) && (
+                        animating ? (
+                          <p className="leading-relaxed text-gray-800 whitespace-pre-wrap">
+                            {shownText}
+                            <span className="inline-block w-0.5 h-4 bg-purple-500 ml-0.5 align-middle animate-pulse" />
+                          </p>
+                        ) : (
+                          <MarkdownMessage text={shownText} />
+                        )
                       )
                     )}
                     {/* Export controls — only when the bot's reply is an
