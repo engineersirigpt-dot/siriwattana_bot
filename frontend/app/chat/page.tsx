@@ -8,6 +8,7 @@ import {
   ChevronDown,
   ChevronRight,
   Check,
+  ClipboardList,
   Copy,
   Download,
   Eye,
@@ -40,6 +41,7 @@ import {
   downloadSourceFile,
   exportAnswerPdf,
   fetchAttachmentBlobUrl,
+  forkSharedSession,
   getRole,
   getToken,
   getUsername,
@@ -90,6 +92,18 @@ type TeamSession = {
   username: string;
   created_at: string;
   updated_at: string;
+  message_count: number;
+};
+
+// A chat someone in the team explicitly shared. Visible to every signed-in
+// user (not just admins). `shared_token` opens the read-only /chat/shared view.
+type SharedTeamSession = {
+  id: number;
+  title: string;
+  user_id: number;
+  username: string;
+  shared_token: string;
+  updated_at: string | null;
   message_count: number;
 };
 
@@ -150,8 +164,8 @@ function groupBySaved(sessions: Session[]) {
   return groups;
 }
 
-function groupByUser(sessions: TeamSession[]) {
-  const groups: Record<string, TeamSession[]> = {};
+function groupByUser<T extends { username: string }>(sessions: T[]) {
+  const groups: Record<string, T[]> = {};
   for (const s of sessions) {
     if (!groups[s.username]) groups[s.username] = [];
     groups[s.username].push(s);
@@ -163,6 +177,9 @@ export default function ChatPage() {
   const router = useRouter();
   const [sessions, setSessions] = useState<Session[]>([]);
   const [teamSessions, setTeamSessions] = useState<TeamSession[]>([]);
+  const [sharedTeamSessions, setSharedTeamSessions] = useState<
+    SharedTeamSession[]
+  >([]);
   const [currentSid, setCurrentSid] = useState<number | null>(null);
   const [messages, setMessages] = useState<Msg[]>([]);
   const [input, setInput] = useState("");
@@ -180,6 +197,11 @@ export default function ChatPage() {
   } | null>(null);
   const [alertMsg, setAlertMsg] = useState<string | null>(null);
   const [teamExpanded, setTeamExpanded] = useState(false);
+  const [sharedTeamExpanded, setSharedTeamExpanded] = useState(false);
+  // When viewing a teammate's shared chat read-only, this holds its share
+  // token so the "รับเป็นแชทของฉัน" (fork) button knows what to clone.
+  const [readOnlyToken, setReadOnlyToken] = useState<string | null>(null);
+  const [forkingInline, setForkingInline] = useState(false);
   const [folderOpen, setFolderOpen] = useState<Record<string, boolean>>({
     บันทึกไว้: true,
     ล่าสุด: true,
@@ -212,6 +234,8 @@ export default function ChatPage() {
     setRole(getRole());
     setUsername(getUsername());
     refreshSessions();
+    // Every user — not just admins — sees the team's shared chats.
+    refreshSharedTeamSessions();
 
     // Deep-link support: /chat?sid=N opens a specific session immediately.
     // Used by the fork flow (/chat/shared/{token}/fork redirects here) so
@@ -297,6 +321,16 @@ export default function ChatPage() {
     }
   }
 
+  async function refreshSharedTeamSessions() {
+    try {
+      const list = await api<SharedTeamSession[]>("/chat/shared-sessions");
+      setSharedTeamSessions(list);
+    } catch {
+      // ignore — endpoint is postgres-only; on sqlite it 501s and we just
+      // render an empty panel.
+    }
+  }
+
   type LoadedMessage = {
     question: string;
     answer: string;
@@ -325,6 +359,7 @@ export default function ChatPage() {
     setCurrentSid(sid);
     setSearchResults(null);
     setReadOnlyOwner(null);
+    setReadOnlyToken(null);
     setTypingIndex(null);
     try {
       const data = await api<{
@@ -352,6 +387,7 @@ export default function ChatPage() {
     setCurrentSid(sid);
     setSearchResults(null);
     setReadOnlyOwner(owner);
+    setReadOnlyToken(null);
     setTypingIndex(null);
     setChatMode("normal");
     try {
@@ -362,11 +398,79 @@ export default function ChatPage() {
     }
   }
 
+  // Open a teammate's shared chat read-only via its share token (any user).
+  // Unlike loadTeamSession (admin-only /admin endpoint) this goes through the
+  // public /chat/shared/{token} route and keeps the token so the user can fork.
+  async function loadSharedTeamSession(
+    sid: number,
+    owner: string,
+    token: string,
+  ) {
+    setCurrentSid(sid);
+    setSearchResults(null);
+    setReadOnlyOwner(owner);
+    setReadOnlyToken(token);
+    setTypingIndex(null);
+    try {
+      const data = await api<{
+        messages: LoadedMessage[];
+        mode?: "normal" | "company";
+      }>(`/chat/shared/${token}`);
+      setMessages(hydrateMessages(data.messages));
+      setChatMode(data.mode === "company" ? "company" : "normal");
+    } catch {
+      setMessages([]);
+      setChatMode("normal");
+    }
+  }
+
+  // Clone the shared chat being viewed into the user's own session list, then
+  // jump into the editable copy.
+  async function handleForkInline() {
+    if (!readOnlyToken || forkingInline) return;
+    setForkingInline(true);
+    try {
+      const { session_id } = await forkSharedSession(readOnlyToken);
+      setReadOnlyOwner(null);
+      setReadOnlyToken(null);
+      await refreshSessions();
+      await loadSession(session_id);
+    } catch (e: unknown) {
+      setAlertMsg(
+        "รับเป็นแชทของฉันไม่สำเร็จ: " +
+          (e instanceof Error ? e.message : "เกิดข้อผิดพลาด"),
+      );
+    } finally {
+      setForkingInline(false);
+    }
+  }
+
+  // Owner removes their own chat from the team-shared panel (keeps the chat,
+  // just kills the link). Admins use the hard-delete flow instead.
+  async function unshareFromPanel(sid: number) {
+    try {
+      await revokeSessionShare(sid);
+      if (currentSid === sid && readOnlyToken) {
+        setReadOnlyOwner(null);
+        setReadOnlyToken(null);
+        setCurrentSid(null);
+        setMessages([]);
+      }
+      if (sid === currentSid) setSharedToken(null);
+      refreshSharedTeamSessions();
+    } catch (e: unknown) {
+      setAlertMsg(
+        "ยกเลิกการแชร์ไม่สำเร็จ: " + (e instanceof Error ? e.message : ""),
+      );
+    }
+  }
+
   function newChat(mode: "normal" | "company" = "normal") {
     setCurrentSid(null);
     setMessages([]);
     setSearchResults(null);
     setReadOnlyOwner(null);
+    setReadOnlyToken(null);
     setInput("");
     setPendingFiles([]);
     setTypingIndex(null);
@@ -385,6 +489,8 @@ export default function ChatPage() {
         const { token } = await shareSession(currentSid);
         setSharedToken(token);
       }
+      // Keep the team-shared panel in sync with what the user just (un)shared.
+      refreshSharedTeamSessions();
     } catch (e: unknown) {
       setAlertMsg(
         "ทำรายการแชร์ไม่สำเร็จ: " + (e instanceof Error ? e.message : ""),
@@ -468,6 +574,7 @@ export default function ChatPage() {
 
   function exitReadOnly() {
     setReadOnlyOwner(null);
+    setReadOnlyToken(null);
     setCurrentSid(null);
     setMessages([]);
   }
@@ -580,6 +687,7 @@ export default function ChatPage() {
         exitReadOnly();
       }
       refreshTeamSessions();
+      refreshSharedTeamSessions();
     } catch (e: unknown) {
       setAlertMsg("ลบไม่สำเร็จ: " + (e instanceof Error ? e.message : ""));
     }
@@ -633,6 +741,7 @@ export default function ChatPage() {
 
   const groups = groupBySaved(sessions);
   const teamByUser = groupByUser(teamSessions);
+  const sharedByUser = groupByUser(sharedTeamSessions);
   const currentTitle = currentSid
     ? readOnlyOwner
       ? teamSessions.find((s) => s.id === currentSid)?.title ?? "บทสนทนา"
@@ -770,6 +879,110 @@ export default function ChatPage() {
             )}
           </div>
         )}
+
+        {/* Team shared chats — visible to EVERY user. Lists only chats people
+            explicitly shared. View read-only + fork; you can unshare your own,
+            admins can hard-delete any. */}
+        <div className="px-4 pb-3">
+          <button
+            onClick={() => setSharedTeamExpanded(!sharedTeamExpanded)}
+            className="w-full flex items-center justify-between gap-2 bg-white/5 hover:bg-white/10 text-white hover:text-white py-2.5 px-3 rounded-lg transition-all border border-white/10"
+          >
+            <span className="flex items-center gap-2 text-sm">
+              <Share2 size={16} />
+              แชทที่แชร์ในทีม
+              <span className="bg-white/20 text-white text-xs px-1.5 py-0.5 rounded-full">
+                {sharedTeamSessions.length}
+              </span>
+            </span>
+            {sharedTeamExpanded ? (
+              <ChevronDown size={16} />
+            ) : (
+              <ChevronRight size={16} />
+            )}
+          </button>
+
+          {sharedTeamExpanded && (
+            <div className="mt-2 max-h-64 overflow-y-auto space-y-2 bg-black/20 rounded-lg p-2">
+              {Object.entries(sharedByUser).length === 0 && (
+                <p className="text-white/85 text-xs text-center py-3">
+                  ยังไม่มีแชทที่ถูกแชร์
+                </p>
+              )}
+              {Object.entries(sharedByUser).map(([uname, list]) => {
+                const isMine = uname === username;
+                return (
+                  <div key={uname}>
+                    <div className="text-white/85 text-xs px-2 py-1 flex items-center justify-between">
+                      <span className="font-medium">
+                        {uname}
+                        {isMine && (
+                          <span className="ml-1 text-purple-200">(คุณ)</span>
+                        )}
+                      </span>
+                      <span className="bg-white/10 text-white text-[10px] px-1.5 rounded">
+                        {list.length}
+                      </span>
+                    </div>
+                    {list.map((s) => {
+                      const active =
+                        s.id === currentSid && readOnlyToken === s.shared_token;
+                      return (
+                        <div
+                          key={s.id}
+                          onClick={() =>
+                            loadSharedTeamSession(s.id, uname, s.shared_token)
+                          }
+                          className={`group w-full flex items-center gap-2 px-2 py-1.5 rounded text-left transition-all text-xs cursor-pointer ${
+                            active
+                              ? "bg-purple-400 text-white"
+                              : "text-white hover:bg-white/10"
+                          }`}
+                          title={s.title}
+                        >
+                          <Share2
+                            size={12}
+                            className="flex-shrink-0 opacity-70"
+                          />
+                          <span className="flex-1 truncate">{s.title}</span>
+                          {isMine ? (
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                unshareFromPanel(s.id);
+                              }}
+                              className="hidden group-hover:flex p-0.5 text-white/85 hover:text-amber-300 flex-shrink-0"
+                              title="ยกเลิกการแชร์ (แชทยังอยู่ของคุณ)"
+                            >
+                              <Link2Off size={12} />
+                            </button>
+                          ) : (
+                            role === "admin" && (
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setAdminDeleteTarget({
+                                    sid: s.id,
+                                    owner: uname,
+                                    title: s.title,
+                                  });
+                                }}
+                                className="hidden group-hover:flex p-0.5 text-white/85 hover:text-red-300 flex-shrink-0"
+                                title={`ลบบทสนทนานี้ของ ${uname}`}
+                              >
+                                <Trash2 size={12} />
+                              </button>
+                            )
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
 
         {/* Own sessions / search results */}
         <div className="flex-1 overflow-y-auto px-4 space-y-4">
@@ -1006,9 +1219,25 @@ export default function ChatPage() {
         {readOnlyOwner && (
           <div className="bg-amber-50 border-b border-amber-200 px-8 py-2.5 text-sm text-amber-800 flex items-center gap-2">
             <Eye size={16} />
-            <span>
+            <span className="flex-1">
               คุณกำลังดูบทสนทนาของ <strong>{readOnlyOwner}</strong> — โหมดอ่านอย่างเดียว
             </span>
+            {/* Fork is offered only when viewing via a share token (team-shared
+                panel) and the chat isn't the user's own. */}
+            {readOnlyToken && readOnlyOwner !== username && (
+              <button
+                onClick={handleForkInline}
+                disabled={forkingInline}
+                className="flex-shrink-0 inline-flex items-center gap-1.5 px-3 py-1 bg-gradient-to-r from-purple-500 to-purple-600 text-white rounded-lg text-xs font-medium hover:from-purple-600 hover:to-purple-700 transition-all shadow-sm disabled:opacity-60"
+              >
+                {forkingInline ? (
+                  <Loader2 size={13} className="animate-spin" />
+                ) : (
+                  <ClipboardList size={13} />
+                )}
+                รับเป็นแชทของฉัน
+              </button>
+            )}
           </div>
         )}
 

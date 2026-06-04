@@ -1286,6 +1286,22 @@ def revoke_session_share(
     return {"ok": True}
 
 
+@app.get("/chat/shared-sessions")
+def list_shared_sessions(user: dict = Depends(current_user)):
+    """All chats teammates have shared, newest first. Any signed-in user.
+
+    Powers the "แชทที่แชร์ในทีม" sidebar panel — every user (not just admins)
+    can browse shared chats read-only and fork them into their own. Each item
+    carries `shared_token` so the client can open /chat/shared/{token}.
+    """
+    if not use_postgres_auth():
+        raise HTTPException(501, "share is only available on postgres deployment")
+
+    from chat_pg import list_shared_sessions_pg
+
+    return list_shared_sessions_pg()
+
+
 @app.get("/chat/shared/{token}")
 def get_shared_session(token: str, user: dict = Depends(current_user)):
     """Read-only view of a shared chat. Any signed-in user can open it."""

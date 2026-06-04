@@ -383,6 +383,44 @@ def delete_session_pg(session_id: int, user_id: int) -> list[str] | None:
 # ─────────────────────── Sharing (read-only + fork) ─────────────────────────
 
 
+def list_shared_sessions_pg() -> list[dict]:
+    """Every session that has an active share token, newest first.
+
+    Visible to any signed-in user — this powers the "แชทที่แชร์ในทีม" panel
+    where teammates browse each other's shared chats read-only (and fork them).
+    Only chats the owner explicitly shared show up; private chats never appear.
+    """
+    with get_pg_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT s.id, s.title, s.user_id, u.username,
+                       s.shared_token, s.updated_at,
+                       (SELECT COUNT(*) FROM chat_history
+                        WHERE session_id = s.id) AS message_count
+                FROM chat_sessions s
+                JOIN users u ON u.id = s.user_id
+                WHERE s.shared_token IS NOT NULL
+                ORDER BY s.updated_at DESC
+                LIMIT 500
+                """
+            )
+            rows = cur.fetchall()
+
+    return [
+        {
+            "id": r[0],
+            "title": r[1],
+            "user_id": r[2],
+            "username": r[3],
+            "shared_token": r[4],
+            "updated_at": r[5].isoformat() if r[5] else None,
+            "message_count": int(r[6] or 0),
+        }
+        for r in rows
+    ]
+
+
 def share_session_pg(session_id: int, user_id: int) -> str | None:
     """Generate (or reuse) a share token for a session the user owns.
 
