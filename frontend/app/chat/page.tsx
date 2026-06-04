@@ -419,8 +419,16 @@ export default function ChatPage() {
       setMessages(hydrateMessages(data.messages));
       setChatMode(data.mode === "company" ? "company" : "normal");
     } catch {
+      // The owner revoked the share (or deleted the chat) since the panel was
+      // last refreshed — the token no longer resolves. Tell the user, drop the
+      // read-only view, and re-fetch the list so the stale entry disappears.
+      setReadOnlyOwner(null);
+      setReadOnlyToken(null);
+      setCurrentSid(null);
       setMessages([]);
       setChatMode("normal");
+      setAlertMsg(`${owner} ยกเลิกการแชร์แชทนี้แล้ว — เปิดดูไม่ได้อีก`);
+      refreshSharedTeamSessions();
     }
   }
 
