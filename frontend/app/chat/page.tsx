@@ -160,20 +160,46 @@ function isAcceptedFile(f: File): boolean {
   return TEXT_EXTS.has(fileExtension(f.name));
 }
 
-// Example questions shown on an empty chat so new users know what to ask.
-// Mode-aware: company manual vs. general assistant.
+// Pools of example questions shown on an empty chat. We sample 3 at random
+// each time a fresh chat opens (see STARTER_COUNT), so users see variety on
+// reload. Mode-aware: company manual vs. general assistant.
+const STARTER_COUNT = 3;
 const STARTER_PROMPTS: Record<"normal" | "company", string[]> = {
   company: [
     "สรุปขั้นตอนการลางานของบริษัท",
     "นโยบายการเบิกค่าใช้จ่ายมีอะไรบ้าง",
     "ติดต่อฝ่าย HR / ฝ่ายบุคคล ได้อย่างไร",
+    "สวัสดิการพนักงานมีอะไรบ้าง",
+    "ขั้นตอนการเบิกวันลาพักร้อนทำอย่างไร",
+    "ระเบียบการเข้า-ออกงาน และการตอกบัตรเป็นอย่างไร",
+    "ขั้นตอนการขอใบรับรองเงินเดือนทำอย่างไร",
+    "นโยบายความปลอดภัยในโรงงานมีอะไรบ้าง",
+    "วิธีแจ้งลาป่วยและส่งใบรับรองแพทย์",
+    "ติดต่อแผนก IT / ฝ่ายซ่อมบำรุง ได้อย่างไร",
   ],
   normal: [
     "ช่วยร่างอีเมลแจ้งลูกค้าเรื่องเลื่อนนัดหมาย",
     "สรุปประเด็นสำคัญจากข้อความที่แนบให้หน่อย",
     "ช่วยสรุปงานนี้เป็นขั้นตอนทำทีละสเต็ป",
+    "ช่วยร่างข้อความตอบกลับลูกค้าอย่างสุภาพ",
+    "ช่วยแปลข้อความนี้เป็นภาษาอังกฤษ",
+    "ช่วยเขียนสรุปการประชุมจากโน้ตที่ให้",
+    "ช่วยตรวจแก้คำผิดและปรับสำนวนข้อความนี้",
+    "ช่วยคิดหัวข้ออีเมลให้น่าสนใจ 5 แบบ",
+    "ช่วยร่างประกาศภายในบริษัทสั้นๆ",
+    "ช่วยสรุปไฟล์เอกสารที่แนบเป็นข้อๆ",
   ],
 };
+
+// Pick `n` distinct random items from `arr` (Fisher-Yates partial shuffle).
+function sampleN<T>(arr: T[], n: number): T[] {
+  const copy = [...arr];
+  for (let i = copy.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [copy[i], copy[j]] = [copy[j], copy[i]];
+  }
+  return copy.slice(0, n);
+}
 
 function groupBySaved(sessions: Session[]) {
   const groups: Record<string, Session[]> = {
@@ -237,6 +263,12 @@ export default function ChatPage() {
   // Index of the bot message currently being streamed token-by-token (real
   // server streaming, not the fake typing animation). null when not streaming.
   const [streamingIndex, setStreamingIndex] = useState<number | null>(null);
+  // Bumped on each "new chat" so the starter-prompt sample reshuffles.
+  const [starterSeed, setStarterSeed] = useState(0);
+  // Sampled client-side (in an effect) — NOT during render — so Math.random
+  // can't desync server vs client HTML (hydration mismatch). Empty on the
+  // server; filled right after mount, then on mode change / new chat.
+  const [starters, setStarters] = useState<string[]>([]);
   const [chatMode, setChatMode] = useState<"normal" | "company">("normal");
   // Per-session question budget. Server is the source of truth: every /chat
   // response refreshes turnCount, and loadSession seeds it from the GET.
@@ -294,6 +326,12 @@ export default function ChatPage() {
   useEffect(() => {
     if (role === "admin") refreshTeamSessions();
   }, [role]);
+
+  // Reshuffle the starter prompts (client-side only) on mount, mode change,
+  // and each new chat (starterSeed bump).
+  useEffect(() => {
+    setStarters(sampleN(STARTER_PROMPTS[chatMode], STARTER_COUNT));
+  }, [chatMode, starterSeed]);
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
@@ -577,6 +615,7 @@ export default function ChatPage() {
     setChatMode(mode);
     setTurnCount(0);
     setSharedToken(null);
+    setStarterSeed((s) => s + 1);
   }
 
   async function handleShareToggle() {
@@ -1471,13 +1510,14 @@ export default function ChatPage() {
                 />
                 <p>พิมพ์คำถามเกี่ยวกับบริษัทหรือคำถามทั่วไปได้เลย</p>
                 {/* Starter prompts — give new users a sense of what to ask.
-                    Clicking fills the box (doesn't auto-send) so they can edit. */}
-                {!readOnlyOwner && (
+                    Clicking fills the box (doesn't auto-send) so they can edit.
+                    Sampled client-side, so empty until after mount. */}
+                {!readOnlyOwner && starters.length > 0 && (
                   <div className="mt-6 flex flex-wrap justify-center gap-2 max-w-xl mx-auto">
                     <span className="w-full text-xs text-gray-400 mb-1">
                       ตัวอย่างคำถาม
                     </span>
-                    {STARTER_PROMPTS[chatMode].map((p) => (
+                    {starters.map((p) => (
                       <button
                         key={p}
                         type="button"
