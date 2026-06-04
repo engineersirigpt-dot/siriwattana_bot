@@ -28,6 +28,7 @@ import {
   Plus,
   Search,
   Send,
+  Sheet,
   Settings,
   Square,
   ThumbsDown,
@@ -42,6 +43,7 @@ import {
   clearAuth,
   downloadSourceFile,
   exportAnswerPdf,
+  exportAnswerXlsx,
   fetchAttachmentBlobUrl,
   forkSharedSession,
   getRole,
@@ -193,6 +195,21 @@ const STARTER_PROMPTS: Record<"normal" | "company", string[]> = {
     "ช่วยสรุปไฟล์เอกสารที่แนบเป็นข้อๆ",
   ],
 };
+
+// True if the text contains a GitHub-flavoured Markdown table (a row of pipes
+// followed by a |---|---| separator). Drives the "Export Excel" button.
+function hasMarkdownTable(text: string): boolean {
+  const lines = text.split("\n");
+  for (let i = 1; i < lines.length; i++) {
+    if (!lines[i - 1].includes("|")) continue;
+    const cells = lines[i]
+      .split("|")
+      .map((c) => c.trim())
+      .filter(Boolean);
+    if (cells.length > 0 && cells.every((c) => /^:?-{1,}:?$/.test(c))) return true;
+  }
+  return false;
+}
 
 // Pick `n` distinct random items from `arr` (Fisher-Yates partial shuffle).
 function sampleN<T>(arr: T[], n: number): T[] {
@@ -599,6 +616,16 @@ export default function ChatPage() {
       () => setCopiedMsgIdx((c) => (c === index ? null : c)),
       1500,
     );
+  }
+
+  async function exportXlsx(text: string) {
+    try {
+      await exportAnswerXlsx({ content: text });
+    } catch (e: unknown) {
+      setAlertMsg(
+        "Export Excel ไม่สำเร็จ: " + (e instanceof Error ? e.message : ""),
+      );
+    }
   }
 
   function newChat(mode: "normal" | "company" = "normal") {
@@ -1643,6 +1670,18 @@ export default function ChatPage() {
                               <Copy size={13} />
                             )}
                           </button>
+                          {/* Excel export — only when the answer contains a
+                              Markdown table worth pulling into a spreadsheet. */}
+                          {hasMarkdownTable(m.text) && (
+                            <button
+                              onClick={() => exportXlsx(m.text)}
+                              className="flex items-center gap-1 px-2 py-1 rounded-md text-xs text-gray-400 hover:text-green-700 hover:bg-green-50 transition-all"
+                              title="ดาวน์โหลดตารางเป็น Excel (.xlsx)"
+                            >
+                              <Sheet size={13} />
+                              <span>Excel</span>
+                            </button>
+                          )}
                           {m.id && !readOnlyOwner && (
                             <>
                               <span className="w-px h-3.5 bg-gray-200 mx-0.5" />

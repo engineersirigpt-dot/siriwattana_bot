@@ -249,6 +249,27 @@ export async function exportAnswerPdf(opts: {
   triggerDownload(await res.blob(), opts.filename ?? "Sirivatana_chat.pdf");
 }
 
+export async function exportAnswerXlsx(opts: {
+  content: string;
+  title?: string;
+  filename?: string;
+}): Promise<void> {
+  const token = getToken();
+  const res = await fetch(`${API_BASE}/chat/export-xlsx`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    body: JSON.stringify({ content: opts.content, title: opts.title }),
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(text || "สร้าง Excel ไม่สำเร็จ");
+  }
+  triggerDownload(await res.blob(), opts.filename ?? "Sirivatana_table.xlsx");
+}
+
 export async function downloadSourceFile(knowledgeId: number): Promise<void> {
   const token = getToken();
   const res = await fetch(`${API_BASE}/chat/source/${knowledgeId}`, {

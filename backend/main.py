@@ -184,6 +184,11 @@ class ExportPdfIn(BaseModel):
     user_question: str | None = None
 
 
+class ExportXlsxIn(BaseModel):
+    content: str            # markdown body (its tables are exported)
+    title: str | None = None
+
+
 @app.post("/auth/register")
 @limiter.limit("5/minute")
 def register(request: Request, form: OAuth2PasswordRequestForm = Depends()):
@@ -2010,6 +2015,52 @@ def export_pdf(
         headers={
             "Content-Disposition": f'attachment; filename="{safe_filename}"',
             "Content-Length": str(len(pdf_bytes)),
+        },
+    )
+
+
+@app.post("/chat/export-xlsx")
+@limiter.limit("20/minute")
+def export_xlsx(
+    request: Request,
+    body: ExportXlsxIn,
+    user: dict = Depends(current_user),
+):
+    """Export the Markdown tables in an answer as a real .xlsx workbook.
+
+    Any signed-in user can export their own answers (no admin gate). The client
+    posts the answer markdown; each table becomes a worksheet.
+    """
+    content = (body.content or "").strip()
+    if not content:
+        raise HTTPException(400, "content is required")
+
+    from xlsx_export import export_tables_to_xlsx
+
+    try:
+        xlsx_bytes = export_tables_to_xlsx(content, title=body.title)
+    except Exception as exc:
+        audit_log(
+            "xlsx_export_failed",
+            user=user,
+            detail={"error": str(exc)[:300], "content_length": len(content)},
+            request=request,
+        )
+        raise HTTPException(500, f"xlsx generation failed: {exc}") from exc
+
+    audit_log(
+        "xlsx_export_success",
+        user=user,
+        detail={"content_length": len(content), "xlsx_bytes": len(xlsx_bytes)},
+        request=request,
+    )
+
+    return StreamingResponse(
+        iter([xlsx_bytes]),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={
+            "Content-Disposition": 'attachment; filename="Sirivatana_table.xlsx"',
+            "Content-Length": str(len(xlsx_bytes)),
         },
     )
 
