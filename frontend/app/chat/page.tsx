@@ -1599,7 +1599,7 @@ export default function ChatPage() {
                     ) : (
                       (m.text || isStreaming) && (
                         animating ? (
-                          <p className="leading-relaxed text-gray-800 whitespace-pre-wrap">
+                          <p className="leading-relaxed text-gray-800 whitespace-pre-wrap text-[15px]">
                             {shownText}
                             <span className="inline-block w-0.5 h-4 bg-purple-500 ml-0.5 align-middle animate-pulse" />
                           </p>

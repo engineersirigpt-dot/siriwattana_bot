@@ -12,6 +12,10 @@ type Props = { text: string };
 export function MarkdownMessage({ text }: Props) {
   return (
     <div
+      // 15px body (prose-sm is 14px). Set on the root so prose's em-based child
+      // sizes scale with it; keep the prose-sm spacing rules. Matches the 15px
+      // used by the live streaming/typing bubble so text doesn't resize on done.
+      style={{ fontSize: "15px" }}
       className="
         prose prose-sm max-w-none
         text-gray-800 leading-relaxed
