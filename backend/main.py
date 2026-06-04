@@ -1290,7 +1290,7 @@ def revoke_session_share(
 def list_shared_sessions(user: dict = Depends(current_user)):
     """All chats teammates have shared, newest first. Any signed-in user.
 
-    Powers the "แชทที่แชร์ในทีม" sidebar panel — every user (not just admins)
+    Powers the "แชร์ร่วมกันในทีม" sidebar panel — every user (not just admins)
     can browse shared chats read-only and fork them into their own. Each item
     carries `shared_token` so the client can open /chat/shared/{token}.
     """

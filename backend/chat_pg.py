@@ -386,7 +386,7 @@ def delete_session_pg(session_id: int, user_id: int) -> list[str] | None:
 def list_shared_sessions_pg() -> list[dict]:
     """Every session that has an active share token, newest first.
 
-    Visible to any signed-in user — this powers the "แชทที่แชร์ในทีม" panel
+    Visible to any signed-in user — this powers the "แชร์ร่วมกันในทีม" panel
     where teammates browse each other's shared chats read-only (and fork them).
     Only chats the owner explicitly shared show up; private chats never appear.
     """

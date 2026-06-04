@@ -890,7 +890,7 @@ export default function ChatPage() {
           >
             <span className="flex items-center gap-2 text-sm">
               <Share2 size={16} />
-              แชทที่แชร์ในทีม
+              แชร์ร่วมกันในทีม
               <span className="bg-white/20 text-white text-xs px-1.5 py-0.5 rounded-full">
                 {sharedTeamSessions.length}
               </span>
