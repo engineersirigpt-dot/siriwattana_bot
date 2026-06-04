@@ -234,14 +234,17 @@ def get_session_messages_pg(session_id: int, user_id: int) -> dict | None:
                 SELECT h.id, h.question, h.answer, h.source, h.asked_at,
                        a.id, a.filename, a.content_type, a.size_bytes,
                        h.knowledge_id, k.source_file,
-                       COALESCE(h.is_forked, false) AS is_forked
+                       COALESCE(h.is_forked, false) AS is_forked,
+                       af.vote
                 FROM chat_history h
                 LEFT JOIN attachments a ON a.message_id = h.id
                 LEFT JOIN knowledge k ON k.id = h.knowledge_id
+                LEFT JOIN answer_feedback af
+                       ON af.message_id = h.id AND af.user_id = %s
                 WHERE h.session_id = %s
                 ORDER BY h.id ASC, a.id ASC
                 """,
-                (session_id,),
+                (user_id, session_id),
             )
             rows = cur.fetchall()
 
@@ -261,6 +264,7 @@ def get_session_messages_pg(session_id: int, user_id: int) -> dict | None:
                 "source_knowledge_id": row[9],
                 "source_file": row[10],
                 "is_forked": bool(row[11]),
+                "my_vote": row[12],  # 'up' | 'down' | None
             }
         if row[5] is not None:
             messages[msg_id]["attachments"].append({

@@ -214,6 +214,31 @@ def init_pg_schema() -> None:
                 """
             )
 
+            # Answer feedback (👍/👎 + optional reason). One vote per
+            # (message, user); re-voting overwrites via ON CONFLICT upsert.
+            # A 👎 also seeds a pending question for admins.
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS answer_feedback (
+                    id BIGSERIAL PRIMARY KEY,
+                    message_id BIGINT NOT NULL
+                        REFERENCES chat_history(id) ON DELETE CASCADE,
+                    user_id BIGINT NOT NULL REFERENCES users(id),
+                    vote TEXT NOT NULL CHECK (vote IN ('up', 'down')),
+                    reason TEXT,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    UNIQUE (message_id, user_id)
+                );
+                """
+            )
+
+            cur.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_answer_feedback_vote
+                ON answer_feedback(vote, created_at);
+                """
+            )
+
             cur.execute(
                 """
                 CREATE TABLE IF NOT EXISTS embedding_cache (

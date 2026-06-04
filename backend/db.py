@@ -197,6 +197,22 @@ def init_schema(conn: sqlite3.Connection) -> None:
         "ON chat_history(session_id, asked_at)"
     )
 
+    # Answer feedback (👍/👎 + optional reason). One vote per (message, user);
+    # re-voting overwrites. A 👎 also seeds a pending question for admins.
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS answer_feedback (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            message_id INTEGER NOT NULL REFERENCES chat_history(id) ON DELETE CASCADE,
+            user_id INTEGER NOT NULL,
+            vote TEXT NOT NULL CHECK (vote IN ('up', 'down')),
+            reason TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            UNIQUE (message_id, user_id)
+        )
+        """
+    )
+
     # Backfill: any chat_history rows without a session_id get grouped into one
     # "ประวัติเก่า" session per user so they show up in the new sidebar UI.
     orphan_users = [

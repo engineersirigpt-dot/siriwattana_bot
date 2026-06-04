@@ -30,6 +30,8 @@ import {
   Send,
   Settings,
   Square,
+  ThumbsDown,
+  ThumbsUp,
   Trash2,
   Users,
   X,
@@ -47,6 +49,7 @@ import {
   getUsername,
   revokeSessionShare,
   sendChat,
+  sendFeedback,
   shareSession,
 } from "@/lib/api";
 import { AlertModal, ConfirmModal, PromptModal } from "@/components/Modal";
@@ -73,6 +76,10 @@ type Msg = {
   // PDF can include it in the document header without re-deriving from
   // message order.
   question?: string;
+  // chat_history row id of a bot answer + the viewer's 👍/👎 on it (if any).
+  // id is absent for optimistic/streaming placeholders and blocked replies.
+  id?: number;
+  myVote?: "up" | "down" | null;
 };
 
 type Session = {
@@ -152,6 +159,21 @@ function isAcceptedFile(f: File): boolean {
   return TEXT_EXTS.has(fileExtension(f.name));
 }
 
+// Example questions shown on an empty chat so new users know what to ask.
+// Mode-aware: company manual vs. general assistant.
+const STARTER_PROMPTS: Record<"normal" | "company", string[]> = {
+  company: [
+    "สรุปขั้นตอนการลางานของบริษัท",
+    "นโยบายการเบิกค่าใช้จ่ายมีอะไรบ้าง",
+    "ติดต่อฝ่าย HR / ฝ่ายบุคคล ได้อย่างไร",
+  ],
+  normal: [
+    "ช่วยร่างอีเมลแจ้งลูกค้าเรื่องเลื่อนนัดหมาย",
+    "สรุปประเด็นสำคัญจากข้อความที่แนบให้หน่อย",
+    "ช่วยสรุปงานนี้เป็นขั้นตอนทำทีละสเต็ป",
+  ],
+};
+
 function groupBySaved(sessions: Session[]) {
   const groups: Record<string, Session[]> = {
     บันทึกไว้: [],
@@ -221,6 +243,13 @@ export default function ChatPage() {
   // controls the visibility of the Share modal.
   const [sharedToken, setSharedToken] = useState<string | null>(null);
   const [shareOpen, setShareOpen] = useState(false);
+  // Index of the bot message whose answer was just copied (for a transient
+  // "คัดลอกแล้ว" tick). Optional 👎 reason modal target.
+  const [copiedMsgIdx, setCopiedMsgIdx] = useState<number | null>(null);
+  const [reasonTarget, setReasonTarget] = useState<{
+    index: number;
+    messageId: number;
+  } | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -332,12 +361,14 @@ export default function ChatPage() {
   }
 
   type LoadedMessage = {
+    id?: number;
     question: string;
     answer: string;
     source: string;
     attachments?: Attachment[];
     source_knowledge_id?: number | null;
     source_file?: string | null;
+    my_vote?: "up" | "down" | null;
   };
 
   function hydrateMessages(loaded: LoadedMessage[]): Msg[] {
@@ -350,6 +381,9 @@ export default function ChatPage() {
         source: m.source,
         source_knowledge_id: m.source_knowledge_id ?? null,
         source_file: m.source_file ?? null,
+        question: m.question,
+        id: m.id,
+        myVote: m.my_vote ?? null,
       });
     }
     return result;
@@ -471,6 +505,58 @@ export default function ChatPage() {
         "ยกเลิกการแชร์ไม่สำเร็จ: " + (e instanceof Error ? e.message : ""),
       );
     }
+  }
+
+  // 👍/👎 on a bot answer. Optimistically flips the highlight, then persists.
+  // Toggling off (clicking the same vote again) isn't supported server-side
+  // yet, so the UI just re-sends the same vote — harmless.
+  async function castVote(
+    index: number,
+    messageId: number,
+    vote: "up" | "down",
+    reason?: string,
+  ) {
+    setMessages((m) => {
+      const copy = [...m];
+      if (copy[index]) copy[index] = { ...copy[index], myVote: vote };
+      return copy;
+    });
+    try {
+      await sendFeedback(messageId, vote, reason);
+    } catch (e: unknown) {
+      setAlertMsg(
+        "ส่งความคิดเห็นไม่สำเร็จ: " + (e instanceof Error ? e.message : ""),
+      );
+    }
+  }
+
+  function onThumb(index: number, messageId: number, vote: "up" | "down") {
+    castVote(index, messageId, vote);
+    // 👎 records immediately; then offer an optional reason to give admins
+    // context (the answer is already queued for review either way).
+    if (vote === "down") setReasonTarget({ index, messageId });
+  }
+
+  async function copyAnswer(index: number, text: string) {
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      document.body.appendChild(ta);
+      ta.select();
+      try {
+        document.execCommand("copy");
+      } catch {
+        // ignore
+      }
+      ta.remove();
+    }
+    setCopiedMsgIdx(index);
+    setTimeout(
+      () => setCopiedMsgIdx((c) => (c === index ? null : c)),
+      1500,
+    );
   }
 
   function newChat(mode: "normal" | "company" = "normal") {
@@ -631,6 +717,9 @@ export default function ChatPage() {
           source: res.source,
           source_knowledge_id: res.source_knowledge_id ?? null,
           source_file: res.source_file ?? null,
+          question: text,
+          id: res.message_id ?? undefined,
+          myVote: null,
         });
         newBotIdx = copy.length - 1;
         return copy;
@@ -1262,6 +1351,28 @@ export default function ChatPage() {
                   className="mx-auto w-20 h-20 rounded-2xl object-cover mb-4 shadow-md"
                 />
                 <p>พิมพ์คำถามเกี่ยวกับบริษัทหรือคำถามทั่วไปได้เลย</p>
+                {/* Starter prompts — give new users a sense of what to ask.
+                    Clicking fills the box (doesn't auto-send) so they can edit. */}
+                {!readOnlyOwner && (
+                  <div className="mt-6 flex flex-wrap justify-center gap-2 max-w-xl mx-auto">
+                    <span className="w-full text-xs text-gray-400 mb-1">
+                      ตัวอย่างคำถาม
+                    </span>
+                    {STARTER_PROMPTS[chatMode].map((p) => (
+                      <button
+                        key={p}
+                        type="button"
+                        onClick={() => {
+                          setInput(p);
+                          inputRef.current?.focus();
+                        }}
+                        className="px-3 py-2 text-sm text-gray-600 bg-white border border-gray-200 rounded-xl hover:border-purple-300 hover:text-purple-700 hover:bg-purple-50 transition-all shadow-sm"
+                      >
+                        {p}
+                      </button>
+                    ))}
+                  </div>
+                )}
               </div>
             )}
             {messages.map((m, i) => {
@@ -1313,6 +1424,57 @@ export default function ChatPage() {
                         onAlert={(msg) => setAlertMsg(msg)}
                       />
                     )}
+                    {/* Copy + 👍/👎 on real answers (not export offers / blocked
+                        replies / while typing). Feedback needs the saved row id
+                        and is hidden in read-only views. */}
+                    {m.text &&
+                      !isTyping &&
+                      m.source !== "export_offer" &&
+                      m.source !== "blocked" && (
+                        <div className="mt-2 flex items-center gap-1">
+                          <button
+                            onClick={() => copyAnswer(i, m.text)}
+                            className="flex items-center gap-1 px-2 py-1 rounded-md text-xs text-gray-400 hover:text-gray-700 hover:bg-gray-100 transition-all"
+                            title="คัดลอกคำตอบ"
+                          >
+                            {copiedMsgIdx === i ? (
+                              <>
+                                <Check size={13} className="text-green-600" />
+                                <span className="text-green-600">คัดลอกแล้ว</span>
+                              </>
+                            ) : (
+                              <Copy size={13} />
+                            )}
+                          </button>
+                          {m.id && !readOnlyOwner && (
+                            <>
+                              <span className="w-px h-3.5 bg-gray-200 mx-0.5" />
+                              <button
+                                onClick={() => onThumb(i, m.id!, "up")}
+                                className={`p-1 rounded-md transition-all ${
+                                  m.myVote === "up"
+                                    ? "text-green-600 bg-green-50"
+                                    : "text-gray-400 hover:text-gray-700 hover:bg-gray-100"
+                                }`}
+                                title="คำตอบนี้มีประโยชน์"
+                              >
+                                <ThumbsUp size={13} />
+                              </button>
+                              <button
+                                onClick={() => onThumb(i, m.id!, "down")}
+                                className={`p-1 rounded-md transition-all ${
+                                  m.myVote === "down"
+                                    ? "text-red-600 bg-red-50"
+                                    : "text-gray-400 hover:text-gray-700 hover:bg-gray-100"
+                                }`}
+                                title="คำตอบนี้ยังไม่ดี — ส่งให้แอดมินปรับปรุง"
+                              >
+                                <ThumbsDown size={13} />
+                              </button>
+                            </>
+                          )}
+                        </div>
+                      )}
                   </div>
                 </div>
               );
@@ -1449,6 +1611,22 @@ export default function ChatPage() {
         initialValue={renameTarget?.title ?? ""}
         placeholder="ชื่อบทสนทนา"
         confirmLabel="บันทึก"
+      />
+
+      <PromptModal
+        open={reasonTarget !== null}
+        onClose={() => setReasonTarget(null)}
+        onConfirm={(reason) => {
+          if (reasonTarget && reason.trim()) {
+            castVote(reasonTarget.index, reasonTarget.messageId, "down", reason.trim());
+          }
+          setReasonTarget(null);
+        }}
+        title="คำตอบนี้ยังไม่ดีตรงไหน?"
+        description="บอกสั้นๆ ได้ (ไม่บังคับ) — ช่วยให้แอดมินปรับปรุงคำตอบได้ตรงจุด"
+        initialValue=""
+        placeholder="เช่น ข้อมูลไม่ตรง / ตอบไม่ครบ / ผิดประเด็น"
+        confirmLabel="ส่ง"
       />
 
       <ConfirmModal

@@ -131,6 +131,9 @@ class ChatResponse(BaseModel):
     # the user toward a new chat as the limit approaches.
     turn_count: int | None = None
     turn_limit: int | None = None
+    # chat_history row id of this answer, so the UI can attach 👍/👎 feedback.
+    # None for short-circuit replies (blocked / export-offer) that aren't saved.
+    message_id: int | None = None
 
 
 class KnowledgeIn(BaseModel):
@@ -885,6 +888,7 @@ async def chat(
                 source_file=source_file_hit,
                 turn_count=_count_session_turns(sid),
                 turn_limit=MAX_TURNS_PER_SESSION,
+                message_id=message_id,
             )
         conn = get_db()
         sid, stitle = _ensure_session(
@@ -1026,6 +1030,7 @@ async def chat(
             source_file=source_file_hit,
             turn_count=_count_session_turns(sid),
             turn_limit=MAX_TURNS_PER_SESSION,
+            message_id=message_id,
         )
 
     except HTTPException:
@@ -1043,6 +1048,110 @@ async def chat(
             request=request,
         )
         raise
+
+
+class FeedbackIn(BaseModel):
+    message_id: int
+    vote: str  # 'up' | 'down'
+    reason: str | None = None
+
+
+def _record_feedback(message_id: int, user_id: int, vote: str, reason: str | None) -> str | None:
+    """Upsert a 👍/👎 vote on an answer the user asked. Returns the question
+    text (used to seed a pending entry on 👎), or None if the message doesn't
+    exist or isn't the user's own."""
+    reason = (reason or "").strip()[:500] or None
+
+    if use_postgres_auth():
+        from db_pg import get_pg_conn
+
+        with get_pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT user_id, question FROM chat_history WHERE id = %s",
+                    (message_id,),
+                )
+                row = cur.fetchone()
+                if not row or row[0] != user_id:
+                    return None
+                question = row[1]
+                cur.execute(
+                    """
+                    INSERT INTO answer_feedback (message_id, user_id, vote, reason)
+                    VALUES (%s, %s, %s, %s)
+                    ON CONFLICT (message_id, user_id)
+                    DO UPDATE SET vote = EXCLUDED.vote,
+                                  reason = EXCLUDED.reason,
+                                  created_at = now()
+                    """,
+                    (message_id, user_id, vote, reason),
+                )
+        return question
+
+    conn = get_db()
+    row = conn.execute(
+        "SELECT user_id, question FROM chat_history WHERE id = ?",
+        (message_id,),
+    ).fetchone()
+    if not row or row["user_id"] != user_id:
+        return None
+    question = row["question"]
+    conn.execute(
+        """
+        INSERT INTO answer_feedback (message_id, user_id, vote, reason)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT (message_id, user_id)
+        DO UPDATE SET vote = excluded.vote,
+                      reason = excluded.reason,
+                      created_at = datetime('now')
+        """,
+        (message_id, user_id, vote, reason),
+    )
+    conn.commit()
+    return question
+
+
+@app.post("/chat/feedback")
+@limiter.limit("60/minute")
+def submit_feedback(
+    body: FeedbackIn, request: Request, user: dict = Depends(current_user)
+):
+    """Record 👍/👎 on an answer. A 👎 also seeds a pending question so admins
+    can spot weak answers and improve the knowledge base."""
+    if body.vote not in ("up", "down"):
+        raise HTTPException(400, "vote must be 'up' or 'down'")
+
+    question = _record_feedback(body.message_id, user["id"], body.vote, body.reason)
+    if question is None:
+        raise HTTPException(404, "message not found")
+
+    audit_log(
+        "answer_feedback",
+        user=user,
+        detail={
+            "message_id": body.message_id,
+            "vote": body.vote,
+            "has_reason": bool(body.reason and body.reason.strip()),
+        },
+        request=request,
+    )
+
+    # A thumbs-down means the answer missed — log the question for admins to
+    # review/answer (reuses the existing pending-question dedup clustering).
+    # Best-effort: never fail the feedback call if embedding/logging hiccups.
+    if body.vote == "down":
+        try:
+            vec = embed(question)
+            log_pending_question(question, vec)
+        except Exception as e:
+            audit_log(
+                "feedback_pending_log_failed",
+                user=user,
+                detail={"message_id": body.message_id, "error": str(e)},
+                request=request,
+            )
+
+    return {"ok": True}
 
 
 @app.get("/attachments/{aid}")
@@ -1196,12 +1305,25 @@ def list_sessions(user: dict = Depends(current_user)):
     return [dict(r) for r in rows]
 
 
-def _messages_with_attachments(conn, session_id: int) -> list[dict]:
+def _messages_with_attachments(
+    conn, session_id: int, user_id: int | None = None
+) -> list[dict]:
     msgs = conn.execute(
         "SELECT id, question, answer, source, asked_at FROM chat_history "
         "WHERE session_id = ? ORDER BY id ASC",
         (session_id,),
     ).fetchall()
+
+    # The viewer's own 👍/👎 per message, so reopening a chat restores the vote.
+    votes: dict[int, str] = {}
+    if user_id is not None:
+        for r in conn.execute(
+            "SELECT message_id, vote FROM answer_feedback af "
+            "JOIN chat_history h ON h.id = af.message_id "
+            "WHERE h.session_id = ? AND af.user_id = ?",
+            (session_id, user_id),
+        ).fetchall():
+            votes[r["message_id"]] = r["vote"]
 
     result: list[dict] = []
 
@@ -1210,7 +1332,11 @@ def _messages_with_attachments(conn, session_id: int) -> list[dict]:
             "SELECT id, filename, content_type, size_bytes FROM attachments WHERE message_id = ?",
             (m["id"],),
         ).fetchall()
-        result.append({**dict(m), "attachments": [dict(a) for a in atts]})
+        result.append({
+            **dict(m),
+            "attachments": [dict(a) for a in atts],
+            "my_vote": votes.get(m["id"]),
+        })
 
     return result
 
@@ -1236,7 +1362,10 @@ def get_session(session_id: int, user: dict = Depends(current_user)):
     if not s:
         raise HTTPException(404, "session not found")
 
-    return {**dict(s), "messages": _messages_with_attachments(conn, session_id)}
+    return {
+        **dict(s),
+        "messages": _messages_with_attachments(conn, session_id, user["id"]),
+    }
 
 
 @app.post("/chat/sessions/{session_id}/share")

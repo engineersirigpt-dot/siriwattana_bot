@@ -82,6 +82,8 @@ export async function sendChat(opts: {
   // Per-session quota — frontend renders "X/20" counter from these.
   turn_count?: number | null;
   turn_limit?: number | null;
+  // chat_history row id of this answer, for attaching 👍/👎 feedback.
+  message_id?: number | null;
 }> {
   const fd = new FormData();
   fd.append("message", opts.message);
@@ -105,6 +107,17 @@ export async function sendChat(opts: {
 
 export function attachmentUrl(id: number): string {
   return `${API_BASE}/attachments/${id}`;
+}
+
+export async function sendFeedback(
+  messageId: number,
+  vote: "up" | "down",
+  reason?: string,
+): Promise<void> {
+  await api(`/chat/feedback`, {
+    method: "POST",
+    body: JSON.stringify({ message_id: messageId, vote, reason: reason ?? null }),
+  });
 }
 
 export async function shareSession(
