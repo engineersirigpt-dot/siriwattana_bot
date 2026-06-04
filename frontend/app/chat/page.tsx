@@ -81,6 +81,9 @@ type Msg = {
   // id is absent for optimistic/streaming placeholders and blocked replies.
   id?: number;
   myVote?: "up" | "down" | null;
+  // True while this bot bubble is being streamed token-by-token. Drives the
+  // "กำลังคิด…" indicator (when still empty) and the live cursor.
+  streaming?: boolean;
 };
 
 type Session = {
@@ -260,9 +263,6 @@ export default function ChatPage() {
   const [isDragging, setIsDragging] = useState(false);
   const [typingIndex, setTypingIndex] = useState<number | null>(null);
   const [typedChars, setTypedChars] = useState(0);
-  // Index of the bot message currently being streamed token-by-token (real
-  // server streaming, not the fake typing animation). null when not streaming.
-  const [streamingIndex, setStreamingIndex] = useState<number | null>(null);
   // Bumped on each "new chat" so the starter-prompt sample reshuffles.
   const [starterSeed, setStarterSeed] = useState(0);
   // Sampled client-side (in an effect) — NOT during render — so Math.random
@@ -437,7 +437,6 @@ export default function ChatPage() {
     setReadOnlyOwner(null);
     setReadOnlyToken(null);
     setTypingIndex(null);
-    setStreamingIndex(null);
     try {
       const data = await api<{
         messages: LoadedMessage[];
@@ -611,7 +610,6 @@ export default function ChatPage() {
     setInput("");
     setPendingFiles([]);
     setTypingIndex(null);
-    setStreamingIndex(null);
     setChatMode(mode);
     setTurnCount(0);
     setSharedToken(null);
@@ -811,28 +809,32 @@ export default function ChatPage() {
     }
   }
 
-  // Real server streaming: append an empty bot bubble, then fill it as tokens
-  // arrive. Falls back to runNonStream if the stream never starts.
+  // Real server streaming: append an empty bot bubble (flagged streaming), then
+  // fill it as tokens arrive. The streaming bubble is always the LAST message
+  // (concurrent sends are blocked by `sending`), so we target it by position
+  // inside the state updater — no fragile index captured before render.
   async function runStreaming(text: string, controller: AbortController) {
-    let botIdx = -1;
-    setMessages((m) => {
-      const copy = [...m];
-      copy.push({ role: "bot", text: "", source: "", question: text, myVote: null });
-      botIdx = copy.length - 1;
-      return copy;
-    });
-    setStreamingIndex(botIdx);
+    setMessages((m) => [
+      ...m,
+      { role: "bot", text: "", source: "", question: text, myVote: null, streaming: true },
+    ]);
 
-    const patchBot = (patch: Partial<Msg>) =>
+    // Update the trailing bot bubble. Guards on role so we never touch a user
+    // message if the array shape is unexpected.
+    const patchLastBot = (patch: Partial<Msg>) =>
       setMessages((m) => {
         const copy = [...m];
-        if (copy[botIdx]) copy[botIdx] = { ...copy[botIdx], ...patch };
+        const last = copy.length - 1;
+        if (copy[last]?.role === "bot") copy[last] = { ...copy[last], ...patch };
         return copy;
       });
-    const appendBot = (t: string) =>
+    const appendLastBot = (t: string) =>
       setMessages((m) => {
         const copy = [...m];
-        if (copy[botIdx]) copy[botIdx] = { ...copy[botIdx], text: copy[botIdx].text + t };
+        const last = copy.length - 1;
+        if (copy[last]?.role === "bot") {
+          copy[last] = { ...copy[last], text: copy[last].text + t };
+        }
         return copy;
       });
 
@@ -848,14 +850,15 @@ export default function ChatPage() {
         {
           onDelta: (t) => {
             receivedAny = true;
-            appendBot(t);
+            appendLastBot(t);
           },
           onDone: (meta) => {
-            patchBot({
+            patchLastBot({
               source: meta.source,
               source_knowledge_id: meta.source_knowledge_id ?? null,
               source_file: meta.source_file ?? null,
               id: meta.message_id ?? undefined,
+              streaming: false,
             });
             setCurrentSid(meta.session_id);
             if (typeof meta.turn_count === "number") setTurnCount(meta.turn_count);
@@ -868,11 +871,13 @@ export default function ChatPage() {
             // Append so any partial answer already streamed isn't lost.
             setMessages((m) => {
               const copy = [...m];
-              if (copy[botIdx]) {
-                const sep = copy[botIdx].text ? "\n\n" : "";
-                copy[botIdx] = {
-                  ...copy[botIdx],
-                  text: copy[botIdx].text + sep + `⚠️ ${detail}`,
+              const last = copy.length - 1;
+              if (copy[last]?.role === "bot") {
+                const sep = copy[last].text ? "\n\n" : "";
+                copy[last] = {
+                  ...copy[last],
+                  text: copy[last].text + sep + `⚠️ ${detail}`,
+                  streaming: false,
                 };
               }
               return copy;
@@ -885,8 +890,9 @@ export default function ChatPage() {
       if (isAbort) {
         setMessages((m) => {
           const copy = [...m];
-          if (copy[botIdx] && !copy[botIdx].text) {
-            copy[botIdx] = { ...copy[botIdx], text: "ยกเลิกการถามแล้ว" };
+          const last = copy.length - 1;
+          if (copy[last]?.role === "bot" && !copy[last].text) {
+            copy[last] = { ...copy[last], text: "ยกเลิกการถามแล้ว" };
           }
           return copy;
         });
@@ -895,17 +901,25 @@ export default function ChatPage() {
         // the empty bubble and retry through the classic non-stream path.
         setMessages((m) => {
           const copy = [...m];
-          if (copy[botIdx]?.role === "bot" && !copy[botIdx].text) copy.splice(botIdx, 1);
+          const last = copy.length - 1;
+          if (copy[last]?.role === "bot" && !copy[last].text) copy.splice(last, 1);
           return copy;
         });
-        setStreamingIndex(null);
         await runNonStream(text, [], controller);
         return;
       } else {
-        appendBot("\n\n⚠️ การเชื่อมต่อขัดข้อง");
+        appendLastBot("\n\n⚠️ การเชื่อมต่อขัดข้อง");
       }
     } finally {
-      setStreamingIndex(null);
+      // Belt-and-suspenders: never leave the trailing bubble stuck "streaming".
+      setMessages((m) => {
+        const copy = [...m];
+        const last = copy.length - 1;
+        if (copy[last]?.role === "bot" && copy[last].streaming) {
+          copy[last] = { ...copy[last], streaming: false };
+        }
+        return copy;
+      });
     }
   }
 
@@ -1536,7 +1550,7 @@ export default function ChatPage() {
             )}
             {messages.map((m, i) => {
               const isTyping = i === typingIndex;
-              const isStreaming = i === streamingIndex;
+              const isStreaming = !!m.streaming;
               const animating = isTyping || isStreaming;
               const shownText = isTyping ? m.text.slice(0, typedChars) : m.text;
 
@@ -1660,7 +1674,7 @@ export default function ChatPage() {
                 </div>
               );
             })}
-            {sending && streamingIndex === null && (
+            {sending && !messages.some((mm) => mm.streaming) && (
               <div className="flex justify-start gap-3">
                 <img
                   src="/Logo_siri.jpg"
