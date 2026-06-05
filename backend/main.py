@@ -1198,39 +1198,71 @@ async def chat_stream(
             history = get_session_history_pg(
                 session_id=session_id, user_id=user["id"], limit=HISTORY_TURNS,
             )
-            category = classify_query(question)
-            chosen_model = LLM_MODEL_CALC if category == "calc" else LLM_MODEL
-            vec = embed(question)
-            hit = search_knowledge(
-                vec,
-                include_confidential=(user.get("role") == "admin"),
-                company_mode=company_only,
-            )
-
             knowledge_id: int | None = None
             source_file_hit: str | None = None
             similarity = None
-            if hit:
-                tokens = stream_from_context(
-                    question, hit["question"], hit["answer"],
-                    model=chosen_model, history=history,
-                )
-                source = "rag" if category == "general" else "rag-calc"
-                knowledge_id = hit["id"]
-                similarity = hit["similarity"]
-                source_file_hit = hit.get("source_file")
+
+            if mode == "brain":
+                # Pull context from the central AI Brain instead of our local KB,
+                # then let our LLM answer from it. Falls back to a plain answer
+                # if the Brain is unreachable or has nothing relevant.
+                from brain_client import build_brain_context, search_brain
+
+                try:
+                    brain_results = search_brain(question)
+                except Exception as e:
+                    audit_log(
+                        "brain_search_failed",
+                        user=user,
+                        detail={"error": str(e)[:300], "via": "stream"},
+                        request=request,
+                    )
+                    brain_results = []
+
+                if brain_results:
+                    tokens = stream_from_context(
+                        question,
+                        "เอกสารส่วนกลาง (AI Brain)",
+                        build_brain_context(brain_results),
+                        model=LLM_MODEL,
+                        history=history,
+                    )
+                    source = "brain"
+                    source_file_hit = brain_results[0].get("source") or None
+                else:
+                    tokens = stream_freely(question, model=LLM_MODEL, history=history)
+                    source = "brain-nohit"
             else:
-                log_pending_question(question, vec)
-                audit_log(
-                    "pending_question_created",
-                    user=user,
-                    detail={"question": question[:300], "db_engine": "postgres", "via": "stream"},
-                    request=request,
+                category = classify_query(question)
+                chosen_model = LLM_MODEL_CALC if category == "calc" else LLM_MODEL
+                vec = embed(question)
+                hit = search_knowledge(
+                    vec,
+                    include_confidential=(user.get("role") == "admin"),
+                    company_mode=company_only,
                 )
-                tokens = stream_freely(
-                    question, model=chosen_model, history=history, company_only=company_only,
-                )
-                source = "llm" if category == "general" else "llm-calc"
+
+                if hit:
+                    tokens = stream_from_context(
+                        question, hit["question"], hit["answer"],
+                        model=chosen_model, history=history,
+                    )
+                    source = "rag" if category == "general" else "rag-calc"
+                    knowledge_id = hit["id"]
+                    similarity = hit["similarity"]
+                    source_file_hit = hit.get("source_file")
+                else:
+                    log_pending_question(question, vec)
+                    audit_log(
+                        "pending_question_created",
+                        user=user,
+                        detail={"question": question[:300], "db_engine": "postgres", "via": "stream"},
+                        request=request,
+                    )
+                    tokens = stream_freely(
+                        question, model=chosen_model, history=history, company_only=company_only,
+                    )
+                    source = "llm" if category == "general" else "llm-calc"
 
             parts: list[str] = []
             for delta in tokens:

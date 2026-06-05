@@ -169,8 +169,10 @@ function isAcceptedFile(f: File): boolean {
 // Pools of example questions shown on an empty chat. We sample 3 at random
 // each time a fresh chat opens (see STARTER_COUNT), so users see variety on
 // reload. Mode-aware: company manual vs. general assistant.
+type ChatMode = "normal" | "company" | "brain";
+
 const STARTER_COUNT = 3;
-const STARTER_PROMPTS: Record<"normal" | "company", string[]> = {
+const STARTER_PROMPTS: Record<ChatMode, string[]> = {
   company: [
     "สรุปขั้นตอนการลางานของบริษัท",
     "นโยบายการเบิกค่าใช้จ่ายมีอะไรบ้าง",
@@ -194,6 +196,14 @@ const STARTER_PROMPTS: Record<"normal" | "company", string[]> = {
     "ช่วยคิดหัวข้ออีเมลให้น่าสนใจ 5 แบบ",
     "ช่วยร่างประกาศภายในบริษัทสั้นๆ",
     "ช่วยสรุปไฟล์เอกสารที่แนบเป็นข้อๆ",
+  ],
+  brain: [
+    "ขั้นตอนการควบคุมกระบวนการผลิต",
+    "วิธีตรวจสอบคุณภาพงานพิมพ์",
+    "ขั้นตอนการผสมสีพิมพ์",
+    "ระเบียบปฏิบัติงาน (QP) ฝ่ายผลิต",
+    "ขั้นตอนการบรรจุ (Packaging)",
+    "เอกสาร WI / QP ที่เกี่ยวข้องกับงานพิมพ์",
   ],
 };
 
@@ -301,7 +311,7 @@ export default function ChatPage() {
   // can't desync server vs client HTML (hydration mismatch). Empty on the
   // server; filled right after mount, then on mode change / new chat.
   const [starters, setStarters] = useState<string[]>([]);
-  const [chatMode, setChatMode] = useState<"normal" | "company">("normal");
+  const [chatMode, setChatMode] = useState<ChatMode>("normal");
   // Per-session question budget. Server is the source of truth: every /chat
   // response refreshes turnCount, and loadSession seeds it from the GET.
   // turnLimit comes from the server so we don't hardcode it in the UI.
@@ -472,13 +482,15 @@ export default function ChatPage() {
     try {
       const data = await api<{
         messages: LoadedMessage[];
-        mode?: "normal" | "company";
+        mode?: ChatMode;
         turn_count?: number;
         shared_token?: string | null;
       }>(`/chat/sessions/${sid}`);
       setMessages(hydrateMessages(data.messages));
       // Restore the toggle to whatever mode the user was last in on this session.
-      setChatMode(data.mode === "company" ? "company" : "normal");
+      setChatMode(
+        data.mode === "company" || data.mode === "brain" ? data.mode : "normal",
+      );
       // Reseed the per-session counter from server so the UI is correct even
       // if the user reopens a chat from another tab/device.
       setTurnCount(data.turn_count ?? 0);
@@ -522,10 +534,12 @@ export default function ChatPage() {
     try {
       const data = await api<{
         messages: LoadedMessage[];
-        mode?: "normal" | "company";
+        mode?: ChatMode;
       }>(`/chat/shared/${token}`);
       setMessages(hydrateMessages(data.messages));
-      setChatMode(data.mode === "company" ? "company" : "normal");
+      setChatMode(
+        data.mode === "company" || data.mode === "brain" ? data.mode : "normal",
+      );
     } catch {
       // The owner revoked the share (or deleted the chat) since the panel was
       // last refreshed — the token no longer resolves. Tell the user, drop the
@@ -663,7 +677,7 @@ export default function ChatPage() {
     }
   }
 
-  function newChat(mode: "normal" | "company" = "normal") {
+  function newChat(mode: ChatMode = "normal") {
     setCurrentSid(null);
     setMessages([]);
     setSearchResults(null);
@@ -1118,6 +1132,14 @@ export default function ChatPage() {
             <span className="text-base">📘</span>
             <span>คู่มือบริษัท</span>
           </button>
+          <button
+            onClick={() => newChat("brain")}
+            className="w-full flex items-center justify-center gap-2 bg-teal-400/25 hover:bg-teal-400/45 text-white py-3 px-4 rounded-xl transition-all backdrop-blur-sm border border-teal-200/40 shadow-lg"
+            title="ถามจากคลังความรู้ส่วนกลางขององค์กร (AI Brain)"
+          >
+            <span className="text-base">🧠</span>
+            <span>สมองกลาง (AI Brain)</span>
+          </button>
         </div>
 
         <form onSubmit={runSearch} className="px-4 pb-3">
@@ -1520,6 +1542,17 @@ export default function ChatPage() {
               >
                 <span>📘</span>
                 <span>โหมด: คู่มือบริษัท</span>
+                <X size={14} />
+              </button>
+            )}
+            {chatMode === "brain" && !readOnlyOwner && (
+              <button
+                onClick={() => setChatMode("normal")}
+                className="flex items-center gap-1.5 px-3 py-1.5 bg-teal-100 hover:bg-teal-200 text-teal-800 rounded-lg text-sm transition-all border border-teal-300"
+                title="ปิดโหมดสมองกลาง (ยังอยู่ในแชทเดิม)"
+              >
+                <span>🧠</span>
+                <span>โหมด: สมองกลาง</span>
                 <X size={14} />
               </button>
             )}
