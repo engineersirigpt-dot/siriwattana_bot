@@ -2,9 +2,11 @@ import os
 
 from openai import OpenAI
 
-LLM_MODEL = os.getenv("LLM_MODEL", "gpt-4o-mini")
+LLM_MODEL = os.getenv("LLM_MODEL", "gpt-4.1-mini")
 LLM_MODEL_FILES = os.getenv("LLM_MODEL_FILES", "gpt-4.1-mini")
 LLM_MODEL_CALC = os.getenv("LLM_MODEL_CALC", "gpt-5-mini")
+# Keep classifier on the cheapest model — it just routes "general" vs "calc",
+# doesn't need strong Thai context reasoning like the main answer model.
 LLM_MODEL_CLASSIFIER = os.getenv("LLM_MODEL_CLASSIFIER", "gpt-4o-mini")
 
 _client: OpenAI | None = None
@@ -53,24 +55,32 @@ COMPANY_FALLBACK = (
     "เพื่อให้เจ้าหน้าที่ตรวจสอบข้อมูลล่าสุดให้"
 )
 
-# Pasted into every system prompt so short / pronoun-style follow-up
-# questions ("ต้นเหตุ", "อันนั้น", "แล้วล่ะ") don't get answered as
-# standalone vocabulary lookups when there's an obvious referent in
-# history. Triggered the "ถามอย่างตอบอีกอย่าง" bug when the AI Brain
-# returned heading-only snippets that the model treated as the new topic.
+# THE MOST IMPORTANT BLOCK — placed at the TOP of every system prompt so the
+# model sees it before the persona / identity stuff. Without this gpt-4o-mini
+# answered short follow-ups like "ต้นเหตุ" as standalone vocabulary lookups
+# even when the previous turn made the referent obvious. Re-ordered + made
+# imperative + concrete example after the prompt-only fix didn't change
+# behaviour in production.
 CONTEXT_FIRST_RULES = (
-    "**กฎสำคัญเรื่องบริบทสนทนา (สำคัญที่สุด):**\n"
-    "1. ก่อนตอบทุกครั้ง ให้ดูประวัติบทสนทนา (history) ก่อนว่าก่อนหน้าคุยเรื่องอะไร\n"
+    "🚨 กฎสำคัญที่สุดเรื่องบริบทสนทนา — อ่านก่อนตอบเสมอ 🚨\n\n"
+    "1. **บังคับ:** ดูประวัติบทสนทนา (history) ทุกครั้งก่อนตอบ ห้ามข้าม\n"
     "2. ถ้าคำถามใหม่เป็นข้อความสั้น / สรรพนาม / fragment "
-    "(เช่น 'ต้นเหตุ', 'แล้วล่ะ', 'อันนั้นคืออะไร', 'มาจากไหน', 'ทำไม', 'อธิบายเพิ่ม') "
-    "ต้องตีความเป็นคำถามต่อเนื่องจาก turn ก่อนหน้าเสมอ — "
-    "**ห้ามตอบเป็น vocabulary lookup หรือ dictionary definition โดยลำพัง**\n"
-    "3. ถ้า context ที่ระบบ retrieval ส่งมาดูไม่เกี่ยวข้องกับคำถามและประวัติแชท "
-    "(เช่น คำตอบที่ส่งมามีแต่หัวข้อ heading ไม่มีเนื้อหา หรือเรื่องคนละแนว) "
-    "ให้ **เพิกเฉย context นั้น** แล้วใช้ความเข้าใจจาก history ตอบแทน "
-    "ห้ามเอา heading โดดๆ มาขยายเป็นคำตอบหลัก\n"
-    "4. ถ้า history ก็ไม่ช่วย และไม่รู้คำตอบจริง ๆ ตอบตรง ๆ ว่าไม่แน่ใจ "
-    "ขออธิบายเพิ่ม ดีกว่าเดาให้ครบ\n"
+    "(เช่น 'ต้นเหตุ', 'แล้วล่ะ', 'อันนั้นคืออะไร', 'มาจากไหน', 'ทำไม', "
+    "'อธิบายเพิ่ม', 'ยกตัวอย่าง', 'แปลว่าอะไร') "
+    "**ต้องตีความเป็นคำถามต่อเนื่องจาก turn ก่อนหน้าเสมอ** — "
+    "ห้ามตอบเป็น dictionary / vocabulary lookup โดยลำพังเด็ดขาด\n\n"
+    "**ตัวอย่าง (สำคัญ — ให้ทำตามนี้):**\n"
+    "  Turn 1 User: 'Where is the john? แปลว่าอะไร'\n"
+    "  Turn 1 Bot : 'แปลว่า ห้องน้ำอยู่ที่ไหน — john เป็นสแลง...'\n"
+    "  Turn 2 User: 'ต้นเหตุ เริ่มต้นมาจากไหน'\n"
+    "  ❌ ผิด: 'ต้นเหตุ หมายถึง สาเหตุของเหตุการณ์...' (ตอบเป็น vocab)\n"
+    "  ✅ ถูก: 'ต้นเหตุของคำสแลง where is the john มาจาก...' "
+    "(เชื่อมกับ turn 1)\n\n"
+    "3. ถ้า context ที่ระบบ retrieval ส่งมาดูไม่เกี่ยวข้องกับคำถาม "
+    "(เช่น มีแต่ heading ไม่มีเนื้อหา หรือคนละแนวกับ history) "
+    "→ **เพิกเฉย context นั้น** แล้วใช้ความเข้าใจจาก history ตอบแทน\n"
+    "4. ถ้า history ก็ไม่ช่วย และไม่รู้คำตอบจริง ๆ → ตอบตรง ๆ ว่าไม่แน่ใจ "
+    "หรือถามกลับเพื่อ clarify ห้ามเดาให้ครบ\n"
 )
 
 # Used by Normal mode when RAG misses. Strips the "I am Sirivatana" framing so
@@ -119,8 +129,8 @@ ANSWER_STYLE_NOTE = (
 )
 
 SYSTEM_PROMPT_RAG = (
+    f"{CONTEXT_FIRST_RULES}\n\n"
     f"{COMPANY_IDENTITY}\n\n"
-    f"{CONTEXT_FIRST_RULES}\n"
     "ตอบคำถามผู้ใช้โดยอ้างอิงจากข้อมูลที่ให้ไว้ **และจากประวัติการสนทนาก่อนหน้า** (รวมถึงไฟล์ที่ผู้ใช้แนบในเทิร์นก่อน) "
     "ตอบให้ครบถ้วน อธิบายให้เข้าใจ ขยายความหรือยกตัวอย่างได้เมื่อเหมาะสม\n"
     "ถ้าผู้ใช้ถามคำถามต่อเนื่อง (เช่น 'เขาคือใคร', 'อันนั้นราคาเท่าไหร่', 'แล้วอันนี้ล่ะ') "
@@ -135,8 +145,8 @@ SYSTEM_PROMPT_RAG = (
 )
 
 SYSTEM_PROMPT_FREE = (
+    f"{CONTEXT_FIRST_RULES}\n\n"
     f"{NEUTRAL_ASSISTANT_IDENTITY}\n\n"
-    f"{CONTEXT_FIRST_RULES}\n"
     "**สำหรับเทิร์นนี้ (ไม่พบคำตอบใน RAG):**\n"
     "1. ตรวจประวัติการสนทนาก่อน — ถ้าคำตอบอยู่ในประวัติแชทแล้ว ให้ใช้ตอบทันที "
     "(เช่น ผู้ใช้เคยแนบไฟล์ที่มีชื่อพนักงาน แล้วถามต่อว่า 'เขาชื่ออะไร' → ใช้ข้อมูลจากเทิร์นก่อน)\n"
@@ -153,8 +163,8 @@ SYSTEM_PROMPT_FREE = (
 )
 
 SYSTEM_PROMPT_COMPANY_FREE = (
+    f"{CONTEXT_FIRST_RULES}\n\n"
     f"{COMPANY_IDENTITY}\n\n"
-    f"{CONTEXT_FIRST_RULES}\n"
     "**ขณะนี้คุณอยู่ในโหมด 'คู่มือบริษัท' (Company-Only Mode)**\n"
     "คุณสามารถตอบได้เฉพาะคำถามที่เกี่ยวข้องกับบริษัทศิริวัฒนาอินเตอร์พริ้นท์เท่านั้น "
     "เช่น: ข้อมูลบริษัท, บริการ, สินค้า, ขั้นตอนการทำงาน, นโยบาย, HR, สวัสดิการ, "
