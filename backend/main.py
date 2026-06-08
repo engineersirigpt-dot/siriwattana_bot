@@ -1264,7 +1264,9 @@ async def chat_stream(
                 # Pull context from the central AI Brain instead of our local KB,
                 # then let our LLM answer from it. Falls back to a plain answer
                 # if the Brain is unreachable or has nothing relevant.
-                from brain_client import build_brain_context, search_brain
+                # (search_brain / build_brain_context are imported at the top
+                # of this module — re-importing here would scope them to this
+                # function and break the `else` branch below.)
 
                 try:
                     brain_results = search_brain(question)
