@@ -812,6 +812,12 @@ export default function ChatPage() {
     setPendingFiles([]);
     setSending(true);
 
+    // Keep keyboard focus on the textarea so the user can immediately type
+    // the next question while the bot is still streaming — matches ChatGPT's
+    // type-ahead UX. Without this the input loses focus after submit and
+    // the user has to click back into it before typing.
+    inputRef.current?.focus();
+
     const controller = new AbortController();
     abortRef.current = controller;
 
@@ -1885,7 +1891,11 @@ export default function ChatPage() {
                     ? "เขียนคำถามเกี่ยวกับไฟล์"
                     : "พิมพ์คำถาม…"
                 }
-                disabled={sending || !!readOnlyOwner || turnCount >= turnLimit}
+                // Note: NOT disabled while sending. The send button below
+                // turns into a "หยุด" button, so the user can keep typing
+                // their next question while the bot is still answering —
+                // ChatGPT-style. Submit handler guards against double-send.
+                disabled={!!readOnlyOwner || turnCount >= turnLimit}
                 className="flex-1 px-6 py-4 bg-gray-50 border border-gray-200 rounded-2xl focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-transparent transition-all disabled:opacity-60 disabled:cursor-not-allowed resize-none overflow-y-auto leading-6"
               />
               {sending ? (
