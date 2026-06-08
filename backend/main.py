@@ -52,6 +52,11 @@ from mi_auth import mi_enabled, verify_mi_credentials
 from rag import add_knowledge, embed, log_pending_question, resolve_pending, search_knowledge
 from sensitive import BLOCKED_RESPONSE, is_sensitive
 from sensitivity_classifier import classify_sensitivity
+from brain_client import (
+    brain_enabled,
+    build_brain_context,
+    search_brain,
+)
 
 
 limiter = Limiter(key_func=get_remote_address)
@@ -848,40 +853,90 @@ async def chat(
                 category = classify_query(question)
                 chosen_model = LLM_MODEL_CALC if category == "calc" else LLM_MODEL
 
-                vec = embed(question)
-                hit = search_knowledge(
-                    vec,
-                    include_confidential=(user.get("role") == "admin"),
-                    company_mode=company_only,
-                )
+                # Layer 1: ask the colleague's company-ai-brain first.
+                # Cheaper (no OpenAI embed call) and centralised — if it has
+                # a confident match we skip the local pgvector search entirely.
+                # Fails OPEN on transport errors so chat keeps working when
+                # the brain is down.
+                brain_threshold = float(os.getenv("AI_BRAIN_THRESHOLD", "0.5"))
+                brain_results: list[dict] = []
+                if brain_enabled():
+                    try:
+                        raw_hits = search_brain(question, top_k=3)
+                    except Exception as e:
+                        audit_log(
+                            "brain_search_failed",
+                            user=user,
+                            detail={"error": str(e)[:300], "via": "chat-pg"},
+                            request=request,
+                        )
+                        raw_hits = []
+                    brain_results = [
+                        r for r in raw_hits
+                        if float(r.get("score") or 0) >= brain_threshold
+                    ]
 
-                if hit:
+                if brain_results:
+                    top = brain_results[0]
+                    audit_log(
+                        "company_brain_hit",
+                        user=user,
+                        detail={
+                            "score": top.get("score"),
+                            "source": top.get("source"),
+                            "collection": top.get("collection"),
+                            "n_chunks": len(brain_results),
+                        },
+                        request=request,
+                    )
                     answer = answer_from_context(
                         question,
-                        hit["question"],
-                        hit["answer"],
+                        "เอกสารส่วนกลาง (AI Brain)",
+                        build_brain_context(brain_results),
                         model=chosen_model,
                         history=history,
                     )
-                    source = "rag" if category == "general" else "rag-calc"
-                    knowledge_id = hit["id"]
-                    similarity = hit["similarity"]
-                    source_file_hit = hit.get("source_file")
+                    source = "brain" if category == "general" else "brain-calc"
+                    knowledge_id = None
+                    similarity = float(top.get("score") or 0)
+                    source_file_hit = top.get("source")
                 else:
-                    log_pending_question(question, vec)
-
-                    audit_log(
-                        "pending_question_created",
-                        user=user,
-                        detail={"question": question[:300], "db_engine": "postgres"},
-                        request=request,
+                    # Layer 2: fall back to local pgvector (admin Q&A +
+                    # kb_import in company mode).
+                    vec = embed(question)
+                    hit = search_knowledge(
+                        vec,
+                        include_confidential=(user.get("role") == "admin"),
+                        company_mode=company_only,
                     )
 
-                    answer = answer_freely(question, model=chosen_model, history=history, company_only=company_only)
-                    source = "llm" if category == "general" else "llm-calc"
-                    knowledge_id = None
-                    similarity = None
-                    source_file_hit = None
+                    if hit:
+                        answer = answer_from_context(
+                            question,
+                            hit["question"],
+                            hit["answer"],
+                            model=chosen_model,
+                            history=history,
+                        )
+                        source = "rag" if category == "general" else "rag-calc"
+                        knowledge_id = hit["id"]
+                        similarity = hit["similarity"]
+                        source_file_hit = hit.get("source_file")
+                    else:
+                        log_pending_question(question, vec)
+
+                        audit_log(
+                            "pending_question_created",
+                            user=user,
+                            detail={"question": question[:300], "db_engine": "postgres"},
+                            request=request,
+                        )
+
+                        answer = answer_freely(question, model=chosen_model, history=history, company_only=company_only)
+                        source = "llm" if category == "general" else "llm-calc"
+                        knowledge_id = None
+                        similarity = None
+                        source_file_hit = None
 
             message_id = save_chat_message_pg(
                 user_id=user["id"],
