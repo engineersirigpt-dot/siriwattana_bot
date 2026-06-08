@@ -53,6 +53,26 @@ COMPANY_FALLBACK = (
     "เพื่อให้เจ้าหน้าที่ตรวจสอบข้อมูลล่าสุดให้"
 )
 
+# Pasted into every system prompt so short / pronoun-style follow-up
+# questions ("ต้นเหตุ", "อันนั้น", "แล้วล่ะ") don't get answered as
+# standalone vocabulary lookups when there's an obvious referent in
+# history. Triggered the "ถามอย่างตอบอีกอย่าง" bug when the AI Brain
+# returned heading-only snippets that the model treated as the new topic.
+CONTEXT_FIRST_RULES = (
+    "**กฎสำคัญเรื่องบริบทสนทนา (สำคัญที่สุด):**\n"
+    "1. ก่อนตอบทุกครั้ง ให้ดูประวัติบทสนทนา (history) ก่อนว่าก่อนหน้าคุยเรื่องอะไร\n"
+    "2. ถ้าคำถามใหม่เป็นข้อความสั้น / สรรพนาม / fragment "
+    "(เช่น 'ต้นเหตุ', 'แล้วล่ะ', 'อันนั้นคืออะไร', 'มาจากไหน', 'ทำไม', 'อธิบายเพิ่ม') "
+    "ต้องตีความเป็นคำถามต่อเนื่องจาก turn ก่อนหน้าเสมอ — "
+    "**ห้ามตอบเป็น vocabulary lookup หรือ dictionary definition โดยลำพัง**\n"
+    "3. ถ้า context ที่ระบบ retrieval ส่งมาดูไม่เกี่ยวข้องกับคำถามและประวัติแชท "
+    "(เช่น คำตอบที่ส่งมามีแต่หัวข้อ heading ไม่มีเนื้อหา หรือเรื่องคนละแนว) "
+    "ให้ **เพิกเฉย context นั้น** แล้วใช้ความเข้าใจจาก history ตอบแทน "
+    "ห้ามเอา heading โดดๆ มาขยายเป็นคำตอบหลัก\n"
+    "4. ถ้า history ก็ไม่ช่วย และไม่รู้คำตอบจริง ๆ ตอบตรง ๆ ว่าไม่แน่ใจ "
+    "ขออธิบายเพิ่ม ดีกว่าเดาให้ครบ\n"
+)
+
 # Used by Normal mode when RAG misses. Strips the "I am Sirivatana" framing so
 # the model answers as a general assistant — this prevents fabricated claims
 # like "บริษัทศิริวัฒนาใช้กระดาษ Art card 80gsm" when the KB has no such fact.
@@ -100,6 +120,7 @@ ANSWER_STYLE_NOTE = (
 
 SYSTEM_PROMPT_RAG = (
     f"{COMPANY_IDENTITY}\n\n"
+    f"{CONTEXT_FIRST_RULES}\n"
     "ตอบคำถามผู้ใช้โดยอ้างอิงจากข้อมูลที่ให้ไว้ **และจากประวัติการสนทนาก่อนหน้า** (รวมถึงไฟล์ที่ผู้ใช้แนบในเทิร์นก่อน) "
     "ตอบให้ครบถ้วน อธิบายให้เข้าใจ ขยายความหรือยกตัวอย่างได้เมื่อเหมาะสม\n"
     "ถ้าผู้ใช้ถามคำถามต่อเนื่อง (เช่น 'เขาคือใคร', 'อันนั้นราคาเท่าไหร่', 'แล้วอันนี้ล่ะ') "
@@ -115,6 +136,7 @@ SYSTEM_PROMPT_RAG = (
 
 SYSTEM_PROMPT_FREE = (
     f"{NEUTRAL_ASSISTANT_IDENTITY}\n\n"
+    f"{CONTEXT_FIRST_RULES}\n"
     "**สำหรับเทิร์นนี้ (ไม่พบคำตอบใน RAG):**\n"
     "1. ตรวจประวัติการสนทนาก่อน — ถ้าคำตอบอยู่ในประวัติแชทแล้ว ให้ใช้ตอบทันที "
     "(เช่น ผู้ใช้เคยแนบไฟล์ที่มีชื่อพนักงาน แล้วถามต่อว่า 'เขาชื่ออะไร' → ใช้ข้อมูลจากเทิร์นก่อน)\n"
@@ -132,6 +154,7 @@ SYSTEM_PROMPT_FREE = (
 
 SYSTEM_PROMPT_COMPANY_FREE = (
     f"{COMPANY_IDENTITY}\n\n"
+    f"{CONTEXT_FIRST_RULES}\n"
     "**ขณะนี้คุณอยู่ในโหมด 'คู่มือบริษัท' (Company-Only Mode)**\n"
     "คุณสามารถตอบได้เฉพาะคำถามที่เกี่ยวข้องกับบริษัทศิริวัฒนาอินเตอร์พริ้นท์เท่านั้น "
     "เช่น: ข้อมูลบริษัท, บริการ, สินค้า, ขั้นตอนการทำงาน, นโยบาย, HR, สวัสดิการ, "

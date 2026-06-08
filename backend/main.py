@@ -858,7 +858,10 @@ async def chat(
                 # a confident match we skip the local pgvector search entirely.
                 # Fails OPEN on transport errors so chat keeps working when
                 # the brain is down.
-                brain_threshold = float(os.getenv("AI_BRAIN_THRESHOLD", "0.5"))
+                # 0.7 because the brain often returns heading-only previews
+                # which score 0.55–0.65 even for irrelevant queries; below 0.7
+                # we'd accept weak hits and the LLM gets confusing context.
+                brain_threshold = float(os.getenv("AI_BRAIN_THRESHOLD", "0.7"))
                 brain_results: list[dict] = []
                 if brain_enabled():
                     try:
