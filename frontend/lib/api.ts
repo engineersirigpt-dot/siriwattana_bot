@@ -67,7 +67,7 @@ export async function sendChat(opts: {
   message: string;
   sessionId: number | null;
   files: File[];
-  mode?: "normal" | "company" | "brain";
+  mode?: "normal" | "company";
   signal?: AbortSignal;
 }): Promise<{
   answer: string;
@@ -124,7 +124,7 @@ export async function sendChatStream(
   opts: {
     message: string;
     sessionId: number | null;
-    mode?: "normal" | "company" | "brain";
+    mode?: "normal" | "company";
     signal?: AbortSignal;
   },
   handlers: {

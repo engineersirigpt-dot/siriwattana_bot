@@ -1260,16 +1260,23 @@ async def chat_stream(
             source_file_hit: str | None = None
             similarity = None
 
-            if mode == "brain":
-                # Pull context from the central AI Brain instead of our local KB,
-                # then let our LLM answer from it. Falls back to a plain answer
-                # if the Brain is unreachable or has nothing relevant.
-                # (search_brain / build_brain_context are imported at the top
-                # of this module — re-importing here would scope them to this
-                # function and break the `else` branch below.)
+            # NOTE: The legacy `if mode == "brain":` toggle has been removed —
+            # the AI Brain is now queried automatically on every chat as a
+            # Layer-1 retrieval source (see the brain_results_s block below).
+            # Anything that was sent with mode="brain" by older clients now
+            # gets the same flow as mode="normal".
+            category = classify_query(question)
+            chosen_model = LLM_MODEL_CALC if category == "calc" else LLM_MODEL
 
+            # Layer 1: ask the colleague's company-ai-brain first.
+            # Same flow as the non-streaming /chat — saves an OpenAI
+            # embedding call when the brain has a confident hit. Fails
+            # OPEN so a brain outage drops through to local search.
+            brain_threshold_s = float(os.getenv("AI_BRAIN_THRESHOLD", "0.7"))
+            brain_results_s: list[dict] = []
+            if brain_enabled():
                 try:
-                    brain_results = search_brain(question)
+                    raw_hits_s = search_brain(question, top_k=3)
                 except Exception as e:
                     audit_log(
                         "brain_search_failed",
@@ -1277,101 +1284,66 @@ async def chat_stream(
                         detail={"error": str(e)[:300], "via": "stream"},
                         request=request,
                     )
-                    brain_results = []
+                    raw_hits_s = []
+                brain_results_s = [
+                    r for r in raw_hits_s
+                    if float(r.get("score") or 0) >= brain_threshold_s
+                ]
 
-                if brain_results:
-                    tokens = stream_from_context(
-                        question,
-                        "เอกสารส่วนกลาง (AI Brain)",
-                        build_brain_context(brain_results),
-                        model=LLM_MODEL,
-                        history=history,
-                    )
-                    source = "brain"
-                    source_file_hit = brain_results[0].get("source") or None
-                else:
-                    tokens = stream_freely(question, model=LLM_MODEL, history=history)
-                    source = "brain-nohit"
+            if brain_results_s:
+                top_s = brain_results_s[0]
+                audit_log(
+                    "company_brain_hit",
+                    user=user,
+                    detail={
+                        "score": top_s.get("score"),
+                        "source": top_s.get("source"),
+                        "collection": top_s.get("collection"),
+                        "n_chunks": len(brain_results_s),
+                        "via": "stream",
+                    },
+                    request=request,
+                )
+                tokens = stream_from_context(
+                    question,
+                    "เอกสารส่วนกลาง (AI Brain)",
+                    build_brain_context(brain_results_s),
+                    model=chosen_model,
+                    history=history,
+                )
+                source = "brain" if category == "general" else "brain-calc"
+                knowledge_id = None
+                similarity = float(top_s.get("score") or 0)
+                source_file_hit = top_s.get("source")
             else:
-                category = classify_query(question)
-                chosen_model = LLM_MODEL_CALC if category == "calc" else LLM_MODEL
+                vec = embed(question)
+                hit = search_knowledge(
+                    vec,
+                    include_confidential=(user.get("role") == "admin"),
+                    company_mode=company_only,
+                )
 
-                # Layer 1: ask the colleague's company-ai-brain first.
-                # Same flow as the non-streaming /chat — saves an OpenAI
-                # embedding call when the brain has a confident hit. Fails
-                # OPEN so a brain outage drops through to local search.
-                brain_threshold_s = float(os.getenv("AI_BRAIN_THRESHOLD", "0.7"))
-                brain_results_s: list[dict] = []
-                if brain_enabled():
-                    try:
-                        raw_hits_s = search_brain(question, top_k=3)
-                    except Exception as e:
-                        audit_log(
-                            "brain_search_failed",
-                            user=user,
-                            detail={"error": str(e)[:300], "via": "stream"},
-                            request=request,
-                        )
-                        raw_hits_s = []
-                    brain_results_s = [
-                        r for r in raw_hits_s
-                        if float(r.get("score") or 0) >= brain_threshold_s
-                    ]
-
-                if brain_results_s:
-                    top_s = brain_results_s[0]
+                if hit:
+                    tokens = stream_from_context(
+                        question, hit["question"], hit["answer"],
+                        model=chosen_model, history=history,
+                    )
+                    source = "rag" if category == "general" else "rag-calc"
+                    knowledge_id = hit["id"]
+                    similarity = hit["similarity"]
+                    source_file_hit = hit.get("source_file")
+                else:
+                    log_pending_question(question, vec)
                     audit_log(
-                        "company_brain_hit",
+                        "pending_question_created",
                         user=user,
-                        detail={
-                            "score": top_s.get("score"),
-                            "source": top_s.get("source"),
-                            "collection": top_s.get("collection"),
-                            "n_chunks": len(brain_results_s),
-                            "via": "stream",
-                        },
+                        detail={"question": question[:300], "db_engine": "postgres", "via": "stream"},
                         request=request,
                     )
-                    tokens = stream_from_context(
-                        question,
-                        "เอกสารส่วนกลาง (AI Brain)",
-                        build_brain_context(brain_results_s),
-                        model=chosen_model,
-                        history=history,
+                    tokens = stream_freely(
+                        question, model=chosen_model, history=history, company_only=company_only,
                     )
-                    source = "brain" if category == "general" else "brain-calc"
-                    knowledge_id = None
-                    similarity = float(top_s.get("score") or 0)
-                    source_file_hit = top_s.get("source")
-                else:
-                    vec = embed(question)
-                    hit = search_knowledge(
-                        vec,
-                        include_confidential=(user.get("role") == "admin"),
-                        company_mode=company_only,
-                    )
-
-                    if hit:
-                        tokens = stream_from_context(
-                            question, hit["question"], hit["answer"],
-                            model=chosen_model, history=history,
-                        )
-                        source = "rag" if category == "general" else "rag-calc"
-                        knowledge_id = hit["id"]
-                        similarity = hit["similarity"]
-                        source_file_hit = hit.get("source_file")
-                    else:
-                        log_pending_question(question, vec)
-                        audit_log(
-                            "pending_question_created",
-                            user=user,
-                            detail={"question": question[:300], "db_engine": "postgres", "via": "stream"},
-                            request=request,
-                        )
-                        tokens = stream_freely(
-                            question, model=chosen_model, history=history, company_only=company_only,
-                        )
-                        source = "llm" if category == "general" else "llm-calc"
+                    source = "llm" if category == "general" else "llm-calc"
 
             parts: list[str] = []
             for delta in tokens:
