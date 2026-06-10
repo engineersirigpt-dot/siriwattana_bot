@@ -2,8 +2,8 @@ import os
 
 from openai import OpenAI
 
-LLM_MODEL = os.getenv("LLM_MODEL", "gpt-4.1-mini")
-LLM_MODEL_FILES = os.getenv("LLM_MODEL_FILES", "gpt-4.1-mini")
+LLM_MODEL = os.getenv("LLM_MODEL", "gpt-4.1")
+LLM_MODEL_FILES = os.getenv("LLM_MODEL_FILES", "gpt-4.1")
 LLM_MODEL_CALC = os.getenv("LLM_MODEL_CALC", "gpt-5-mini")
 # Keep classifier on the cheapest model — it just routes "general" vs "calc",
 # doesn't need strong Thai context reasoning like the main answer model.
