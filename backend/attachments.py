@@ -25,6 +25,10 @@ DOCX_TYPES = {
 XLSX_TYPES = {
     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 }
+# Legacy Excel 97-2003 (.xls). Browsers send "application/vnd.ms-excel" but
+# often an empty/odd MIME too, so we also allow by .xls extension below.
+XLS_TYPES = {"application/vnd.ms-excel"}
+XLS_EXTENSIONS = {".xls"}
 PPTX_TYPES = {
     "application/vnd.openxmlformats-officedocument.presentationml.presentation",
 }
@@ -43,7 +47,7 @@ TEXT_EXTENSIONS = {
     ".vue", ".svelte", ".gradle", ".pl", ".pm",
 }
 
-MIME_ALLOWED = IMAGE_TYPES | PDF_TYPES | DOCX_TYPES | XLSX_TYPES | PPTX_TYPES
+MIME_ALLOWED = IMAGE_TYPES | PDF_TYPES | DOCX_TYPES | XLSX_TYPES | XLS_TYPES | PPTX_TYPES
 
 
 def _upload_root() -> Path:
@@ -89,7 +93,7 @@ def _is_allowed(content_type: str, filename: str) -> bool:
     if content_type in MIME_ALLOWED:
         return True
     ext = Path(filename or "").suffix.lower()
-    return ext in TEXT_EXTENSIONS
+    return ext in TEXT_EXTENSIONS or ext in XLS_EXTENSIONS
 
 
 def _default_ext_for(content_type: str) -> str:
@@ -99,6 +103,8 @@ def _default_ext_for(content_type: str) -> str:
         return ".docx"
     if content_type in XLSX_TYPES:
         return ".xlsx"
+    if content_type in XLS_TYPES:
+        return ".xls"
     if content_type in PPTX_TYPES:
         return ".pptx"
     if content_type in IMAGE_TYPES:
@@ -161,6 +167,12 @@ def is_docx(content_type: str, filename: str = "") -> bool:
 
 def is_xlsx(content_type: str, filename: str = "") -> bool:
     return content_type in XLSX_TYPES or filename.lower().endswith(".xlsx")
+
+
+def is_xls(content_type: str, filename: str = "") -> bool:
+    # Guard the .xlsx check first (it also ends with ...xls? no — .xlsx ≠ .xls).
+    name = filename.lower()
+    return (content_type in XLS_TYPES or name.endswith(".xls")) and not name.endswith(".xlsx")
 
 
 def is_pptx(content_type: str, filename: str = "") -> bool:
@@ -307,6 +319,51 @@ def extract_xlsx_text(file_path: str, max_chars: int = MAX_EXTRACT_CHARS) -> str
         return f"(อ่าน Excel ไม่สำเร็จ: {e})"
 
 
+def extract_xls_text(file_path: str, max_chars: int = MAX_EXTRACT_CHARS) -> str:
+    """Legacy Excel 97-2003 (.xls) — openpyxl can't read these, use xlrd.
+    Same '=== Sheet: name ===' + row layout as extract_xlsx_text."""
+    try:
+        safe_path = validate_upload_path(file_path)
+
+        import xlrd
+
+        book = xlrd.open_workbook(str(safe_path))
+        parts: list[str] = []
+        total = 0
+
+        for sheet in book.sheets():
+            if total >= max_chars:
+                break
+
+            header = f"\n=== Sheet: {sheet.name} ===\n"
+            if total + len(header) > max_chars:
+                parts.append("[…ตัดเนื้อหา…]")
+                break
+            parts.append(header)
+            total += len(header)
+
+            for r in range(sheet.nrows):
+                values = sheet.row_values(r)
+                if all(v == "" or v is None for v in values):
+                    continue
+
+                row_text = (
+                    " | ".join("" if v is None else str(v) for v in values) + "\n"
+                )
+                if total + len(row_text) > max_chars:
+                    parts.append("[…ตัดเนื้อหา…]")
+                    return "".join(parts).strip()
+
+                parts.append(row_text)
+                total += len(row_text)
+
+        return "".join(parts).strip()
+    except HTTPException:
+        raise
+    except Exception as e:
+        return f"(อ่าน Excel (.xls) ไม่สำเร็จ: {e})"
+
+
 def extract_pptx_text(file_path: str, max_chars: int = MAX_EXTRACT_CHARS) -> str:
     try:
         safe_path = validate_upload_path(file_path)
@@ -380,6 +437,8 @@ def extract_any_text(file_path: str, content_type: str, filename: str) -> str:
         return extract_docx_text(file_path)
     if is_xlsx(content_type, filename):
         return extract_xlsx_text(file_path)
+    if is_xls(content_type, filename):
+        return extract_xls_text(file_path)
     if is_pptx(content_type, filename):
         return extract_pptx_text(file_path)
     if is_text_file(filename):

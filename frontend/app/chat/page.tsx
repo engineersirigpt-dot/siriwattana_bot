@@ -134,8 +134,13 @@ const OFFICE_MIMES = new Set([
   "application/pdf",
   "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
   "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  "application/vnd.ms-excel", // legacy .xls
   "application/vnd.openxmlformats-officedocument.presentationml.presentation",
 ]);
+
+// Office files accepted by extension too — browsers often send an empty/odd
+// MIME for these (especially legacy .xls), so don't rely on MIME alone.
+const OFFICE_EXTS = new Set([".pdf", ".docx", ".xlsx", ".xls", ".pptx"]);
 
 const TEXT_EXTS = new Set([
   ".txt", ".md", ".markdown", ".csv", ".tsv", ".json", ".log",
@@ -151,7 +156,7 @@ const TEXT_EXTS = new Set([
 
 const FILE_ACCEPT_ATTR = [
   "image/*",
-  ".pdf", ".docx", ".xlsx", ".pptx",
+  ".pdf", ".docx", ".xlsx", ".xls", ".pptx",
   ...Array.from(TEXT_EXTS),
 ].join(",");
 
@@ -163,7 +168,8 @@ function fileExtension(name: string): string {
 function isAcceptedFile(f: File): boolean {
   if (f.type.startsWith("image/")) return true;
   if (OFFICE_MIMES.has(f.type)) return true;
-  return TEXT_EXTS.has(fileExtension(f.name));
+  const ext = fileExtension(f.name);
+  return OFFICE_EXTS.has(ext) || TEXT_EXTS.has(ext);
 }
 
 // Pools of example questions shown on an empty chat. We sample 3 at random
