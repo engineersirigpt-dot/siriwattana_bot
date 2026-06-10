@@ -119,7 +119,11 @@ EXPORT_FILE_NOTE = (
 # Anti-vagueness: be specific when the data is there, and say plainly when it
 # isn't — instead of padding with generic "ตามนโยบายบริษัท" filler.
 ANSWER_STYLE_NOTE = (
-    "**สไตล์การตอบ — เจาะจง ไม่อ๊อง:**\n"
+    "**สไตล์การตอบ — เจาะจง ละเอียดเมื่อรู้ ไม่อ๊อง:**\n"
+    "- **เมื่อมีข้อมูลจริง: ตอบให้ละเอียด ครบทุกแง่มุมที่ข้อมูลครอบคลุม** จัดเป็นหัวข้อ/"
+    "บูลเล็ต/ตารางให้อ่านง่าย และอธิบายความหมาย/บริบทเพิ่มได้ (เช่น สเปกนี้เหมาะกับงานแบบไหน, "
+    "ตัวเลขนี้หมายความว่าอย่างไร) — ยึดหลัก 'ละเอียดเมื่อรู้' ไม่ใช่ 'สั้นเสมอ'; "
+    "ความสั้นใช้เฉพาะตอนไม่มีข้อมูลเท่านั้น\n"
     "- ตอบโดยใช้ตัวเลข ชื่อ หรือขั้นตอน 'จริง' จากข้อมูลที่ได้รับ ฟันธงเมื่อมีข้อมูล\n"
     "- ห้ามร่ายน้ำกว้าง ๆ ที่ไม่มีสาระ (เช่น 'ตามนโยบายของบริษัท', 'ตามที่กำหนด', "
     "'แล้วแต่กรณี', 'ตรวจสอบกับหัวหน้างาน') มากลบส่วนที่ไม่รู้\n"
@@ -277,7 +281,7 @@ def answer_from_context(
     res = _get_client().chat.completions.create(
         model=chosen,
         messages=messages,
-        **_token_kwargs(chosen, 2048),
+        **_token_kwargs(chosen, 4096),
     )
     return (res.choices[0].message.content or "").strip()
 
@@ -302,7 +306,7 @@ def answer_freely(
     res = _get_client().chat.completions.create(
         model=chosen,
         messages=messages,
-        **_token_kwargs(chosen, 2048),
+        **_token_kwargs(chosen, 4096),
     )
     return (res.choices[0].message.content or "").strip()
 
@@ -333,7 +337,7 @@ def stream_from_context(
         model=chosen,
         messages=messages,
         stream=True,
-        **_token_kwargs(chosen, 2048),
+        **_token_kwargs(chosen, 4096),
     )
     for chunk in stream:
         if not chunk.choices:
@@ -360,7 +364,7 @@ def stream_freely(
         model=chosen,
         messages=messages,
         stream=True,
-        **_token_kwargs(chosen, 2048),
+        **_token_kwargs(chosen, 4096),
     )
     for chunk in stream:
         if not chunk.choices:
