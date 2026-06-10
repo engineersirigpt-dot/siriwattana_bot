@@ -96,19 +96,52 @@ MACHINES = [
 ]
 
 
+# Commercial / alternate names employees may type. These get folded into the
+# question so retrieval matches them (KB embeds the question only).
+ALIASES = {
+    "G844 C+IR": "Komori GL844, GL 844, GL844, G44, Komori G44",
+    "GL 640 Green Hybrid": "Komori GL640, GL 640, GL640 Hybrid, Green Hybrid",
+    "L 640 UVAPC-B": "L640 UV, Komori L640 UV, L640UVAPC",
+    "LS 1029P": "Komori LS1029, LS 1029, LS1029P",
+}
+
+
 def fmt_size(pair):
     mm, inch = pair
     return f"{mm} ({inch})"
 
 
+def name_variants(name: str) -> list[str]:
+    """Auto aliases: the code as-is, with spaces removed, and a Komori-prefixed
+    form (these are Komori presses). De-duped, order-stable."""
+    base = name.strip()
+    nospace = base.replace(" ", "")
+    out = [base, nospace, f"Komori {base}", f"Komori {nospace}"]
+    seen, uniq = set(), []
+    for v in out:
+        if v not in seen:
+            seen.add(v)
+            uniq.append(v)
+    return uniq
+
+
 def to_qa(m):
+    alias_terms = name_variants(m["name"])
+    if m["name"] in ALIASES:
+        alias_terms += [a.strip() for a in ALIASES[m["name"]].split(",")]
+    alias_str = ", ".join(dict.fromkeys(alias_terms))  # de-dupe, keep order
+
     q = (
         f"สเปกเครื่องพิมพ์ออฟเซ็ต {m['name']} (กลุ่ม {m['group']}) — "
         f"ความเร็ว {m['speed']} แผ่น/ชม., {m['colors']}, "
-        f"ขนาดกระดาษสูงสุด {m['paper_max'][0]}, set up {m['setup']}"
+        f"ขนาดกระดาษสูงสุด {m['paper_max'][0]}, set up {m['setup']}. "
+        f"ชื่อเรียกอื่น: {alias_str}"
     )
+    header_alias = ""
+    if m["name"] in ALIASES:
+        header_alias = f" (a.k.a. {ALIASES[m['name']].split(',')[0].strip()})"
     a = "\n".join([
-        f"เครื่องพิมพ์ออฟเซ็ต {m['name']} — กลุ่ม {m['group']}",
+        f"เครื่องพิมพ์ออฟเซ็ต {m['name']}{header_alias} — กลุ่ม {m['group']}",
         f"• ความเร็ว: {m['speed']} แผ่น/ชม.",
         f"• เวลา Set-up: {m['setup']}",
         f"• จำนวนสี / ระบบ: {m['colors']}",
