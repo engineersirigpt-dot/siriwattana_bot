@@ -3,10 +3,16 @@ PDF export — renders markdown content as a styled A4 PDF.
 
 Pipeline: markdown → HTML (with table/code extensions) → WeasyPrint → PDF bytes.
 
-Fonts (installed via Dockerfile):
-- Sarabun (fonts-thai-tlwg)   — Thai + Latin, brand-aligned baseline.
-- Noto Color Emoji            — keeps 📘 ✅ ⚠️ etc. from rendering as boxes.
-- DejaVu Sans (default)       — fallback for any glyph the others miss.
+Fonts (installed via Dockerfile's fonts-thai-tlwg package):
+- Loma         — primary body font. Modern Thai sans-serif, clean for tables.
+- Norasi       — backup Thai font if Loma is unavailable.
+- DejaVu Sans  — Latin fallback.
+- Noto Color Emoji — keeps 📘 ✅ ⚠️ etc. from rendering as boxes.
+
+NOTE: We previously listed "Sarabun" first, but that font is NOT in the
+fonts-thai-tlwg package on Debian — the package ships Loma/Norasi/Garuda/etc.
+Listing Sarabun first made WeasyPrint fall all the way through to DejaVu Sans,
+which lacks proper Thai diacritic support and broke vowel/tone rendering.
 
 Output is A4 portrait, 18mm margins, with a purple brand header and a footer
 that shows generation timestamp + page numbers.
@@ -46,20 +52,20 @@ _CSS = """
 
     @bottom-center {
         content: "หน้า " counter(page) " / " counter(pages);
-        font-family: 'Sarabun', 'TH Sarabun New', 'DejaVu Sans', sans-serif;
+        font-family: 'Loma', 'Norasi', 'DejaVu Sans', sans-serif;
         font-size: 9pt;
         color: #9ca3af;
     }
     @bottom-right {
         content: string(generated_at);
-        font-family: 'Sarabun', 'TH Sarabun New', 'DejaVu Sans', sans-serif;
+        font-family: 'Loma', 'Norasi', 'DejaVu Sans', sans-serif;
         font-size: 9pt;
         color: #9ca3af;
     }
 }
 
 body {
-    font-family: 'Sarabun', 'TH Sarabun New', 'Noto Sans',
+    font-family: 'Loma', 'Norasi', 'Kinnari',
                  'DejaVu Sans', 'Noto Color Emoji', sans-serif;
     font-size: 11pt;
     line-height: 1.65;
