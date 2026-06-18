@@ -109,7 +109,7 @@ type Analytics = {
   top_users: { username: string; count: number }[];
 };
 
-type Tab = "dashboard" | "analytics" | "pending" | "knowledge" | "history" | "users";
+type Tab = "dashboard" | "pending" | "knowledge" | "history" | "users";
 
 export default function AdminPage() {
   const router = useRouter();
@@ -320,12 +320,6 @@ export default function AdminPage() {
             active={tab === "dashboard"}
             onClick={() => setTab("dashboard")}
             icon={<LayoutDashboard size={18} />}
-            label="Dashboard"
-          />
-          <TabButton
-            active={tab === "analytics"}
-            onClick={() => setTab("analytics")}
-            icon={<BarChart3 size={18} />}
             label="ภาพรวม"
           />
           <TabButton
@@ -360,9 +354,6 @@ export default function AdminPage() {
 
         {/* Pro KPI Dashboard — handoff view */}
         {tab === "dashboard" && <DashboardPanel />}
-
-        {/* Analytics / overview tab */}
-        {tab === "analytics" && <AnalyticsView data={analytics} />}
 
         {/* Pending tab */}
         {tab === "pending" && (

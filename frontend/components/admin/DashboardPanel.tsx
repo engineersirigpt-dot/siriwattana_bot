@@ -26,6 +26,8 @@ import {
   RefreshCw,
   Shield,
   Sparkles,
+  ThumbsDown,
+  ThumbsUp,
   TrendingDown,
   TrendingUp,
   Users,
@@ -70,6 +72,19 @@ type Overview = {
   top_questions: { question: string; count: number }[];
   top_users: { username: string; sessions: number; messages: number }[];
   pending_count: number;
+  feedback: {
+    up: number;
+    down: number;
+    total: number;
+    satisfaction_pct: number | null;
+  };
+  recent_downvotes: {
+    message_id: number;
+    question: string;
+    reason: string | null;
+    username: string;
+    created_at: string | null;
+  }[];
   safety: {
     blocked_total: number;
     blocked_by_category: Record<string, number>;
@@ -213,6 +228,14 @@ export function DashboardPanel() {
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         <TopQuestionsCard items={data.top_questions} />
         <TopUsersCard items={data.top_users} />
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+        <SatisfactionCard feedback={data.feedback} />
+        <RecentDownvotesCard
+          items={data.recent_downvotes}
+          className="lg:col-span-2"
+        />
       </div>
 
       <SafetyCard
@@ -710,6 +733,120 @@ function TopUsersCard({ items }: { items: Overview["top_users"] }) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+
+function SatisfactionCard({ feedback }: { feedback: Overview["feedback"] }) {
+  const { up, down, total, satisfaction_pct } = feedback;
+
+  // Visual tone tracks the satisfaction band. >=80% green, 60-79 amber, <60 red,
+  // unrated grey. Keeps it readable at-a-glance for execs scanning the page.
+  let tone = "from-gray-50 to-gray-100 border-gray-200 text-gray-700";
+  if (satisfaction_pct !== null) {
+    if (satisfaction_pct >= 80) {
+      tone = "from-green-50 to-emerald-100 border-emerald-200 text-emerald-700";
+    } else if (satisfaction_pct >= 60) {
+      tone = "from-amber-50 to-amber-100 border-amber-200 text-amber-700";
+    } else {
+      tone = "from-rose-50 to-rose-100 border-rose-200 text-rose-700";
+    }
+  }
+
+  return (
+    <div
+      className={`bg-gradient-to-br ${tone} border rounded-2xl p-5 shadow-sm flex flex-col`}
+    >
+      <h3 className="font-semibold flex items-center gap-2 text-sm opacity-90">
+        <ThumbsUp size={16} />
+        ความพึงพอใจ
+      </h3>
+      {total === 0 ? (
+        <p className="text-sm opacity-70 mt-4 italic">
+          ยังไม่มีการให้ feedback
+        </p>
+      ) : (
+        <>
+          <p className="text-4xl font-bold mt-3">
+            {satisfaction_pct !== null ? `${satisfaction_pct}%` : "—"}
+          </p>
+          <p className="text-xs opacity-80 mt-1">satisfaction rate</p>
+          <div className="mt-auto pt-4 flex items-center gap-4 text-sm">
+            <span className="inline-flex items-center gap-1">
+              <ThumbsUp size={14} className="text-green-600" />
+              <strong>{up}</strong>
+              <span className="opacity-70">ถูกใจ</span>
+            </span>
+            <span className="inline-flex items-center gap-1">
+              <ThumbsDown size={14} className="text-red-500" />
+              <strong>{down}</strong>
+              <span className="opacity-70">ไม่ถูกใจ</span>
+            </span>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+function RecentDownvotesCard({
+  items,
+  className = "",
+}: {
+  items: Overview["recent_downvotes"];
+  className?: string;
+}) {
+  return (
+    <div
+      className={`bg-white rounded-2xl border border-gray-100 p-5 shadow-sm ${className}`}
+    >
+      <h3 className="font-semibold text-gray-800 flex items-center gap-2 mb-3">
+        <ThumbsDown size={16} className="text-rose-500" />
+        คำตอบที่โดน 👎 ล่าสุด
+        <span className="text-xs font-normal text-gray-400 ml-1">
+          (admin ควรปรับ)
+        </span>
+      </h3>
+      {items.length === 0 ? (
+        <p className="text-sm text-gray-400 text-center py-6 italic">
+          ✓ ยังไม่มีคำตอบที่ถูก downvote
+        </p>
+      ) : (
+        <ul className="space-y-3">
+          {items.map((d) => (
+            <li
+              key={d.message_id}
+              className="border-l-2 border-rose-300 pl-3 py-1"
+            >
+              <p
+                className="text-sm font-medium text-gray-800 line-clamp-1"
+                title={d.question}
+              >
+                {d.question}
+              </p>
+              {d.reason && (
+                <p className="text-xs text-rose-600 mt-0.5">
+                  เหตุผล: {d.reason}
+                </p>
+              )}
+              <p className="text-[11px] text-gray-400 mt-0.5">
+                โดย {d.username}
+                {d.created_at && (
+                  <>
+                    {" · "}
+                    {new Date(d.created_at).toLocaleString("th-TH", {
+                      day: "numeric",
+                      month: "short",
+                      hour: "2-digit",
+                      minute: "2-digit",
+                    })}
+                  </>
+                )}
+              </p>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
 
 function SafetyCard({
   safety,

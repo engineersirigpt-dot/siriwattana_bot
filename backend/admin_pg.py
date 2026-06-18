@@ -257,6 +257,47 @@ def admin_dashboard_overview_pg(range_label: str = "7d") -> dict:
             )
             pending_count = cur.fetchone()[0] or 0
 
+            # ── Feedback 👍 / 👎 in range ─────────────────────────────────
+            # Filter by feedback created_at (not the message's asked_at) so
+            # changing the range affects "satisfaction during this period",
+            # which is what an admin actually wants on a dashboard.
+            cur.execute(
+                """
+                SELECT vote, COUNT(*) FROM answer_feedback
+                WHERE created_at >= %s AND created_at < %s
+                GROUP BY vote
+                """,
+                (since, until),
+            )
+            votes = {row[0]: row[1] for row in cur.fetchall()}
+            up = int(votes.get("up", 0) or 0)
+            down = int(votes.get("down", 0) or 0)
+            total_votes = up + down
+            satisfaction_pct = round(up * 100 / total_votes, 1) if total_votes else None
+
+            # ── Recent thumbs-down (audit list — what admin needs to fix) ──
+            cur.execute(
+                """
+                SELECT h.id, h.question, af.reason, u.username, af.created_at
+                FROM answer_feedback af
+                JOIN chat_history h ON h.id = af.message_id
+                JOIN users u ON u.id = af.user_id
+                WHERE af.vote = 'down'
+                ORDER BY af.created_at DESC
+                LIMIT 5
+                """,
+            )
+            recent_downvotes = [
+                {
+                    "message_id": r[0],
+                    "question": r[1],
+                    "reason": r[2],
+                    "username": r[3],
+                    "created_at": r[4].isoformat() if r[4] else None,
+                }
+                for r in cur.fetchall()
+            ]
+
     # ── Reshape source distribution into known buckets so the UI doesn't
     # have to guess. "brain" + "brain-calc" merge into one slice, etc.
     bucket_map = {
@@ -316,6 +357,13 @@ def admin_dashboard_overview_pg(range_label: str = "7d") -> dict:
         "top_questions": top_questions,
         "top_users": top_users,
         "pending_count": pending_count,
+        "feedback": {
+            "up": up,
+            "down": down,
+            "total": total_votes,
+            "satisfaction_pct": satisfaction_pct,
+        },
+        "recent_downvotes": recent_downvotes,
         "safety": safety,
     }
 
@@ -404,6 +452,34 @@ def dashboard_to_markdown(payload: dict) -> str:
             parts.append(
                 f"| {i} | {u['username']} | {u['sessions']} | {u['messages']} |"
             )
+        parts.append("")
+
+    fb = payload.get("feedback") or {}
+    if fb.get("total"):
+        parts.append("## ความพึงพอใจ (👍 / 👎)")
+        parts.append("")
+        pct = fb.get("satisfaction_pct")
+        pct_str = f"{pct}%" if pct is not None else "—"
+        parts.append(
+            f"- 👍 ถูกใจ: **{fb['up']}** ครั้ง | 👎 ไม่ถูกใจ: **{fb['down']}** ครั้ง "
+            f"| satisfaction: **{pct_str}**"
+        )
+        parts.append("")
+
+    recent_down = payload.get("recent_downvotes") or []
+    if recent_down:
+        parts.append("## คำตอบที่โดน 👎 ล่าสุด (admin ควรปรับ)")
+        parts.append("")
+        parts.append("| # | คำถาม | เหตุผล | โดย |")
+        parts.append("|---:|---|---|---|")
+        for i, r in enumerate(recent_down[:5], 1):
+            q = (r.get("question") or "").replace("|", "\\|").strip()
+            if len(q) > 80:
+                q = q[:77] + "..."
+            reason = (r.get("reason") or "—").replace("|", "\\|").strip()
+            if len(reason) > 60:
+                reason = reason[:57] + "..."
+            parts.append(f"| {i} | {q} | {reason} | {r.get('username', '—')} |")
         parts.append("")
 
     parts.append("## Safety & Pending")
