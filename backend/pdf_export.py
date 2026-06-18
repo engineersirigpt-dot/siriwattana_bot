@@ -44,6 +44,35 @@ def _markdown_to_html(md_text: str) -> str:
 # ── Styling ──────────────────────────────────────────────────────────────────
 
 _CSS = """
+/* Bind Sarabun by explicit file:// URL so WeasyPrint loads the TTF directly
+   instead of going through fontconfig. fontconfig saw the font but Pango/
+   WeasyPrint refused to use it for Latin digits in tables, leaving "1.6"
+   rendered as ".6". Pointing at the file path is reliable across versions. */
+@font-face {
+    font-family: 'Sarabun';
+    src: url('file:///usr/share/fonts/truetype/sarabun/Sarabun-Regular.ttf');
+    font-weight: normal;
+    font-style: normal;
+}
+@font-face {
+    font-family: 'Sarabun';
+    src: url('file:///usr/share/fonts/truetype/sarabun/Sarabun-Bold.ttf');
+    font-weight: bold;
+    font-style: normal;
+}
+@font-face {
+    font-family: 'Sarabun';
+    src: url('file:///usr/share/fonts/truetype/sarabun/Sarabun-Italic.ttf');
+    font-weight: normal;
+    font-style: italic;
+}
+@font-face {
+    font-family: 'Sarabun';
+    src: url('file:///usr/share/fonts/truetype/sarabun/Sarabun-BoldItalic.ttf');
+    font-weight: bold;
+    font-style: italic;
+}
+
 @page {
     size: A4;
     margin: 18mm 16mm 22mm 16mm;
