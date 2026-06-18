@@ -83,18 +83,36 @@ def save_chat_message_pg(
     source: str,
     knowledge_id: int | None,
     mode: str = "normal",
+    usage: dict | None = None,
 ) -> int:
+    """Insert a chat_history row, optionally with token-cost data.
+
+    `usage` is the dict from `llm.accumulate_usage`:
+        {"model_used", "prompt_tokens", "completion_tokens", "cost_usd"}
+
+    When usage is None (export_offer, blocked, brain-only with no LLM call,
+    legacy callers) the new token/cost columns stay NULL — the dashboard
+    falls back to the flat-rate estimate for NULL rows.
+    """
+    u = usage or {}
     with get_pg_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """
                 INSERT INTO chat_history
-                    (user_id, session_id, question, answer, source, knowledge_id)
+                    (user_id, session_id, question, answer, source, knowledge_id,
+                     prompt_tokens, completion_tokens, model_used, cost_usd)
                 VALUES
-                    (%s, %s, %s, %s, %s, %s)
+                    (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 RETURNING id
                 """,
-                (user_id, session_id, question, answer, source, knowledge_id),
+                (
+                    user_id, session_id, question, answer, source, knowledge_id,
+                    u.get("prompt_tokens"),
+                    u.get("completion_tokens"),
+                    u.get("model_used"),
+                    u.get("cost_usd"),
+                ),
             )
             message_id = cur.fetchone()[0]
 

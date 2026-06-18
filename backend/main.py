@@ -41,6 +41,7 @@ from db import get_db
 from llm import (
     LLM_MODEL,
     LLM_MODEL_CALC,
+    accumulate_usage,
     answer_freely,
     answer_from_context,
     answer_with_files,
@@ -839,18 +840,22 @@ async def chat(
                         text_attachments.append((sf["filename"], extracted))
 
                 prompt_question = question or "ช่วยอธิบายเนื้อหาในไฟล์ที่แนบ และให้คำแนะนำที่เกี่ยวข้อง"
-                answer = answer_with_files(
+                answer, files_usage = answer_with_files(
                     prompt_question,
                     image_urls,
                     text_attachments,
                     history=history,
                 )
+                # Files path doesn't run the classifier so usage = just the
+                # vision call. Wrap in accumulate_usage for consistent shape
+                # with the keys save_chat_message_pg expects.
+                usage_row = accumulate_usage(files_usage)
                 source = "files"
                 knowledge_id = None
                 similarity = None
 
             else:
-                category = classify_query(question)
+                category, classify_usage = classify_query(question)
                 chosen_model = LLM_MODEL_CALC if category == "calc" else LLM_MODEL
 
                 # Layer 1: ask the colleague's company-ai-brain first.
@@ -892,7 +897,7 @@ async def chat(
                         },
                         request=request,
                     )
-                    answer = answer_from_context(
+                    answer, answer_usage = answer_from_context(
                         question,
                         "เอกสารส่วนกลาง (AI Brain)",
                         build_brain_context(brain_results),
@@ -903,6 +908,9 @@ async def chat(
                     knowledge_id = None
                     similarity = float(top.get("score") or 0)
                     source_file_hit = top.get("source")
+                    usage_row = accumulate_usage(
+                        classify_usage, answer_usage, primary_model=chosen_model,
+                    )
                 else:
                     # Layer 2: fall back to local pgvector (admin Q&A +
                     # kb_import in company mode).
@@ -914,7 +922,7 @@ async def chat(
                     )
 
                     if hit:
-                        answer = answer_from_context(
+                        answer, answer_usage = answer_from_context(
                             question,
                             hit["question"],
                             hit["answer"],
@@ -935,11 +943,17 @@ async def chat(
                             request=request,
                         )
 
-                        answer = answer_freely(question, model=chosen_model, history=history, company_only=company_only)
+                        answer, answer_usage = answer_freely(
+                            question, model=chosen_model, history=history,
+                            company_only=company_only,
+                        )
                         source = "llm" if category == "general" else "llm-calc"
                         knowledge_id = None
                         similarity = None
                         source_file_hit = None
+                    usage_row = accumulate_usage(
+                        classify_usage, answer_usage, primary_model=chosen_model,
+                    )
 
             message_id = save_chat_message_pg(
                 user_id=user["id"],
@@ -949,6 +963,7 @@ async def chat(
                 source=source,
                 knowledge_id=knowledge_id,
                 mode=mode,
+                usage=usage_row,
             )
 
             attachment_rows: list[dict] = []
@@ -1030,20 +1045,22 @@ async def chat(
                     text_attachments.append((sf["filename"], extracted))
 
             prompt_question = question or "ช่วยอธิบายเนื้อหาในไฟล์ที่แนบ และให้คำแนะนำที่เกี่ยวข้อง"
-            answer = answer_with_files(prompt_question, image_urls, text_attachments, history=history)
+            answer, _files_usage = answer_with_files(prompt_question, image_urls, text_attachments, history=history)
+            # sqlite path doesn't persist token cost — only the postgres deploy
+            # is the one production cares about. Ignore the usage dict here.
             source = "files"
             knowledge_id = None
             similarity = None
 
         else:
-            category = classify_query(question)
+            category, _classify_usage = classify_query(question)
             chosen_model = LLM_MODEL_CALC if category == "calc" else LLM_MODEL
 
             vec = embed(question)
             hit = search_knowledge(vec)
 
             if hit:
-                answer = answer_from_context(
+                answer, _answer_usage = answer_from_context(
                     question,
                     hit["question"],
                     hit["answer"],
@@ -1065,7 +1082,7 @@ async def chat(
                     request=request,
                 )
 
-                answer = answer_freely(question, model=chosen_model, history=history)
+                answer, _answer_usage = answer_freely(question, model=chosen_model, history=history)
                 source = "llm" if category == "general" else "llm-calc"
                 knowledge_id = None
                 similarity = None
@@ -1265,8 +1282,12 @@ async def chat_stream(
             # Layer-1 retrieval source (see the brain_results_s block below).
             # Anything that was sent with mode="brain" by older clients now
             # gets the same flow as mode="normal".
-            category = classify_query(question)
+            category, classify_usage = classify_query(question)
             chosen_model = LLM_MODEL_CALC if category == "calc" else LLM_MODEL
+            # Streaming usage is captured into this holder by the LLM stream
+            # functions (populated on the final chunk). We then accumulate it
+            # with the classifier usage and persist once the stream finishes.
+            stream_usage: dict = {}
 
             # Layer 1: ask the colleague's company-ai-brain first.
             # Same flow as the non-streaming /chat — saves an OpenAI
@@ -1310,6 +1331,7 @@ async def chat_stream(
                     build_brain_context(brain_results_s),
                     model=chosen_model,
                     history=history,
+                    usage_holder=stream_usage,
                 )
                 source = "brain" if category == "general" else "brain-calc"
                 knowledge_id = None
@@ -1327,6 +1349,7 @@ async def chat_stream(
                     tokens = stream_from_context(
                         question, hit["question"], hit["answer"],
                         model=chosen_model, history=history,
+                        usage_holder=stream_usage,
                     )
                     source = "rag" if category == "general" else "rag-calc"
                     knowledge_id = hit["id"]
@@ -1341,7 +1364,8 @@ async def chat_stream(
                         request=request,
                     )
                     tokens = stream_freely(
-                        question, model=chosen_model, history=history, company_only=company_only,
+                        question, model=chosen_model, history=history,
+                        company_only=company_only, usage_holder=stream_usage,
                     )
                     source = "llm" if category == "general" else "llm-calc"
 
@@ -1351,9 +1375,17 @@ async def chat_stream(
                 yield ev({"type": "delta", "v": delta})
             answer = "".join(parts).strip()
 
+            # `stream_usage` was populated in-place by the final chunk of
+            # whichever stream we entered above. Combine with the classifier
+            # call so cost_usd reflects all OpenAI work for this question.
+            usage_row = accumulate_usage(
+                classify_usage, stream_usage, primary_model=chosen_model,
+            )
+
             mid = save_chat_message_pg(
                 user_id=user["id"], session_id=sid, question=question,
-                answer=answer, source=source, knowledge_id=knowledge_id, mode=mode,
+                answer=answer, source=source, knowledge_id=knowledge_id,
+                mode=mode, usage=usage_row,
             )
             audit_log(
                 "chat_message",

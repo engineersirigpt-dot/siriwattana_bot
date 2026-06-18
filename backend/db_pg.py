@@ -177,6 +177,20 @@ def init_pg_schema() -> None:
                 """
             )
 
+            # Per-message token + cost tracking (2026-06-18). Lets the Dashboard
+            # compute real ฿ cost from openai usage instead of the flat-rate
+            # estimate. Legacy rows stay NULL — admin_pg falls back to flat rate
+            # for those so totals don't drop.
+            cur.execute(
+                """
+                ALTER TABLE chat_history
+                ADD COLUMN IF NOT EXISTS prompt_tokens INT,
+                ADD COLUMN IF NOT EXISTS completion_tokens INT,
+                ADD COLUMN IF NOT EXISTS model_used TEXT,
+                ADD COLUMN IF NOT EXISTS cost_usd NUMERIC(10, 6);
+                """
+            )
+
             cur.execute(
                 """
                 CREATE INDEX IF NOT EXISTS idx_chat_history_session

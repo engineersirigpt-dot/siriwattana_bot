@@ -1,6 +1,9 @@
 import os
+from typing import Any
 
 from openai import OpenAI
+
+from pricing import estimate_cost_usd
 
 LLM_MODEL = os.getenv("LLM_MODEL", "gpt-4.1")
 LLM_MODEL_FILES = os.getenv("LLM_MODEL_FILES", "gpt-4.1")
@@ -25,6 +28,88 @@ def _token_kwargs(model: str, n: int) -> dict:
     if m.startswith("gpt-5") or m.startswith("o1") or m.startswith("o3") or m.startswith("o4"):
         return {"max_completion_tokens": n}
     return {"max_tokens": n}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Token usage tracking — returned from every LLM call so callers can persist
+# the real per-question cost to chat_history (see backend/pricing.py).
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _extract_usage(response: Any, model: str) -> dict:
+    """Pull token counts + cost from a non-stream OpenAI response.
+
+    Returns a dict shaped for `accumulate_usage` and DB persistence:
+        {"model": str, "prompt_tokens": int, "completion_tokens": int,
+         "cost_usd": float}
+
+    Defensive: if the SDK returns a response without `.usage` (rare but
+    possible on errors), we return zeros so callers never see KeyError.
+    """
+    usage_obj = getattr(response, "usage", None)
+    p = int(getattr(usage_obj, "prompt_tokens", 0) or 0)
+    c = int(getattr(usage_obj, "completion_tokens", 0) or 0)
+    return {
+        "model": model,
+        "prompt_tokens": p,
+        "completion_tokens": c,
+        "cost_usd": estimate_cost_usd(model, p, c),
+    }
+
+
+def _extract_usage_from_chunk(chunk_usage: Any, model: str) -> dict:
+    """Like _extract_usage but for the `usage` field on the final stream chunk.
+
+    OpenAI populates `chunk.usage` only on the LAST streaming chunk when
+    `stream_options={"include_usage": True}` is passed. Callers should check
+    `chunk.usage` is truthy before calling this.
+    """
+    p = int(getattr(chunk_usage, "prompt_tokens", 0) or 0)
+    c = int(getattr(chunk_usage, "completion_tokens", 0) or 0)
+    return {
+        "model": model,
+        "prompt_tokens": p,
+        "completion_tokens": c,
+        "cost_usd": estimate_cost_usd(model, p, c),
+    }
+
+
+def accumulate_usage(*usages: dict, primary_model: str | None = None) -> dict:
+    """Combine multiple per-call usages into one row ready for chat_history.
+
+    One question often triggers multiple OpenAI calls (classifier + answer,
+    or RAG search embedding + answer). Each call has its own model and its
+    own cost — we SUM tokens and SUM cost (each cost was already computed
+    at the correct per-model rate), and stamp `model_used` with the primary
+    answer-model so the dashboard can group by it.
+
+    Args:
+        *usages: usage dicts from _extract_usage / _extract_usage_from_chunk.
+            Empty or None entries are skipped.
+        primary_model: the model id to store as `model_used`. Defaults to the
+            model of the last non-empty usage (typically the answer call).
+
+    Returns:
+        {"model_used": str, "prompt_tokens": int, "completion_tokens": int,
+         "cost_usd": float}
+    """
+    valid = [u for u in usages if u]
+    if not valid:
+        return {
+            "model_used": primary_model or LLM_MODEL,
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "cost_usd": 0.0,
+        }
+    total_p = sum(u.get("prompt_tokens", 0) for u in valid)
+    total_c = sum(u.get("completion_tokens", 0) for u in valid)
+    total_cost = sum(u.get("cost_usd", 0.0) for u in valid)
+    return {
+        "model_used": primary_model or valid[-1].get("model") or LLM_MODEL,
+        "prompt_tokens": total_p,
+        "completion_tokens": total_c,
+        "cost_usd": round(total_cost, 6),
+    }
 
 
 COMPANY_IDENTITY = (
@@ -253,8 +338,12 @@ CLASSIFY_PROMPT = (
 )
 
 
-def classify_query(question: str) -> str:
-    """Return 'calc' or 'general'. Falls back to 'general' on any failure."""
+def classify_query(question: str) -> tuple[str, dict]:
+    """Return ('calc' | 'general', usage). Falls back to ('general', zero-usage) on failure.
+
+    Usage is the per-call dict from _extract_usage; caller should hand it to
+    accumulate_usage() together with the answer call's usage.
+    """
     try:
         res = _get_client().chat.completions.create(
             model=LLM_MODEL_CLASSIFIER,
@@ -266,9 +355,15 @@ def classify_query(question: str) -> str:
             **_token_kwargs(LLM_MODEL_CLASSIFIER, 5),
         )
         text = (res.choices[0].message.content or "").strip().lower()
-        return "calc" if "calc" in text else "general"
+        category = "calc" if "calc" in text else "general"
+        return category, _extract_usage(res, LLM_MODEL_CLASSIFIER)
     except Exception:
-        return "general"
+        return "general", {
+            "model": LLM_MODEL_CLASSIFIER,
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "cost_usd": 0.0,
+        }
 
 
 def answer_from_context(
@@ -277,7 +372,8 @@ def answer_from_context(
     context_answer: str,
     model: str | None = None,
     history: list[dict] | None = None,
-) -> str:
+) -> tuple[str, dict]:
+    """Returns (answer_text, usage). usage is the per-call dict from _extract_usage."""
     messages: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT_RAG}]
     if history:
         messages.extend(history)
@@ -296,7 +392,8 @@ def answer_from_context(
         messages=messages,
         **_token_kwargs(chosen, 8000),
     )
-    return (res.choices[0].message.content or "").strip()
+    text = (res.choices[0].message.content or "").strip()
+    return text, _extract_usage(res, chosen)
 
 
 def answer_freely(
@@ -304,8 +401,8 @@ def answer_freely(
     model: str | None = None,
     history: list[dict] | None = None,
     company_only: bool = False,
-) -> str:
-    """Answer without RAG context.
+) -> tuple[str, dict]:
+    """Answer without RAG context. Returns (answer_text, usage).
 
     When company_only=True, the system prompt forces the model to refuse any
     question that is not about the company. Used by the "ถามข้อมูลบริษัท" mode.
@@ -321,7 +418,8 @@ def answer_freely(
         messages=messages,
         **_token_kwargs(chosen, 8000),
     )
-    return (res.choices[0].message.content or "").strip()
+    text = (res.choices[0].message.content or "").strip()
+    return text, _extract_usage(res, chosen)
 
 
 def stream_from_context(
@@ -330,9 +428,18 @@ def stream_from_context(
     context_answer: str,
     model: str | None = None,
     history: list[dict] | None = None,
+    usage_holder: dict | None = None,
 ):
     """Streaming twin of answer_from_context — yields text deltas as the model
-    produces them. Same prompt/messages so output matches the non-stream path."""
+    produces them. Same prompt/messages so output matches the non-stream path.
+
+    If `usage_holder` is provided, it gets populated (in-place) with the final
+    token usage on the LAST chunk. Caller pattern:
+        usage = {}
+        for delta in stream_from_context(..., usage_holder=usage):
+            send(delta)
+        # after loop, usage = {"model": ..., "prompt_tokens": ..., ...}
+    """
     messages: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT_RAG}]
     if history:
         messages.extend(history)
@@ -346,18 +453,23 @@ def stream_from_context(
         }
     )
     chosen = model or LLM_MODEL
-    stream = _get_client().chat.completions.create(
+    stream_kwargs: dict = dict(
         model=chosen,
         messages=messages,
         stream=True,
         **_token_kwargs(chosen, 8000),
     )
+    if usage_holder is not None:
+        stream_kwargs["stream_options"] = {"include_usage": True}
+    stream = _get_client().chat.completions.create(**stream_kwargs)
     for chunk in stream:
-        if not chunk.choices:
-            continue
-        delta = chunk.choices[0].delta.content
-        if delta:
-            yield delta
+        if chunk.choices:
+            delta = chunk.choices[0].delta.content
+            if delta:
+                yield delta
+        # `usage` arrives on the final chunk only when include_usage=True.
+        if usage_holder is not None and getattr(chunk, "usage", None):
+            usage_holder.update(_extract_usage_from_chunk(chunk.usage, chosen))
 
 
 def stream_freely(
@@ -365,26 +477,34 @@ def stream_freely(
     model: str | None = None,
     history: list[dict] | None = None,
     company_only: bool = False,
+    usage_holder: dict | None = None,
 ):
-    """Streaming twin of answer_freely — yields text deltas."""
+    """Streaming twin of answer_freely — yields text deltas.
+
+    See stream_from_context for the `usage_holder` pattern.
+    """
     system_prompt = SYSTEM_PROMPT_COMPANY_FREE if company_only else SYSTEM_PROMPT_FREE
     messages: list[dict] = [{"role": "system", "content": system_prompt}]
     if history:
         messages.extend(history)
     messages.append({"role": "user", "content": question})
     chosen = model or LLM_MODEL
-    stream = _get_client().chat.completions.create(
+    stream_kwargs: dict = dict(
         model=chosen,
         messages=messages,
         stream=True,
         **_token_kwargs(chosen, 8000),
     )
+    if usage_holder is not None:
+        stream_kwargs["stream_options"] = {"include_usage": True}
+    stream = _get_client().chat.completions.create(**stream_kwargs)
     for chunk in stream:
-        if not chunk.choices:
-            continue
-        delta = chunk.choices[0].delta.content
-        if delta:
-            yield delta
+        if chunk.choices:
+            delta = chunk.choices[0].delta.content
+            if delta:
+                yield delta
+        if usage_holder is not None and getattr(chunk, "usage", None):
+            usage_holder.update(_extract_usage_from_chunk(chunk.usage, chosen))
 
 
 def answer_with_files(
@@ -392,8 +512,13 @@ def answer_with_files(
     image_data_urls: list[str],
     pdf_texts: list[tuple[str, str]],
     history: list[dict] | None = None,
-) -> str:
-    """Answer when the user attached files. Uses vision-capable model (gpt-4.1-mini)."""
+) -> tuple[str, dict]:
+    """Answer when the user attached files. Returns (answer_text, usage).
+
+    Uses vision-capable model (LLM_MODEL_FILES). Vision image tokens are
+    already counted inside prompt_tokens by OpenAI, so we don't need to
+    estimate them separately — `_extract_usage` picks them up automatically.
+    """
     content: list[dict] = []
 
     if pdf_texts:
@@ -423,4 +548,5 @@ def answer_with_files(
         messages=messages,
         **_token_kwargs(LLM_MODEL_FILES, 8000),
     )
-    return (res.choices[0].message.content or "").strip()
+    text = (res.choices[0].message.content or "").strip()
+    return text, _extract_usage(res, LLM_MODEL_FILES)

@@ -85,6 +85,20 @@ type Overview = {
     username: string;
     created_at: string | null;
   }[];
+  cost: {
+    real_usd: number;
+    estimated_usd: number;
+    total_usd: number;
+    total_thb: number;
+    rows_with_real_cost: number;
+    rows_estimated: number;
+    by_model: {
+      model: string;
+      cost_usd: number;
+      cost_thb: number;
+      rows: number;
+    }[];
+  };
   safety: {
     blocked_total: number;
     blocked_by_category: Record<string, number>;
@@ -224,6 +238,8 @@ export function DashboardPanel() {
         <UsageTrendChart trend={data.usage_trend} />
         <SourceDistributionChart distribution={data.source_distribution} />
       </div>
+
+      <CostBreakdownCard cost={data.cost} />
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         <TopQuestionsCard items={data.top_questions} />
@@ -733,6 +749,178 @@ function TopUsersCard({ items }: { items: Overview["top_users"] }) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+
+// Pastel palette cycled across models. Lines up with the existing donut so
+// the dashboard doesn't fight itself visually.
+const MODEL_COLORS = [
+  "#7c3aed", // purple — primary answer model
+  "#0ea5e9", // sky
+  "#10b981", // emerald
+  "#f59e0b", // amber
+  "#ec4899", // pink
+  "#94a3b8", // slate — fallback / legacy
+];
+
+function CostBreakdownCard({ cost }: { cost: Overview["cost"] }) {
+  const hasRealData = cost.rows_with_real_cost > 0;
+  const hasLegacy = cost.rows_estimated > 0;
+  const total = cost.real_usd + cost.estimated_usd;
+  const realPct = total ? Math.round((cost.real_usd / total) * 100) : 0;
+
+  // Pie data — real per-model rows, plus a legacy "ค่าประมาณ" slice when there
+  // are still NULL-cost rows so the user can see the share that's a guess.
+  const pieData = useMemo(() => {
+    const real = cost.by_model.map((m, i) => ({
+      name: m.model,
+      value: m.cost_thb,
+      color: MODEL_COLORS[i % MODEL_COLORS.length],
+    }));
+    if (cost.estimated_usd > 0) {
+      real.push({
+        name: "ค่าประมาณ (rows เก่า)",
+        value: cost.estimated_usd * 36,
+        color: "#cbd5e1",
+      });
+    }
+    return real.filter((s) => s.value > 0);
+  }, [cost]);
+
+  return (
+    <div className="bg-white rounded-2xl border border-gray-100 p-5 shadow-sm">
+      <div className="flex items-center justify-between mb-3">
+        <h3 className="font-semibold text-gray-800 flex items-center gap-2">
+          <DollarSign size={16} className="text-emerald-600" />
+          ค่าใช้จ่ายตามโมเดล
+        </h3>
+        {hasLegacy && (
+          <span className="inline-flex items-center gap-1 text-[11px] px-2 py-0.5 rounded-full bg-amber-50 text-amber-700 border border-amber-200">
+            <AlertTriangle size={11} />
+            {cost.rows_estimated} rows ใช้ค่าประมาณ
+          </span>
+        )}
+      </div>
+
+      {pieData.length === 0 ? (
+        <p className="text-sm text-gray-400 text-center py-8 italic">
+          ยังไม่มีคำถามในช่วงนี้
+        </p>
+      ) : (
+        <div className="grid grid-cols-1 md:grid-cols-5 gap-4">
+          <div className="md:col-span-2 h-56">
+            <ResponsiveContainer width="100%" height="100%">
+              <PieChart>
+                <Pie
+                  data={pieData}
+                  dataKey="value"
+                  nameKey="name"
+                  innerRadius={40}
+                  outerRadius={75}
+                  paddingAngle={3}
+                >
+                  {pieData.map((entry, i) => (
+                    <Cell key={i} fill={entry.color} />
+                  ))}
+                </Pie>
+                <Tooltip
+                  contentStyle={{
+                    background: "white",
+                    border: "1px solid #e5e7eb",
+                    borderRadius: "8px",
+                  }}
+                  formatter={(value) =>
+                    typeof value === "number"
+                      ? `฿${value.toFixed(4)}`
+                      : String(value ?? "")
+                  }
+                />
+              </PieChart>
+            </ResponsiveContainer>
+          </div>
+
+          <div className="md:col-span-3 flex flex-col">
+            <div className="grid grid-cols-2 gap-3 mb-3">
+              <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-3">
+                <p className="text-[11px] text-emerald-700 font-medium uppercase tracking-wide">
+                  รวมทั้งสิ้น
+                </p>
+                <p className="text-2xl font-bold text-emerald-900">
+                  ฿{cost.total_thb.toFixed(2)}
+                </p>
+                <p className="text-[11px] text-emerald-600 mt-0.5">
+                  ${cost.total_usd.toFixed(4)}
+                </p>
+              </div>
+              <div className="bg-purple-50 border border-purple-200 rounded-xl p-3">
+                <p className="text-[11px] text-purple-700 font-medium uppercase tracking-wide">
+                  ค่าจริงจาก tokens
+                </p>
+                <p className="text-2xl font-bold text-purple-900">
+                  {realPct}%
+                </p>
+                <p className="text-[11px] text-purple-600 mt-0.5">
+                  {cost.rows_with_real_cost} rows
+                </p>
+              </div>
+            </div>
+
+            <div className="overflow-y-auto max-h-32 -mx-1 px-1">
+              <ul className="space-y-1">
+                {cost.by_model.map((m, i) => (
+                  <li
+                    key={m.model}
+                    className="flex items-center justify-between text-sm py-1 border-b border-gray-50 last:border-0"
+                  >
+                    <span className="inline-flex items-center gap-2">
+                      <span
+                        className="inline-block w-2.5 h-2.5 rounded-sm"
+                        style={{
+                          background:
+                            MODEL_COLORS[i % MODEL_COLORS.length],
+                        }}
+                      />
+                      <span className="font-medium text-gray-700">
+                        {m.model}
+                      </span>
+                      <span className="text-xs text-gray-400">
+                        ({m.rows} ครั้ง)
+                      </span>
+                    </span>
+                    <span className="font-mono text-gray-700">
+                      ฿{m.cost_thb.toFixed(4)}
+                    </span>
+                  </li>
+                ))}
+                {hasLegacy && (
+                  <li className="flex items-center justify-between text-sm py-1 italic text-gray-500">
+                    <span className="inline-flex items-center gap-2">
+                      <span
+                        className="inline-block w-2.5 h-2.5 rounded-sm"
+                        style={{ background: "#cbd5e1" }}
+                      />
+                      <span>ค่าประมาณ (flat-rate)</span>
+                      <span className="text-xs text-gray-400">
+                        ({cost.rows_estimated} ครั้ง)
+                      </span>
+                    </span>
+                    <span className="font-mono">
+                      ฿{(cost.estimated_usd * 36).toFixed(4)}
+                    </span>
+                  </li>
+                )}
+              </ul>
+            </div>
+
+            {!hasRealData && hasLegacy && (
+              <p className="text-xs text-amber-700 mt-2 italic">
+                ⚠️ ยังไม่มี row ใหม่ที่มี token data — รอคำถามใหม่หลัง deploy
+              </p>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
 
 function SatisfactionCard({ feedback }: { feedback: Overview["feedback"] }) {
   const { up, down, total, satisfaction_pct } = feedback;

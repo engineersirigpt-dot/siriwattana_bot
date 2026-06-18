@@ -6,11 +6,66 @@ from datetime import datetime, timedelta, timezone
 
 from db_pg import get_pg_conn
 
-# Rough per-question OpenAI estimate so the dashboard can show a cost number.
-# Based on gpt-4.1-mini (input $0.40/M, output $1.60/M) + occasional embed call.
-# We bill once per real chat_history row (export_offer / blocked excluded).
+# Flat-rate per-question fallback for legacy rows that were inserted before
+# we started persisting `chat_history.cost_usd` (Phase 1-4 of cost tracking,
+# 2026-06-18). New rows carry the real token-derived cost and bypass this.
 COST_USD_PER_QUESTION = float(os.getenv("DASHBOARD_USD_PER_Q", "0.0036"))
 USD_TO_THB = float(os.getenv("DASHBOARD_USD_TO_THB", "36"))
+
+
+def _query_cost_in_range(cur, since: datetime, until: datetime) -> tuple[float, int, int]:
+    """Hybrid cost calc for a chat_history time window.
+
+    Returns (real_cost_usd, real_rows, legacy_rows):
+      - real_cost_usd: SUM(cost_usd) for rows that have it (post-Phase-4).
+      - real_rows: count of those rows (drives the "by_model" chart).
+      - legacy_rows: count of pre-Phase-4 rows without cost data — caller
+        multiplies by COST_USD_PER_QUESTION for the flat-rate fallback.
+    """
+    cur.execute(
+        """
+        SELECT
+            COALESCE(SUM(cost_usd), 0)::float,
+            COUNT(*) FILTER (WHERE cost_usd IS NOT NULL),
+            COUNT(*) FILTER (
+                WHERE cost_usd IS NULL
+                  AND source <> 'export_offer'
+                  AND source <> 'blocked'
+            )
+        FROM chat_history
+        WHERE asked_at >= %s AND asked_at < %s
+        """,
+        (since, until),
+    )
+    real_cost, real_rows, legacy_rows = cur.fetchone()
+    return float(real_cost or 0.0), int(real_rows or 0), int(legacy_rows or 0)
+
+
+def _cost_breakdown_by_model(cur, since: datetime, until: datetime) -> list[dict]:
+    """Per-model cost rollup for the dashboard's "by model" donut chart.
+
+    Only includes rows with real cost data (cost_usd IS NOT NULL). Legacy
+    rows are aggregated separately under "legacy_estimate" so the user can
+    see how much of the total is still flat-rate guesswork.
+    """
+    cur.execute(
+        """
+        SELECT
+            COALESCE(model_used, 'unknown') AS model,
+            SUM(cost_usd)::float AS cost,
+            COUNT(*) AS rows
+        FROM chat_history
+        WHERE asked_at >= %s AND asked_at < %s
+          AND cost_usd IS NOT NULL
+        GROUP BY model_used
+        ORDER BY cost DESC
+        """,
+        (since, until),
+    )
+    return [
+        {"model": r[0], "cost_usd": float(r[1] or 0), "rows": int(r[2])}
+        for r in cur.fetchall()
+    ]
 
 
 def _utc(dt: datetime) -> datetime:
@@ -298,6 +353,16 @@ def admin_dashboard_overview_pg(range_label: str = "7d") -> dict:
                 for r in cur.fetchall()
             ]
 
+            # ── Real cost (Phase 5) — SUM(cost_usd) + flat-rate fallback for
+            # rows persisted before per-message token tracking landed.
+            curr_real, curr_real_rows, curr_legacy_rows = _query_cost_in_range(
+                cur, since, until,
+            )
+            prev_real, _prev_real_rows, prev_legacy_rows = _query_cost_in_range(
+                cur, prev_since, prev_until,
+            )
+            by_model = _cost_breakdown_by_model(cur, since, until)
+
     # ── Reshape source distribution into known buckets so the UI doesn't
     # have to guess. "brain" + "brain-calc" merge into one slice, etc.
     bucket_map = {
@@ -314,9 +379,12 @@ def admin_dashboard_overview_pg(range_label: str = "7d") -> dict:
 
     answered_total = sum(distribution[k] for k in ("brain", "rag", "llm", "files"))
 
-    # Cost estimate — flat per-answer model so we don't store per-call token counts.
-    cost_usd = total_messages * COST_USD_PER_QUESTION
-    prev_cost_usd = prev_total_messages * COST_USD_PER_QUESTION
+    # Combine: per-row real cost + flat-rate for legacy NULL rows. As more
+    # rows accrue real data, the "estimated_usd" share shrinks naturally.
+    curr_estimated = curr_legacy_rows * COST_USD_PER_QUESTION
+    prev_estimated = prev_legacy_rows * COST_USD_PER_QUESTION
+    cost_usd = curr_real + curr_estimated
+    prev_cost_usd = prev_real + prev_estimated
 
     safety = _safety_counts_from_audit(since, until)
 
@@ -364,6 +432,26 @@ def admin_dashboard_overview_pg(range_label: str = "7d") -> dict:
             "satisfaction_pct": satisfaction_pct,
         },
         "recent_downvotes": recent_downvotes,
+        # Detailed cost view: real (per-token) vs estimated (flat-rate fallback
+        # for legacy NULL rows). UI shows the "X rows still estimated" badge so
+        # admin knows when token tracking has fully replaced the estimate.
+        "cost": {
+            "real_usd": round(curr_real, 6),
+            "estimated_usd": round(curr_estimated, 6),
+            "total_usd": round(cost_usd, 6),
+            "total_thb": round(cost_usd * USD_TO_THB, 2),
+            "rows_with_real_cost": curr_real_rows,
+            "rows_estimated": curr_legacy_rows,
+            "by_model": [
+                {
+                    "model": m["model"],
+                    "cost_usd": round(m["cost_usd"], 6),
+                    "cost_thb": round(m["cost_usd"] * USD_TO_THB, 4),
+                    "rows": m["rows"],
+                }
+                for m in by_model
+            ],
+        },
         "safety": safety,
     }
 
@@ -452,6 +540,33 @@ def dashboard_to_markdown(payload: dict) -> str:
             parts.append(
                 f"| {i} | {u['username']} | {u['sessions']} | {u['messages']} |"
             )
+        parts.append("")
+
+    cost = payload.get("cost") or {}
+    if cost.get("by_model") or cost.get("rows_estimated"):
+        parts.append("## ค่าใช้จ่ายจริง (per-token)")
+        parts.append("")
+        parts.append(
+            f"- รวมทั้งช่วง: **฿{cost.get('total_thb', 0):.2f}** "
+            f"(${cost.get('total_usd', 0):.4f})"
+        )
+        if cost.get("rows_with_real_cost"):
+            parts.append(
+                f"- ค่าจริงจาก tokens: {cost.get('rows_with_real_cost')} ครั้ง"
+            )
+        if cost.get("rows_estimated"):
+            parts.append(
+                f"- ค่าประมาณ (flat-rate, rows เก่า): "
+                f"{cost.get('rows_estimated')} ครั้ง"
+            )
+        if cost.get("by_model"):
+            parts.append("")
+            parts.append("| โมเดล | จำนวนครั้ง | ค่าใช้จ่าย (฿) |")
+            parts.append("|---|---:|---:|")
+            for m in cost["by_model"]:
+                parts.append(
+                    f"| {m['model']} | {m['rows']} | {m['cost_thb']:.4f} |"
+                )
         parts.append("")
 
     fb = payload.get("feedback") or {}
