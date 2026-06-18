@@ -79,21 +79,26 @@ _CSS = """
 
     @bottom-center {
         content: "หน้า " counter(page) " / " counter(pages);
-        font-family: 'Sarabun', 'Loma', 'DejaVu Sans', sans-serif;
+        font-family: 'Sarabun', sans-serif;
         font-size: 9pt;
         color: #9ca3af;
     }
     @bottom-right {
         content: string(generated_at);
-        font-family: 'Sarabun', 'Loma', 'DejaVu Sans', sans-serif;
+        font-family: 'Sarabun', sans-serif;
         font-size: 9pt;
         color: #9ca3af;
     }
 }
 
+/* Use Sarabun alone in the body chain. We tried 'Sarabun', 'Loma',
+   'Norasi', 'DejaVu Sans', 'Noto Color Emoji' but Pango's per-script
+   font selection picked Loma/Noto for Latin runs (digits 1, 2 etc.)
+   even though Sarabun had those glyphs — leaving "1.6" rendered as
+   ".6". A single-font chain forces Sarabun for everything, which is
+   what works: Sarabun has full Latin + Thai + Baht. */
 body {
-    font-family: 'Sarabun', 'Loma', 'Norasi',
-                 'DejaVu Sans', 'Noto Color Emoji', sans-serif;
+    font-family: 'Sarabun', sans-serif;
     font-size: 11pt;
     line-height: 1.65;
     color: #1f2937;
