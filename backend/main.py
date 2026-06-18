@@ -2619,6 +2619,70 @@ def admin_analytics(user: dict = Depends(require_admin)):
     return _admin_analytics_sqlite()
 
 
+@app.get("/admin/dashboard/overview")
+def admin_dashboard_overview(
+    range: str = Query("7d", description="Preset range: today / 7d / 30d"),
+    user: dict = Depends(require_admin),
+):
+    """Powers the polished KPI Dashboard tab.
+
+    Returns KPI cards (with previous-period comparison for trend arrows),
+    source distribution (brain/rag/llm/files/blocked), 7-day usage trend
+    for the line chart, top questions + users + pending count, and a
+    safety summary parsed out of audit.log.
+    """
+    if not use_postgres_auth():
+        raise HTTPException(501, "Dashboard requires postgres deployment")
+
+    from admin_pg import admin_dashboard_overview_pg
+
+    if range not in {"today", "7d", "30d"}:
+        range = "7d"
+    return admin_dashboard_overview_pg(range_label=range)
+
+
+@app.get("/admin/dashboard/export-pdf")
+def admin_dashboard_export_pdf(
+    range: str = Query("7d"),
+    user: dict = Depends(require_admin),
+):
+    """Render the KPI dashboard as a polished A4 PDF.
+
+    Re-uses the same overview payload + the existing WeasyPrint pipeline by
+    flattening the dashboard into a markdown report (tables for KPI / top
+    questions / top users), so we don't have to maintain a second template.
+    """
+    if not use_postgres_auth():
+        raise HTTPException(501, "Dashboard requires postgres deployment")
+
+    from admin_pg import admin_dashboard_overview_pg, dashboard_to_markdown
+    from pdf_export import export_markdown_to_pdf
+
+    if range not in {"today", "7d", "30d"}:
+        range = "7d"
+    payload = admin_dashboard_overview_pg(range_label=range)
+    md = dashboard_to_markdown(payload)
+
+    try:
+        pdf_bytes = export_markdown_to_pdf(
+            content_md=md,
+            title=f"KPI Dashboard — {payload['range']['human']}",
+            generated_by=user.get("username"),
+        )
+    except Exception as exc:
+        raise HTTPException(500, f"pdf generation failed: {exc}") from exc
+
+    safe_filename = f"Sirivatana_Dashboard_{range}.pdf"
+    return StreamingResponse(
+        iter([pdf_bytes]),
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": f'attachment; filename="{safe_filename}"',
+            "Content-Length": str(len(pdf_bytes)),
+        },
+    )
+
+
 @app.get("/admin/pending")
 def list_pending(user: dict = Depends(require_admin)):
     if use_postgres_auth():

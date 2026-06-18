@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import {
   ArrowLeft,
   BarChart3,
+  LayoutDashboard,
   ChevronDown,
   ChevronUp,
   CheckCircle2,
@@ -25,6 +26,7 @@ import {
 } from "lucide-react";
 import { API_BASE, api, getRole, getToken } from "@/lib/api";
 import { ConfirmModal } from "@/components/Modal";
+import { DashboardPanel } from "@/components/admin/DashboardPanel";
 
 type Pending = {
   id: number;
@@ -107,11 +109,11 @@ type Analytics = {
   top_users: { username: string; count: number }[];
 };
 
-type Tab = "analytics" | "pending" | "knowledge" | "history" | "users";
+type Tab = "dashboard" | "analytics" | "pending" | "knowledge" | "history" | "users";
 
 export default function AdminPage() {
   const router = useRouter();
-  const [tab, setTab] = useState<Tab>("analytics");
+  const [tab, setTab] = useState<Tab>("dashboard");
   const [analytics, setAnalytics] = useState<Analytics | null>(null);
   const [pending, setPending] = useState<Pending[]>([]);
   const [knowledge, setKnowledge] = useState<Knowledge[]>([]);
@@ -315,6 +317,12 @@ export default function AdminPage() {
         {/* Tabs */}
         <div className="flex gap-2 mb-6 bg-white/60 backdrop-blur-sm p-1.5 rounded-2xl shadow-sm border border-white/40 w-fit">
           <TabButton
+            active={tab === "dashboard"}
+            onClick={() => setTab("dashboard")}
+            icon={<LayoutDashboard size={18} />}
+            label="Dashboard"
+          />
+          <TabButton
             active={tab === "analytics"}
             onClick={() => setTab("analytics")}
             icon={<BarChart3 size={18} />}
@@ -349,6 +357,9 @@ export default function AdminPage() {
             count={users.length}
           />
         </div>
+
+        {/* Pro KPI Dashboard — handoff view */}
+        {tab === "dashboard" && <DashboardPanel />}
 
         {/* Analytics / overview tab */}
         {tab === "analytics" && <AnalyticsView data={analytics} />}

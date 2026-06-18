@@ -1,4 +1,431 @@
+from __future__ import annotations
+
+import json
+import os
+from datetime import datetime, timedelta, timezone
+
 from db_pg import get_pg_conn
+
+# Rough per-question OpenAI estimate so the dashboard can show a cost number.
+# Based on gpt-4.1-mini (input $0.40/M, output $1.60/M) + occasional embed call.
+# We bill once per real chat_history row (export_offer / blocked excluded).
+COST_USD_PER_QUESTION = float(os.getenv("DASHBOARD_USD_PER_Q", "0.0036"))
+USD_TO_THB = float(os.getenv("DASHBOARD_USD_TO_THB", "36"))
+
+
+def _utc(dt: datetime) -> datetime:
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+def _resolve_range(label: str) -> tuple[datetime, datetime, datetime, datetime, str]:
+    """Pick (since, until, prev_since, prev_until, human_label) for a preset.
+
+    "today"  → from local day-start to now, compared with yesterday's same window
+    "7d"     → last 7 days vs previous 7
+    "30d"    → last 30 days vs previous 30
+    """
+    now = datetime.now(timezone.utc)
+    label = (label or "7d").strip().lower()
+
+    if label == "today":
+        since = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        prev_since = since - timedelta(days=1)
+        prev_until = since
+        return since, now, prev_since, prev_until, "วันนี้"
+
+    if label == "30d":
+        since = now - timedelta(days=30)
+        prev_since = since - timedelta(days=30)
+        prev_until = since
+        return since, now, prev_since, prev_until, "30 วันที่ผ่านมา"
+
+    # default: 7d
+    since = now - timedelta(days=7)
+    prev_since = since - timedelta(days=7)
+    prev_until = since
+    return since, now, prev_since, prev_until, "7 วันที่ผ่านมา"
+
+
+def _safety_counts_from_audit(since: datetime, until: datetime) -> dict:
+    """Parse data/audit.log for safety + login events in [since, until).
+
+    The audit log is JSON-lines on disk — small enough at PoC scale that
+    streaming-read + filtering is fine. If the file is missing or the cap is
+    reached we silently fall back to zeros so the dashboard still renders.
+    """
+    from audit import AUDIT_LOG_PATH
+    path = str(AUDIT_LOG_PATH)
+    if not os.path.exists(path):
+        return {
+            "blocked_total": 0,
+            "blocked_by_category": {},
+            "failed_logins": 0,
+            "login_blocked_disabled": 0,
+        }
+
+    blocked = 0
+    by_category: dict[str, int] = {}
+    failed = 0
+    blocked_disabled = 0
+
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                try:
+                    e = json.loads(line)
+                except ValueError:
+                    continue
+                ts_str = e.get("timestamp") or ""
+                try:
+                    ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+                except ValueError:
+                    continue
+                ts = _utc(ts)
+                if ts < since or ts >= until:
+                    continue
+                action = e.get("action") or ""
+                if action == "sensitive_blocked":
+                    blocked += 1
+                    kw = (e.get("detail") or {}).get("matched_keyword") or "OTHER"
+                    by_category[kw] = by_category.get(kw, 0) + 1
+                elif action == "sensitive_blocked_classifier":
+                    blocked += 1
+                    cat = (e.get("detail") or {}).get("category") or "OTHER"
+                    by_category[cat] = by_category.get(cat, 0) + 1
+                elif action == "login_failed":
+                    failed += 1
+                elif action == "login_blocked_disabled":
+                    blocked_disabled += 1
+    except OSError:
+        pass
+
+    return {
+        "blocked_total": blocked,
+        "blocked_by_category": by_category,
+        "failed_logins": failed,
+        "login_blocked_disabled": blocked_disabled,
+    }
+
+
+def _delta_pct(curr: float, prev: float) -> float | None:
+    """% change vs previous period. None when prev=0 (can't divide)."""
+    if prev <= 0:
+        return None
+    return round(((curr - prev) / prev) * 100, 1)
+
+
+def admin_dashboard_overview_pg(range_label: str = "7d") -> dict:
+    """Single payload that powers the KPI Dashboard tab.
+
+    Returns counts for the chosen range AND the previous comparable range, so
+    the UI can render trend arrows without doing math on the frontend.
+    """
+    since, until, prev_since, prev_until, human_label = _resolve_range(range_label)
+
+    with get_pg_conn() as conn:
+        with conn.cursor() as cur:
+            # ── KPIs (current period) ─────────────────────────────────────
+            cur.execute(
+                """
+                SELECT COUNT(DISTINCT user_id) FROM chat_history
+                WHERE asked_at >= %s AND asked_at < %s
+                """,
+                (since, until),
+            )
+            active_users = cur.fetchone()[0] or 0
+
+            cur.execute(
+                """
+                SELECT COUNT(*) FROM chat_sessions
+                WHERE created_at >= %s AND created_at < %s
+                """,
+                (since, until),
+            )
+            new_sessions = cur.fetchone()[0] or 0
+
+            cur.execute(
+                """
+                SELECT COUNT(*) FROM chat_history
+                WHERE asked_at >= %s AND asked_at < %s
+                  AND source <> 'export_offer'
+                  AND source <> 'blocked'
+                """,
+                (since, until),
+            )
+            total_messages = cur.fetchone()[0] or 0
+
+            # ── KPIs (previous period — for trend arrows) ─────────────────
+            cur.execute(
+                """
+                SELECT COUNT(DISTINCT user_id) FROM chat_history
+                WHERE asked_at >= %s AND asked_at < %s
+                """,
+                (prev_since, prev_until),
+            )
+            prev_active_users = cur.fetchone()[0] or 0
+
+            cur.execute(
+                """
+                SELECT COUNT(*) FROM chat_sessions
+                WHERE created_at >= %s AND created_at < %s
+                """,
+                (prev_since, prev_until),
+            )
+            prev_new_sessions = cur.fetchone()[0] or 0
+
+            cur.execute(
+                """
+                SELECT COUNT(*) FROM chat_history
+                WHERE asked_at >= %s AND asked_at < %s
+                  AND source <> 'export_offer'
+                  AND source <> 'blocked'
+                """,
+                (prev_since, prev_until),
+            )
+            prev_total_messages = cur.fetchone()[0] or 0
+
+            # ── Source distribution (current period) ──────────────────────
+            cur.execute(
+                """
+                SELECT source, COUNT(*) FROM chat_history
+                WHERE asked_at >= %s AND asked_at < %s
+                  AND source <> 'export_offer'
+                GROUP BY source ORDER BY 2 DESC
+                """,
+                (since, until),
+            )
+            raw_source = [{"source": r[0], "count": r[1]} for r in cur.fetchall()]
+
+            # ── Daily volume timeseries (always 7 buckets for the chart) ──
+            cur.execute(
+                """
+                SELECT to_char(date_trunc('day', asked_at), 'YYYY-MM-DD') AS day,
+                       COUNT(DISTINCT session_id) AS sessions,
+                       COUNT(*) FILTER (
+                         WHERE source <> 'export_offer' AND source <> 'blocked'
+                       ) AS messages
+                FROM chat_history
+                WHERE asked_at >= now() - interval '6 days'
+                GROUP BY day ORDER BY day
+                """
+            )
+            usage_trend = [
+                {"day": r[0], "sessions": r[1], "messages": r[2]}
+                for r in cur.fetchall()
+            ]
+
+            # ── Top questions in range ────────────────────────────────────
+            cur.execute(
+                """
+                SELECT question, COUNT(*) c FROM chat_history
+                WHERE asked_at >= %s AND asked_at < %s
+                  AND source <> 'export_offer'
+                  AND source <> 'blocked'
+                GROUP BY question
+                ORDER BY c DESC, MAX(asked_at) DESC
+                LIMIT 5
+                """,
+                (since, until),
+            )
+            top_questions = [
+                {"question": r[0], "count": r[1]} for r in cur.fetchall()
+            ]
+
+            # ── Top users in range ────────────────────────────────────────
+            cur.execute(
+                """
+                SELECT u.username, COUNT(DISTINCT s.id) AS sessions,
+                       COUNT(h.id) AS messages
+                FROM chat_history h
+                JOIN users u ON u.id = h.user_id
+                JOIN chat_sessions s ON s.id = h.session_id
+                WHERE h.asked_at >= %s AND h.asked_at < %s
+                  AND h.source <> 'export_offer'
+                GROUP BY u.username
+                ORDER BY messages DESC LIMIT 5
+                """,
+                (since, until),
+            )
+            top_users = [
+                {"username": r[0], "sessions": r[1], "messages": r[2]}
+                for r in cur.fetchall()
+            ]
+
+            # ── Pending questions (RAG misses we should curate) ───────────
+            cur.execute(
+                "SELECT COUNT(*) FROM pending_questions WHERE status = 'pending'"
+            )
+            pending_count = cur.fetchone()[0] or 0
+
+    # ── Reshape source distribution into known buckets so the UI doesn't
+    # have to guess. "brain" + "brain-calc" merge into one slice, etc.
+    bucket_map = {
+        "brain": "brain", "brain-calc": "brain",
+        "rag": "rag", "rag-calc": "rag",
+        "llm": "llm", "llm-calc": "llm",
+        "files": "files",
+        "blocked": "blocked",
+    }
+    distribution: dict[str, int] = {"brain": 0, "rag": 0, "llm": 0, "files": 0, "blocked": 0}
+    for row in raw_source:
+        key = bucket_map.get(row["source"], "llm")
+        distribution[key] += row["count"]
+
+    answered_total = sum(distribution[k] for k in ("brain", "rag", "llm", "files"))
+
+    # Cost estimate — flat per-answer model so we don't store per-call token counts.
+    cost_usd = total_messages * COST_USD_PER_QUESTION
+    prev_cost_usd = prev_total_messages * COST_USD_PER_QUESTION
+
+    safety = _safety_counts_from_audit(since, until)
+
+    return {
+        "range": {
+            "label": range_label,
+            "human": human_label,
+            "since": since.isoformat(),
+            "until": until.isoformat(),
+            "prev_since": prev_since.isoformat(),
+            "prev_until": prev_until.isoformat(),
+        },
+        "kpis": {
+            "active_users": {
+                "value": active_users,
+                "prev": prev_active_users,
+                "delta_pct": _delta_pct(active_users, prev_active_users),
+            },
+            "new_sessions": {
+                "value": new_sessions,
+                "prev": prev_new_sessions,
+                "delta_pct": _delta_pct(new_sessions, prev_new_sessions),
+            },
+            "messages": {
+                "value": total_messages,
+                "prev": prev_total_messages,
+                "delta_pct": _delta_pct(total_messages, prev_total_messages),
+            },
+            "cost_thb": {
+                "value": round(cost_usd * USD_TO_THB, 2),
+                "prev": round(prev_cost_usd * USD_TO_THB, 2),
+                "delta_pct": _delta_pct(cost_usd, prev_cost_usd),
+            },
+        },
+        "source_distribution": distribution,
+        "answered_total": answered_total,
+        "usage_trend": usage_trend,
+        "top_questions": top_questions,
+        "top_users": top_users,
+        "pending_count": pending_count,
+        "safety": safety,
+    }
+
+
+def dashboard_to_markdown(payload: dict) -> str:
+    """Flatten the dashboard overview into a printable markdown report.
+
+    Re-uses pdf_export.export_markdown_to_pdf so we don't maintain a second
+    WeasyPrint template — the markdown picks up the same brand header, font
+    stack, and table styling as the chat-answer PDF.
+    """
+    kpis = payload["kpis"]
+    src = payload["source_distribution"]
+    safety = payload["safety"]
+    rng = payload["range"]
+
+    def _arrow(d: float | None) -> str:
+        if d is None:
+            return "—"
+        if d > 0:
+            return f"▲ {d:+.1f}%"
+        if d < 0:
+            return f"▼ {d:.1f}%"
+        return "—"
+
+    parts: list[str] = []
+    parts.append(f"**ช่วงเวลา:** {rng['human']} ({rng['since'][:10]} → {rng['until'][:10]})")
+    parts.append("")
+    parts.append("## สรุป KPI")
+    parts.append("")
+    parts.append("| ตัวชี้วัด | ค่าปัจจุบัน | ค่าก่อนหน้า | เปลี่ยนแปลง |")
+    parts.append("|---|---:|---:|---:|")
+    parts.append(
+        f"| ผู้ใช้ Active | {kpis['active_users']['value']:,} "
+        f"| {kpis['active_users']['prev']:,} | {_arrow(kpis['active_users']['delta_pct'])} |"
+    )
+    parts.append(
+        f"| แชทใหม่ | {kpis['new_sessions']['value']:,} "
+        f"| {kpis['new_sessions']['prev']:,} | {_arrow(kpis['new_sessions']['delta_pct'])} |"
+    )
+    parts.append(
+        f"| ข้อความ | {kpis['messages']['value']:,} "
+        f"| {kpis['messages']['prev']:,} | {_arrow(kpis['messages']['delta_pct'])} |"
+    )
+    parts.append(
+        f"| ค่าใช้จ่าย (฿) | {kpis['cost_thb']['value']:,.2f} "
+        f"| {kpis['cost_thb']['prev']:,.2f} | {_arrow(kpis['cost_thb']['delta_pct'])} |"
+    )
+    parts.append("")
+
+    answered = payload.get("answered_total", 0) or 0
+    parts.append("## คำตอบมาจากแหล่งใด")
+    parts.append("")
+    parts.append("| แหล่งข้อมูล | จำนวน | สัดส่วน |")
+    parts.append("|---|---:|---:|")
+    for label, key in [
+        ("🧠 AI Brain", "brain"),
+        ("📚 Knowledge Base", "rag"),
+        ("🤖 LLM (general)", "llm"),
+        ("📎 ไฟล์แนบ", "files"),
+        ("🛑 ถูกบล็อก", "blocked"),
+    ]:
+        v = src.get(key, 0) or 0
+        pct = (v / answered * 100) if answered else 0
+        parts.append(f"| {label} | {v:,} | {pct:.1f}% |")
+    parts.append("")
+
+    if payload.get("top_questions"):
+        parts.append("## คำถามยอดนิยม")
+        parts.append("")
+        parts.append("| อันดับ | คำถาม | จำนวนครั้ง |")
+        parts.append("|---:|---|---:|")
+        for i, q in enumerate(payload["top_questions"][:10], 1):
+            text = (q["question"] or "").replace("|", "\\|").strip()
+            if len(text) > 120:
+                text = text[:117] + "..."
+            parts.append(f"| {i} | {text} | {q['count']} |")
+        parts.append("")
+
+    if payload.get("top_users"):
+        parts.append("## ผู้ใช้ที่ Active สูงสุด")
+        parts.append("")
+        parts.append("| อันดับ | Username | จำนวนแชท | จำนวนข้อความ |")
+        parts.append("|---:|---|---:|---:|")
+        for i, u in enumerate(payload["top_users"][:10], 1):
+            parts.append(
+                f"| {i} | {u['username']} | {u['sessions']} | {u['messages']} |"
+            )
+        parts.append("")
+
+    parts.append("## Safety & Pending")
+    parts.append("")
+    parts.append(f"- ความพยายามเข้าถึงข้อมูลละเอียดอ่อนที่ถูกบล็อก: **{safety['blocked_total']}** ครั้ง")
+    parts.append(f"- Login ล้มเหลว: **{safety['failed_logins']}** ครั้ง")
+    parts.append(
+        f"- ความพยายาม login ของ user ที่ถูกระงับ: **{safety['login_blocked_disabled']}** ครั้ง"
+    )
+    parts.append(
+        f"- คำถามรอ admin ตอบ (Pending): **{payload.get('pending_count', 0)}** คำถาม"
+    )
+    if safety.get("blocked_by_category"):
+        parts.append("")
+        parts.append("### ประเภทที่ถูกบล็อกมากสุด")
+        parts.append("")
+        for cat, n in sorted(
+            safety["blocked_by_category"].items(), key=lambda x: -x[1]
+        )[:5]:
+            parts.append(f"- {cat}: {n} ครั้ง")
+
+    return "\n".join(parts)
 
 
 def list_pending_pg() -> list[dict]:
