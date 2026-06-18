@@ -275,7 +275,6 @@ def export_markdown_to_pdf(
 <head>
 <meta charset="utf-8">
 <title>{_safe(doc_title)}</title>
-<style>{_CSS}</style>
 </head>
 <body>
 <div class="brand-header">
@@ -294,6 +293,16 @@ def export_markdown_to_pdf(
 </body>
 </html>"""
 
+    # Pass CSS as an external stylesheet rather than embedding it in <style>.
+    # WeasyPrint resolves @font-face url() against the stylesheet's base URL,
+    # and inline <style> in our generated HTML has no base URL — file:// paths
+    # silently fail to load Sarabun, causing Pango to substitute fonts and
+    # eat Latin digits in table cells. Passing CSS(string=...) keeps @font-face
+    # resolution behaviour aligned with our earlier successful smoke test.
+    from weasyprint import CSS  # type: ignore[import-not-found]
     buf = BytesIO()
-    HTML(string=full_html).write_pdf(target=buf)
+    HTML(string=full_html).write_pdf(
+        target=buf,
+        stylesheets=[CSS(string=_CSS)],
+    )
     return buf.getvalue()
