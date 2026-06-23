@@ -30,7 +30,11 @@ SENSITIVE_KEYWORDS: set[str] = {
     "national id",
 
     # --- Internal financial / pricing secrets ---
-    "ต้นทุน",          # catches "ต้นทุนงานกล่อง", "ต้นทุนการผลิต", "ต้นทุนสินค้า"
+    # NOTE: bare "ต้นทุน" was removed — it false-blocked legitimate math where the
+    # user supplies their own numbers (e.g. "คิดต้นทุนกระดาษ 500 แผ่น แผ่นละ 2.5
+    # บวก VAT"), very common for printing-quote work. The Layer-2 classifier
+    # (sensitivity_classifier.py) still blocks requests to REVEAL the company's
+    # internal cost/margin, which is the actual thing we protect.
     "ราคาทุน",
     "ราคาลับ",
     "margin",
