@@ -718,12 +718,21 @@ def embed_fonts_in_docx(docx_path) -> bool:
             )
         content["[Content_Types].xml"] = ct.encode("utf-8")
 
-        # settings.xml — เปิดการฝังฟอนต์
+        # settings.xml — เปิดการฝังฟอนต์ (ตำแหน่งต้องถูกตามสคีมา ไม่งั้น Word เมิน!)
+        # ลำดับ CT_Settings: ... zoom ... embedTrueTypeFonts ... proofState ... compat
         st = "word/settings.xml"
         if st in content:
             s = content[st].decode("utf-8")
             if "<w:embedTrueTypeFonts" not in s:
-                s = re.sub(r"(<w:settings[^>]*>)", r"\1<w:embedTrueTypeFonts/>", s, count=1)
+                # แทรกก่อน element ตัวแรกที่อยู่ "หลัง" embedTrueTypeFonts ตามสคีมา
+                for anchor in ("<w:proofState", "<w:defaultTabStop",
+                               "<w:characterSpacingControl", "<w:compat", "</w:settings>"):
+                    if anchor in s:
+                        s = s.replace(anchor, "<w:embedTrueTypeFonts/>" + anchor, 1)
+                        break
+            # เลี่ยง Compatibility Mode: 14 (Word 2010) -> 15 (Word 2013+ ทันสมัย)
+            s = s.replace('compatibilityMode" w:uri="http://schemas.microsoft.com/office/word" w:val="14"',
+                          'compatibilityMode" w:uri="http://schemas.microsoft.com/office/word" w:val="15"')
             content[st] = s.encode("utf-8")
 
         tmp = docx_path.with_suffix(".tmp.docx")
