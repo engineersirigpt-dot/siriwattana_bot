@@ -28,6 +28,7 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
 import attachments as att
+import doc_translation as doctr
 from auth import (
     create_token,
     current_user,
@@ -3095,3 +3096,63 @@ def admin_delete_user_chats(
         }
 
     raise HTTPException(501, "sqlite path not implemented")
+
+# ----------------------------------------------------------------------------
+# Document translation (Phase 1) — upload a manual PDF, translate it in the
+# background (translate_manual pipeline), download the Thai Word file.
+# ----------------------------------------------------------------------------
+from pathlib import Path as _Path
+
+
+@app.post("/translate/start")
+@limiter.limit("10/minute")
+async def translate_start(
+    request: Request,
+    file: UploadFile = File(...),
+    user: dict = Depends(current_user),
+):
+    """Upload a PDF and queue a background translation. Returns the job."""
+    is_pdf = att.is_pdf(file.content_type or "") or (file.filename or "").lower().endswith(".pdf")
+    if not is_pdf:
+        raise HTTPException(400, "รองรับเฉพาะไฟล์ PDF")
+    filename, _ct, _size, file_path = await att.save_upload(file)
+    job = doctr.start_job(file_path, filename, user["id"])
+    audit_log(
+        "translate_started",
+        user=user,
+        detail={"job_id": job["id"], "filename": filename, "pages": job["total"]},
+        request=request,
+    )
+    return job
+
+
+@app.get("/translate/status/{job_id}")
+def translate_status(job_id: str, user: dict = Depends(current_user)):
+    job = doctr.get_job(job_id)
+    if not job or job["user_id"] != user["id"]:
+        raise HTTPException(404, "ไม่พบงานแปล")
+    return job
+
+
+@app.get("/translate/jobs")
+def translate_jobs(user: dict = Depends(current_user)):
+    return doctr.list_jobs(user["id"])
+
+
+@app.get("/translate/download/{job_id}")
+def translate_download(job_id: str, fmt: str = "docx", user: dict = Depends(current_user)):
+    job = doctr.get_job(job_id)
+    if not job or job["user_id"] != user["id"]:
+        raise HTTPException(404, "ไม่พบงานแปล")
+    if job["status"] != "done":
+        raise HTTPException(409, "งานแปลยังไม่เสร็จ")
+    path = job["pdf"] if (fmt == "pdf" and job.get("pdf")) else job["docx"]
+    if not path or not _Path(path).exists():
+        raise HTTPException(404, "ไม่พบไฟล์ผลลัพธ์")
+    ext = _Path(path).suffix
+    base = _Path(job["filename"]).stem or "document"
+    media = (
+        "application/pdf" if ext == ".pdf"
+        else "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    )
+    return FileResponse(path=path, media_type=media, filename=f"{base}_แปลไทย{ext}")

@@ -1502,6 +1502,13 @@ export default function ChatPage() {
             </button>
           )}
           <button
+            onClick={() => router.push("/translate")}
+            className="w-full flex items-center gap-2 text-white hover:text-white hover:bg-white/10 py-2 px-3 rounded-lg transition-all text-sm"
+          >
+            <FileText size={16} />
+            <span>แปลเอกสาร</span>
+          </button>
+          <button
             onClick={logout}
             className="w-full flex items-center gap-2 text-white hover:text-white hover:bg-white/10 py-2 px-3 rounded-lg transition-all text-sm"
           >

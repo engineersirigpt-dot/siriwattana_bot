@@ -353,3 +353,70 @@ export async function register(username: string, password: string) {
   if (!res.ok) throw new Error("สมัครไม่สำเร็จ (อาจมีชื่อผู้ใช้นี้แล้ว)");
   return res.json() as Promise<{ ok: boolean; role: string }>;
 }
+
+
+// ---------------------------------------------------------------------------
+// Document translation (Phase 1) — upload a PDF, translate in background,
+// poll status, download the Thai Word file.
+// ---------------------------------------------------------------------------
+export type TranslateJob = {
+  id: string;
+  filename: string;
+  status: "queued" | "running" | "done" | "error";
+  done: number;
+  total: number;
+  translated_pages: number;
+  exceeds_cap: boolean;
+  max_pages: number;
+  review_flagged: number;
+  cost_usd: number;
+  pdf: string | null;
+  error: string | null;
+};
+
+export async function startTranslation(file: File): Promise<TranslateJob> {
+  const fd = new FormData();
+  fd.append("file", file, file.name);
+  const token = getToken();
+  const res = await fetch(`${API_BASE}/translate/start`, {
+    method: "POST",
+    headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+    body: fd,
+  });
+  if (!res.ok) {
+    const t = await res.text();
+    throw new Error(t || res.statusText);
+  }
+  return res.json();
+}
+
+export function getTranslationStatus(jobId: string): Promise<TranslateJob> {
+  return api<TranslateJob>(`/translate/status/${jobId}`);
+}
+
+export function listTranslationJobs(): Promise<TranslateJob[]> {
+  return api<TranslateJob[]>(`/translate/jobs`);
+}
+
+// FileResponse needs the Bearer token, so a plain <a href> won't authenticate.
+// Fetch with auth, then trigger a browser download via an object URL.
+export async function downloadTranslation(
+  jobId: string,
+  fmt: "docx" | "pdf",
+  filename: string,
+): Promise<void> {
+  const token = getToken();
+  const res = await fetch(`${API_BASE}/translate/download/${jobId}?fmt=${fmt}`, {
+    headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+  });
+  if (!res.ok) throw new Error((await res.text()) || res.statusText);
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
