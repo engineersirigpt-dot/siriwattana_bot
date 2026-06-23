@@ -43,6 +43,7 @@ PRICE_OUT = 8.0
 USD_TO_THB = 36.0
 
 THAI_FONT = "Sarabun"  # ฟอนต์มาตรฐานเอกสารไทย อ่านง่าย สวย (ติดตั้งจาก Google Fonts)
+FONT_DIR = HERE / "fonts"  # ไฟล์ Sarabun-*.ttf สำหรับฝังลง .docx (OFL อนุญาตให้ฝัง)
 
 SOFFICE_CANDIDATES = [
     r"C:\Program Files\LibreOffice\program\soffice.exe",
@@ -621,6 +622,108 @@ def _add_table(doc, header: list[str], rows: list[list[str]]):
             cells[c].paragraphs[0].clear()
             _add_inline(cells[c].paragraphs[0], txt, size=12)
 
+# ---------------------------------------------------------------- embed fonts
+
+def _obfuscate_font(guid: str, data: bytes) -> bytes:
+    """ทำให้ TTF เป็น .odttf ตามสเปก OOXML — XOR 32 ไบต์แรกด้วย mask จาก GUID (กลับลำดับ)"""
+    h = guid.replace("-", "").replace("{", "").replace("}", "")
+    mask = bytearray.fromhex(h)
+    mask.reverse()
+    out = bytearray(data)
+    for i in range(min(32, len(out))):
+        out[i] ^= mask[i % 16]
+    return bytes(out)
+
+
+def embed_fonts_in_docx(docx_path) -> bool:
+    """ฝังฟอนต์ Sarabun ลงไฟล์ .docx เพื่อให้แสดงผลถูกต้องทุกเครื่อง (ไม่ต้องลงฟอนต์
+    ไม่มีตัวอักษรกล่อง □ แม้ใน Protected View). คืน True ถ้าฝังสำเร็จ."""
+    import uuid
+    import zipfile
+
+    variants = [
+        ("embedRegular", "Sarabun-Regular.ttf"),
+        ("embedBold", "Sarabun-Bold.ttf"),
+        ("embedItalic", "Sarabun-Italic.ttf"),
+        ("embedBoldItalic", "Sarabun-BoldItalic.ttf"),
+    ]
+    avail = [(tag, FONT_DIR / fn) for tag, fn in variants if (FONT_DIR / fn).exists()]
+    if not avail:
+        return False
+
+    docx_path = Path(docx_path)
+    R_NS = 'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"'
+    REL_T = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/font"
+    try:
+        with zipfile.ZipFile(docx_path, "r") as z:
+            content = {n: z.read(n) for n in z.namelist()}
+
+        embed_children, rels = [], []
+        for i, (tag, path) in enumerate(avail, 1):
+            guid = str(uuid.uuid4()).upper()
+            content[f"word/fonts/font{i}.odttf"] = _obfuscate_font(guid, path.read_bytes())
+            rid = f"rIdSarabun{i}"
+            rels.append((rid, f"fonts/font{i}.odttf"))
+            embed_children.append(
+                f'<w:{tag} r:id="{rid}" w:fontKey="{{{guid}}}" w:subsetted="false"/>'
+            )
+        font_el = '<w:font w:name="Sarabun">' + "".join(embed_children) + "</w:font>"
+
+        # fontTable.xml — เพิ่มรายการฟอนต์ Sarabun ที่ฝัง
+        ft = "word/fontTable.xml"
+        if ft in content:
+            xml = content[ft].decode("utf-8")
+            if "xmlns:r=" not in xml:
+                xml = xml.replace("<w:fonts ", "<w:fonts " + R_NS + " ", 1)
+            xml = xml.replace("</w:fonts>", font_el + "</w:fonts>", 1)
+        else:
+            xml = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                   '<w:fonts xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" '
+                   + R_NS + ">" + font_el + "</w:fonts>")
+        content[ft] = xml.encode("utf-8")
+
+        # word/_rels/fontTable.xml.rels
+        rels_name = "word/_rels/fontTable.xml.rels"
+        rel_lines = "".join(
+            f'<Relationship Id="{rid}" Type="{REL_T}" Target="{tgt}"/>' for rid, tgt in rels
+        )
+        if rels_name in content:
+            rl = content[rels_name].decode("utf-8").replace(
+                "</Relationships>", rel_lines + "</Relationships>")
+        else:
+            rl = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                  '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+                  + rel_lines + "</Relationships>")
+        content[rels_name] = rl.encode("utf-8")
+
+        # [Content_Types].xml — Default สำหรับ .odttf
+        ct = content["[Content_Types].xml"].decode("utf-8")
+        if 'Extension="odttf"' not in ct:
+            ct = ct.replace(
+                "</Types>",
+                '<Default Extension="odttf" '
+                'ContentType="application/vnd.openxmlformats-officedocument.obfuscatedFont"/></Types>',
+            )
+        content["[Content_Types].xml"] = ct.encode("utf-8")
+
+        # settings.xml — เปิดการฝังฟอนต์
+        st = "word/settings.xml"
+        if st in content:
+            s = content[st].decode("utf-8")
+            if "<w:embedTrueTypeFonts" not in s:
+                s = re.sub(r"(<w:settings[^>]*>)", r"\1<w:embedTrueTypeFonts/>", s, count=1)
+            content[st] = s.encode("utf-8")
+
+        tmp = docx_path.with_suffix(".tmp.docx")
+        with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as z:
+            for n, data in content.items():
+                z.writestr(n, data)
+        tmp.replace(docx_path)
+        return True
+    except Exception:
+        return False
+
+
 # ---------------------------------------------------------------- docx -> pdf
 
 def docx_to_pdf(docx_path: Path) -> Path | None:
@@ -768,6 +871,8 @@ def translate_pdf(
     )
     log("กำลังสร้าง Word ...")
     render_markdown_to_docx(pages_md, out_docx, title, page_images)
+    if embed_fonts_in_docx(out_docx):       # ฝัง Sarabun -> แสดงถูกทุกเครื่อง ไม่มี □
+        log("ฝังฟอนต์ Sarabun ลงไฟล์แล้ว")
 
     pdf_out = None
     if make_pdf:
