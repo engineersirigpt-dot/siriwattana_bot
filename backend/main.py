@@ -3156,3 +3156,14 @@ def translate_download(job_id: str, fmt: str = "docx", user: dict = Depends(curr
         else "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
     )
     return FileResponse(path=path, media_type=media, filename=f"{base}_แปลไทย{ext}")
+
+
+@app.get("/translate/review/{job_id}")
+def translate_review(job_id: str, user: dict = Depends(current_user)):
+    job = doctr.get_job(job_id)
+    if not job or job["user_id"] != user["id"]:
+        raise HTTPException(404, "ไม่พบงานแปล")
+    review = doctr.get_review(job_id)
+    if review is None:
+        raise HTTPException(404, "ไม่พบรายงานตรวจทาน")
+    return review

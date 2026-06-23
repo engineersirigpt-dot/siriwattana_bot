@@ -15,9 +15,11 @@ import {
 import {
   downloadTranslation,
   getToken,
+  getTranslationReview,
   getTranslationStatus,
   startTranslation,
   type TranslateJob,
+  type TranslateReview,
 } from "../../lib/api";
 
 function errMsg(e: unknown): string {
@@ -29,6 +31,8 @@ export default function TranslatePage() {
   const [job, setJob] = useState<TranslateJob | null>(null);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const [review, setReview] = useState<TranslateReview | null>(null);
+  const [showReview, setShowReview] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -68,6 +72,8 @@ export default function TranslatePage() {
     setErr(null);
     setBusy(true);
     setJob(null);
+    setReview(null);
+    setShowReview(false);
     try {
       const j = await startTranslation(f);
       setJob(j);
@@ -77,6 +83,23 @@ export default function TranslatePage() {
     } finally {
       setBusy(false);
     }
+  }
+
+  async function toggleReview() {
+    if (!job) return;
+    if (showReview) {
+      setShowReview(false);
+      return;
+    }
+    if (!review) {
+      try {
+        setReview(await getTranslationReview(job.id));
+      } catch (e) {
+        setErr(errMsg(e));
+        return;
+      }
+    }
+    setShowReview(true);
   }
 
   async function onDownload(fmt: "docx" | "pdf") {
@@ -174,9 +197,33 @@ export default function TranslatePage() {
                     <span className="font-medium">แปลเสร็จแล้ว — {job.done} หน้า</span>
                   </div>
                   {job.review_flagged > 0 && (
-                    <p className="mb-3 text-xs text-amber-700">
-                      ⚠️ มี {job.review_flagged} หน้าที่ควรตรวจทานซ้ำ (เลข/ตาราง)
-                    </p>
+                    <button
+                      onClick={toggleReview}
+                      className="mb-3 text-xs font-medium text-amber-700 hover:underline"
+                    >
+                      ⚠️ มี {job.review_flagged} หน้าที่ควรตรวจทานซ้ำ (เลข/ตาราง) —{" "}
+                      {showReview ? "ซ่อน" : "ดูรายละเอียด"}
+                    </button>
+                  )}
+                  {showReview && review && (
+                    <div className="mb-3 max-h-64 overflow-y-auto rounded-lg border border-amber-200 bg-white p-3 text-xs">
+                      {review.pages.length === 0 ? (
+                        <p className="text-slate-500">ไม่มีรายละเอียด</p>
+                      ) : (
+                        <ul className="space-y-2">
+                          {review.pages.map((pg) => (
+                            <li key={pg.page}>
+                              <span className="font-semibold text-slate-700">หน้า {pg.page}</span>
+                              <ul className="ml-3 mt-1 list-disc space-y-0.5 text-slate-500">
+                                {pg.issues.map((it, i) => (
+                                  <li key={i}>{it}</li>
+                                ))}
+                              </ul>
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                    </div>
                   )}
                   <div className="flex gap-2">
                     <button

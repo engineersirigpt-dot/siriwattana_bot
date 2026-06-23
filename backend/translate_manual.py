@@ -48,7 +48,19 @@ FONT_DIR = HERE / "fonts"  # ไฟล์ Sarabun-*.ttf สำหรับฝั
 SOFFICE_CANDIDATES = [
     r"C:\Program Files\LibreOffice\program\soffice.exe",
     r"C:\Program Files (x86)\LibreOffice\program\soffice.exe",
+    "/usr/bin/soffice",
+    "/usr/bin/libreoffice",
+    "/opt/libreoffice/program/soffice",
 ]
+
+
+def _find_soffice() -> str | None:
+    import shutil
+    for name in ("soffice", "libreoffice"):
+        p = shutil.which(name)
+        if p:
+            return p
+    return next((p for p in SOFFICE_CANDIDATES if Path(p).exists()), None)
 
 # ---------------------------------------------------------------- glossary
 
@@ -727,18 +739,21 @@ def embed_fonts_in_docx(docx_path) -> bool:
 # ---------------------------------------------------------------- docx -> pdf
 
 def docx_to_pdf(docx_path: Path) -> Path | None:
-    soffice = next((p for p in SOFFICE_CANDIDATES if Path(p).exists()), None)
+    soffice = _find_soffice()
     if not soffice:
-        print("  [PDF] ไม่พบ LibreOffice — ข้ามการสร้าง PDF (ได้ .docx แล้ว)")
         return None
+    docx_path = Path(docx_path).resolve()   # absolute — as_uri() ต้องการ + soffice ชอบ abs path
+    # profile แยกต่อการแปลง (กัน lock เมื่อ LibreOffice ถูกเรียกพร้อมกัน) — as_uri()
+    # ให้ file URL ถูกต้องทั้ง Windows (file:///C:/...) และ Linux (file:///app/...)
+    profile = docx_path.parent / "_lo_profile"
     try:
         subprocess.run(
-            [soffice, "--headless", "--convert-to", "pdf", "--outdir",
+            [soffice, "-env:UserInstallation=" + profile.as_uri(),
+             "--headless", "--convert-to", "pdf", "--outdir",
              str(docx_path.parent), str(docx_path)],
-            check=True, capture_output=True, timeout=300,
+            check=True, capture_output=True, timeout=600,
         )
-    except Exception as e:  # noqa: BLE001
-        print(f"  [PDF] แปลงไม่สำเร็จ: {e}")
+    except Exception:  # noqa: BLE001 — ถ้าแปลง PDF ไม่ได้ ก็ยังได้ .docx
         return None
     pdf = docx_path.with_suffix(".pdf")
     return pdf if pdf.exists() else None

@@ -26,8 +26,9 @@ import translate_manual as tm
 OUTPUT_ROOT = Path(os.getenv("TRANSLATION_DIR", "./data/translations"))
 MAX_PAGES = int(os.getenv("TRANSLATE_MAX_PAGES", "150"))
 MAX_CONCURRENT = int(os.getenv("TRANSLATE_CONCURRENCY", "1"))
-# Phase 1 = Word อย่างเดียว (ไม่ต้องลง LibreOffice ใน container). เปิด PDF ได้ผ่าน env.
-MAKE_PDF = os.getenv("TRANSLATE_MAKE_PDF", "false").lower() in ("1", "true", "yes")
+# Phase 2 = ออก PDF ด้วย (LibreOffice อยู่ใน container แล้ว). ถ้าหา soffice ไม่เจอ
+# docx_to_pdf จะคืน None และระบบยังได้ .docx ตามปกติ (graceful).
+MAKE_PDF = os.getenv("TRANSLATE_MAKE_PDF", "true").lower() in ("1", "true", "yes")
 
 _executor = ThreadPoolExecutor(max_workers=MAX_CONCURRENT)
 _jobs: dict[str, dict] = {}
@@ -81,6 +82,7 @@ def start_job(pdf_path: str, filename: str, user_id) -> dict:
         "max_pages": MAX_PAGES,
         "docx": None,
         "pdf": None,
+        "review": None,
         "review_flagged": 0,
         "cost_usd": 0.0,
         "error": None,
@@ -112,6 +114,7 @@ def _run(job_id: str, pdf_path: str, out_dir: str, base: str) -> None:
             status="done",
             docx=res["docx"],
             pdf=res["pdf"],
+            review=res["review"],
             review_flagged=res["n_flagged"],
             cost_usd=res["cost_usd"],
             done=res["n_pages"],
@@ -119,3 +122,26 @@ def _run(job_id: str, pdf_path: str, out_dir: str, base: str) -> None:
         )
     except Exception as e:  # noqa: BLE001 — เก็บ error ไว้ให้ frontend แสดง ไม่ให้ worker ตาย
         _update(job_id, status="error", error=str(e)[:300])
+
+
+def get_review(job_id: str) -> dict | None:
+    """อ่านรายงานตรวจทาน (_ตรวจทาน.md) ของงาน แล้ว parse เป็นรายหน้า
+    คืน {"pages": [{"page": N, "issues": [...]}], "raw": str} หรือ None"""
+    import re
+    job = get_job(job_id)
+    if not job:
+        return None
+    path = job.get("review")
+    if not path or not Path(path).exists():
+        return {"pages": [], "raw": ""}
+    text = Path(path).read_text(encoding="utf-8")
+    pages: list[dict] = []
+    cur: dict | None = None
+    for line in text.splitlines():
+        m = re.match(r"^##\s*หน้า\s*(\d+)", line)
+        if m:
+            cur = {"page": int(m.group(1)), "issues": []}
+            pages.append(cur)
+        elif line.startswith("- ") and cur is not None:
+            cur["issues"].append(line[2:].strip())
+    return {"pages": pages, "raw": text}

@@ -420,3 +420,13 @@ export async function downloadTranslation(
   a.remove();
   URL.revokeObjectURL(url);
 }
+
+
+export type TranslateReview = {
+  pages: { page: number; issues: string[] }[];
+  raw: string;
+};
+
+export function getTranslationReview(jobId: string): Promise<TranslateReview> {
+  return api<TranslateReview>(`/translate/review/${jobId}`);
+}

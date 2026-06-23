@@ -22,6 +22,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     fonts-thai-tlwg \
     # ── Color emoji so chatbot answers with 📘 ✅ etc. don't print as boxes ──
     fonts-noto-color-emoji \
+    # ── LibreOffice Writer — headless .docx → .pdf for document translation ──
+    libreoffice-writer \
+    libreoffice-core \
     && rm -rf /var/lib/apt/lists/*
 
 # ── Sarabun — the brand-aligned Thai font for PDF exports ──
