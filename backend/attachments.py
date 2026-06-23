@@ -3,6 +3,7 @@
 import base64
 import io
 import os
+import re
 import uuid
 from pathlib import Path
 
@@ -475,6 +476,59 @@ def render_pdf_pages_as_images(
         pass
 
     return urls
+
+
+def count_pdf_pages(file_path: str) -> int:
+    """Total page count of a PDF (0 on error). Used to warn when a scanned PDF
+    exceeds MAX_PDF_PAGES_AS_IMAGES and only its first pages get read."""
+    try:
+        safe_path = validate_upload_path(file_path)
+        doc = fitz.open(str(safe_path))
+        n = len(doc)
+        doc.close()
+        return n
+    except Exception:
+        return 0
+
+
+def pdf_truncation_note(filename: str, file_path: str) -> str | None:
+    """If a scanned PDF has more pages than the vision cap, return a Thai notice
+    (with the reason) explaining only the first N pages were read. Else None."""
+    total = count_pdf_pages(file_path)
+    if total <= MAX_PDF_PAGES_AS_IMAGES:
+        return None
+    return (
+        f"⚠️ หมายเหตุ: ไฟล์ \"{filename}\" เป็น PDF สแกน (รูปภาพ) มีทั้งหมด {total} หน้า — "
+        f"ระบบอ่านไฟล์สแกนด้วย AI ภาพ ซึ่งจำกัดที่ {MAX_PDF_PAGES_AS_IMAGES} หน้าแรกต่อไฟล์ "
+        f"จึงประมวลผลเฉพาะหน้า 1-{MAX_PDF_PAGES_AS_IMAGES} (หน้า {MAX_PDF_PAGES_AS_IMAGES + 1}-{total} ยังไม่ถูกอ่าน) "
+        f"หากต้องการครบ กรุณาแบ่งไฟล์เป็นช่วงละไม่เกิน {MAX_PDF_PAGES_AS_IMAGES} หน้า"
+    )
+
+
+# Asking to translate/transcribe a WHOLE long document in chat produces
+# incomplete or paraphrased output (the chat answer is token-capped and the
+# model drifts into summary). Detect that intent so we can warn and point the
+# user to the dedicated page-by-page translation tool.
+_TRANSLATE_INTENT_RE = re.compile(r"แปล|ถอดความ|translate|transcrib", re.IGNORECASE)
+
+# Below these sizes a chat translation is fine (short doc fits one answer).
+_LONG_TEXT_CHARS = 6000
+_LONG_IMAGE_PAGES = 3
+
+
+def long_translation_warning(question: str, text_chars: int, image_pages: int) -> str | None:
+    """Return a Thai warning if the user asks to translate a LONG attached
+    document in chat (where the answer would be incomplete/paraphrased). Else None."""
+    if not question or not _TRANSLATE_INTENT_RE.search(question):
+        return None
+    if text_chars <= _LONG_TEXT_CHARS and image_pages < _LONG_IMAGE_PAGES:
+        return None
+    return (
+        "⚠️ หมายเหตุ: การแปล/ถอดความเอกสารยาวผ่านแชทอาจ **ไม่ครบหรือไม่ตรงต้นฉบับ 100%** "
+        "เพราะระบบแชทตอบได้จำกัดต่อรอบ และอาจสรุป/เรียบเรียงใหม่โดยไม่ได้ตั้งใจ "
+        "หากต้องการคำแปลที่ครบทุกหน้า ตรงต้นฉบับ พร้อมไฟล์ Word/PDF "
+        "แนะนำให้ใช้เครื่องมือแปลเอกสารเฉพาะทาง (แจ้งผู้ดูแลระบบได้เลย)"
+    )
 
 
 def is_text_sparse(extracted: str) -> bool:

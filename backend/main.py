@@ -815,6 +815,8 @@ async def chat(
             if saved_files:
                 image_urls: list[str] = []
                 text_attachments: list[tuple[str, str]] = []
+                truncation_notes: list[str] = []
+                total_text_chars = 0
 
                 for sf in saved_files:
                     if att.is_image(sf["content_type"]):
@@ -829,10 +831,15 @@ async def chat(
                     )
 
                     sf["extracted_text"] = extracted if extracted.strip() else None
+                    total_text_chars += len(extracted)
 
                     if att.is_pdf(sf["content_type"]) and att.is_text_sparse(extracted):
                         rendered = att.render_pdf_pages_as_images(sf["file_path"])
                         image_urls.extend(rendered)
+
+                        note = att.pdf_truncation_note(sf["filename"], sf["file_path"])
+                        if note:
+                            truncation_notes.append(note)
 
                         if extracted.strip():
                             text_attachments.append((sf["filename"], extracted))
@@ -846,6 +853,15 @@ async def chat(
                     text_attachments,
                     history=history,
                 )
+                # Prepend notices: (1) long-document translation may be incomplete,
+                # (2) scanned PDF exceeded the 50-page vision cap — so the user
+                # knows the answer's limits and why.
+                notices = list(truncation_notes)
+                warn = att.long_translation_warning(question, total_text_chars, len(image_urls))
+                if warn:
+                    notices.insert(0, warn)
+                if notices:
+                    answer = "\n\n".join(notices) + "\n\n---\n\n" + answer
                 # Files path doesn't run the classifier so usage = just the
                 # vision call. Wrap in accumulate_usage for consistent shape
                 # with the keys save_chat_message_pg expects.
@@ -1020,6 +1036,8 @@ async def chat(
         if saved_files:
             image_urls: list[str] = []
             text_attachments: list[tuple[str, str]] = []
+            truncation_notes: list[str] = []
+            total_text_chars = 0
 
             for sf in saved_files:
                 if att.is_image(sf["content_type"]):
@@ -1034,10 +1052,15 @@ async def chat(
                 )
 
                 sf["extracted_text"] = extracted if extracted.strip() else None
+                total_text_chars += len(extracted)
 
                 if att.is_pdf(sf["content_type"]) and att.is_text_sparse(extracted):
                     rendered = att.render_pdf_pages_as_images(sf["file_path"])
                     image_urls.extend(rendered)
+
+                    note = att.pdf_truncation_note(sf["filename"], sf["file_path"])
+                    if note:
+                        truncation_notes.append(note)
 
                     if extracted.strip():
                         text_attachments.append((sf["filename"], extracted))
@@ -1046,6 +1069,12 @@ async def chat(
 
             prompt_question = question or "ช่วยอธิบายเนื้อหาในไฟล์ที่แนบ และให้คำแนะนำที่เกี่ยวข้อง"
             answer, _files_usage = answer_with_files(prompt_question, image_urls, text_attachments, history=history)
+            notices = list(truncation_notes)
+            warn = att.long_translation_warning(question, total_text_chars, len(image_urls))
+            if warn:
+                notices.insert(0, warn)
+            if notices:
+                answer = "\n\n".join(notices) + "\n\n---\n\n" + answer
             # sqlite path doesn't persist token cost — only the postgres deploy
             # is the one production cares about. Ignore the usage dict here.
             source = "files"
