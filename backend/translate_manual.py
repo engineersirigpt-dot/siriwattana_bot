@@ -538,12 +538,14 @@ def _render_page_body(doc, md: str, images: list | None = None):
         path, w, h = item
         try:
             # คุมทั้งกว้างและสูง ไม่ให้รูปล้นหน้า + แพ็คเนื้อหาแน่นขึ้น (ลดช่องว่าง)
-            max_w, max_h = 5.5, 4.5      # นิ้ว
+            max_w, max_h = 5.4, 4.0      # นิ้ว
             width_in = min(max_w, (w / 96.0) if w else max_w)
             if w and h and width_in * (h / w) > max_h:
                 width_in = max_h * (w / h)
             doc.add_picture(str(path), width=Inches(width_in))
-            doc.paragraphs[-1].alignment = WD_ALIGN_PARAGRAPH.CENTER
+            p = doc.paragraphs[-1]
+            p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            p.paragraph_format.space_before = Pt(6)   # เว้นจากตาราง/เนื้อหาด้านบน ไม่ทะลุกรอบ
             return True
         except Exception:
             return False
@@ -631,12 +633,18 @@ _MD_IMG_RE = re.compile(r"^!\[([^\]]*)\](?:\([^)]*\))?\s*$")
 _BRACKET_IMG_RE = re.compile(r"\[\[?([^\]\[]*)\]\s*\[image\]\]?", re.IGNORECASE)
 
 
+_PIC_CELL_RE = re.compile(r"^\[\s*ภาพ\s*[:：]?\s*(.*?)\s*\]$")   # [ภาพ: alt] ในช่องตาราง
+
+
 def _cell_image_alt(txt: str) -> str | None:
     """ถ้าเซลล์เป็น 'รูป' คืน alt text (ใช้แสดงถ้าไม่มีรูปจริง); ไม่ใช่รูปคืน None"""
     t = (txt or "").strip()
     m = _MD_IMG_RE.match(t)
     if m:
         return m.group(1).strip() or "(รูป)"
+    m3 = _PIC_CELL_RE.match(t)        # [ภาพ: ประแจ 14-17]
+    if m3:
+        return m3.group(1).strip() or "(รูป)"
     if "[image]" in t.lower():
         m2 = _BRACKET_IMG_RE.search(t)
         return (m2.group(1).strip() if m2 else "") or "(รูป)"
@@ -657,6 +665,8 @@ def _fill_cell(cell, txt, size, bold, next_image):
         path, w, h = item
         try:
             wi = min(1.3, (w / 96.0) if w else 1.3)   # รูปเล็กพอดีช่อง
+            if w and h and wi * (h / w) > 1.0:        # คุมความสูง ไม่ให้รูปล้นช่องลงไปทับด้านล่าง
+                wi = 1.0 * (w / h)
             cell.paragraphs[0].add_run().add_picture(str(path), width=Inches(wi))
             placed = True
         except Exception:
