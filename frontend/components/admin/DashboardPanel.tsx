@@ -99,6 +99,14 @@ type Overview = {
       rows: number;
     }[];
   };
+  translation?: {
+    cost_thb: number;
+    jobs: number;
+    pages: number;
+    cost_thb_all: number;
+    jobs_all: number;
+    pages_all: number;
+  };
   safety: {
     blocked_total: number;
     blocked_by_category: Record<string, number>;
@@ -240,6 +248,8 @@ export function DashboardPanel() {
       </div>
 
       <CostBreakdownCard cost={data.cost} />
+
+      <TranslationCostCard t={data.translation} />
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         <TopQuestionsCard items={data.top_questions} />
@@ -760,6 +770,35 @@ const MODEL_COLORS = [
   "#ec4899", // pink
   "#94a3b8", // slate — fallback / legacy
 ];
+
+function TranslationCostCard({ t }: { t?: Overview["translation"] }) {
+  if (!t) return null;
+  return (
+    <div className="bg-white rounded-2xl border border-gray-100 p-5 shadow-sm">
+      <h3 className="font-semibold text-gray-800 flex items-center gap-2 mb-3">
+        <DollarSign size={16} className="text-violet-600" />
+        ค่าใช้จ่ายการแปลเอกสาร
+      </h3>
+      <div className="grid grid-cols-2 gap-4">
+        <div className="rounded-xl bg-violet-50 p-4">
+          <p className="text-xs text-gray-500">ในช่วงที่เลือก</p>
+          <p className="text-2xl font-bold text-violet-700">฿{t.cost_thb.toFixed(2)}</p>
+          <p className="text-xs text-gray-400">
+            {t.jobs} งาน · {t.pages} หน้า
+          </p>
+        </div>
+        <div className="rounded-xl bg-gray-50 p-4">
+          <p className="text-xs text-gray-500">รวมทั้งหมด</p>
+          <p className="text-2xl font-bold text-gray-700">฿{t.cost_thb_all.toFixed(2)}</p>
+          <p className="text-xs text-gray-400">
+            {t.jobs_all} งาน · {t.pages_all} หน้า
+          </p>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 
 function CostBreakdownCard({ cost }: { cost: Overview["cost"] }) {
   const hasRealData = cost.rows_with_real_cost > 0;

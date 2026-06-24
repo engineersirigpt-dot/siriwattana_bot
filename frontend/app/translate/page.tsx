@@ -219,10 +219,15 @@ export default function TranslatePage() {
 
               {job.status === "done" && (
                 <div className="rounded-xl bg-emerald-50 p-4">
-                  <div className="mb-3 flex items-center gap-2 text-emerald-700">
+                  <div className="mb-1 flex items-center gap-2 text-emerald-700">
                     <CheckCircle2 size={18} />
                     <span className="font-medium">แปลเสร็จแล้ว — {job.done} หน้า</span>
                   </div>
+                  {job.cost_usd > 0 && (
+                    <p className="mb-3 text-xs text-slate-400">
+                      ต้นทุน ~฿{(job.cost_usd * 36).toFixed(2)}
+                    </p>
+                  )}
                   {job.review_flagged > 0 && (
                     <button
                       onClick={toggleReview}

@@ -169,6 +169,35 @@ def _delta_pct(curr: float, prev: float) -> float | None:
     return round(((curr - prev) / prev) * 100, 1)
 
 
+def _translation_cost(since: datetime, until: datetime) -> dict:
+    """ค่าใช้จ่ายการแปลเอกสาร — ในช่วงเวลา + รวมทั้งหมด (แยกจากค่าแชท).
+    คืน zeros ถ้าตาราง translation_jobs ยังไม่มี/เกิด error (isolated connection)."""
+    zero = {"cost_thb": 0.0, "jobs": 0, "pages": 0,
+            "cost_thb_all": 0.0, "jobs_all": 0, "pages_all": 0}
+    try:
+        with get_pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT COALESCE(SUM(cost_usd),0)::float, COUNT(*), COALESCE(SUM(done),0) "
+                    "FROM translation_jobs "
+                    "WHERE status='done' AND created_at >= %s AND created_at < %s",
+                    (since, until),
+                )
+                c, j, p = cur.fetchone()
+                cur.execute(
+                    "SELECT COALESCE(SUM(cost_usd),0)::float, COUNT(*), COALESCE(SUM(done),0) "
+                    "FROM translation_jobs WHERE status='done'"
+                )
+                ca, ja, pa = cur.fetchone()
+        return {
+            "cost_thb": round(float(c) * USD_TO_THB, 2), "jobs": int(j), "pages": int(p),
+            "cost_thb_all": round(float(ca) * USD_TO_THB, 2),
+            "jobs_all": int(ja), "pages_all": int(pa),
+        }
+    except Exception:
+        return zero
+
+
 def admin_dashboard_overview_pg(range_label: str = "7d") -> dict:
     """Single payload that powers the KPI Dashboard tab.
 
@@ -387,6 +416,7 @@ def admin_dashboard_overview_pg(range_label: str = "7d") -> dict:
     prev_cost_usd = prev_real + prev_estimated
 
     safety = _safety_counts_from_audit(since, until)
+    translation = _translation_cost(since, until)
 
     return {
         "range": {
@@ -452,6 +482,8 @@ def admin_dashboard_overview_pg(range_label: str = "7d") -> dict:
                 for m in by_model
             ],
         },
+        # ค่าใช้จ่ายการแปลเอกสาร (แยกจากค่าแชท) — ในช่วงเวลาที่เลือก + รวมทั้งหมด
+        "translation": translation,
         "safety": safety,
     }
 
