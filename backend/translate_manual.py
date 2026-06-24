@@ -522,12 +522,20 @@ def _render_page_body(doc, md: str, images: list | None = None):
     images = list(images or [])
     img_i = [0]   # ตัวนับรูปที่ใช้ไปแล้วในหน้านี้
 
-    def _insert_image():
-        """แปะรูปถัดไปของหน้านี้ (ถ้ามี) คืน True ถ้าแปะ"""
+    def _next_image():
+        """คืนรูปถัดไปของหน้านี้ (path, w, h) แล้วเลื่อนตัวนับ — None ถ้าหมด"""
         if img_i[0] >= len(images):
-            return False
-        path, w, h = images[img_i[0]]
+            return None
+        item = images[img_i[0]]
         img_i[0] += 1
+        return item
+
+    def _insert_image():
+        """แปะรูปถัดไปของหน้านี้ลงเอกสาร (กึ่งกลาง) คืน True ถ้าแปะ"""
+        item = _next_image()
+        if not item:
+            return False
+        path, w, h = item
         try:
             # คุมทั้งกว้างและสูง ไม่ให้รูปล้นหน้า + แพ็คเนื้อหาแน่นขึ้น (ลดช่องว่าง)
             max_w, max_h = 5.5, 4.5      # นิ้ว
@@ -554,7 +562,7 @@ def _render_page_body(doc, md: str, images: list | None = None):
             while j < len(lines) and lines[j].strip().startswith("|"):
                 rows.append(_split_row(lines[j].strip()))
                 j += 1
-            _add_table(doc, header, rows)
+            _add_table(doc, header, rows, _next_image)
             i = j
             continue
 
@@ -617,22 +625,45 @@ def _render_page_body(doc, md: str, images: list | None = None):
             break
 
 
-def _add_table(doc, header: list[str], rows: list[list[str]]):
+# รูปใน markdown แบบ ![alt](url) — เจอในช่อง "รูปภาพ/Picture" ของตารางอะไหล่
+_MD_IMG_RE = re.compile(r"!\[([^\]]*)\]\([^)]*\)")
+
+
+def _fill_cell(cell, txt, size, bold, next_image):
+    """ใส่เนื้อหาลงเซลล์ — ถ้าเป็นรูป ![..](..) ให้ฝังรูปจริงในช่อง (ถ้ามี)"""
+    from docx.shared import Inches
+    cell.paragraphs[0].clear()
+    m = _MD_IMG_RE.search(txt or "")
+    if not m:
+        _add_inline(cell.paragraphs[0], txt, size=size, base_bold=bold)
+        return
+    item = next_image() if next_image else None    # บริโภครูป -> เรียงรูปอื่นไม่เลื่อน
+    placed = False
+    if item:
+        path, w, h = item
+        try:
+            wi = min(1.3, (w / 96.0) if w else 1.3)   # รูปเล็กพอดีช่อง
+            cell.paragraphs[0].add_run().add_picture(str(path), width=Inches(wi))
+            placed = True
+        except Exception:
+            placed = False
+    if not placed:                                  # ไม่มีรูป -> โชว์ alt text แทน (ไม่ใช่ markdown ดิบ)
+        _add_inline(cell.paragraphs[0], m.group(1) or "(รูป)", size=size, base_bold=bold)
+
+
+def _add_table(doc, header: list[str], rows: list[list[str]], next_image=None):
     # กันคอลัมน์หาย: บางหน้า header กับ body มีจำนวนคอลัมน์ไม่เท่ากัน
     ncol = max([len(header)] + [len(r) for r in rows]) if rows else len(header)
     header = header + [""] * (ncol - len(header))
     table = doc.add_table(rows=1, cols=ncol)
     table.style = "Table Grid"
     for c, txt in enumerate(header):
-        cell = table.rows[0].cells[c]
-        cell.paragraphs[0].clear()
-        _add_inline(cell.paragraphs[0], txt, size=12, base_bold=True)
+        _fill_cell(table.rows[0].cells[c], txt, 12, True, next_image)
     for row in rows:
         cells = table.add_row().cells
         for c in range(ncol):
             txt = row[c] if c < len(row) else ""
-            cells[c].paragraphs[0].clear()
-            _add_inline(cells[c].paragraphs[0], txt, size=12)
+            _fill_cell(cells[c], txt, 12, False, next_image)
 
 # ---------------------------------------------------------------- embed fonts
 
