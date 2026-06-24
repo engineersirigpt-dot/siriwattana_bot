@@ -251,6 +251,11 @@ export function DashboardPanel() {
 
       <TranslationCostCard t={data.translation} />
 
+      <TotalCostCard
+        chatThb={data.cost.total_thb}
+        translationThb={data.translation?.cost_thb ?? 0}
+      />
+
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         <TopQuestionsCard items={data.top_questions} />
         <TopUsersCard items={data.top_users} />
@@ -770,6 +775,29 @@ const MODEL_COLORS = [
   "#ec4899", // pink
   "#94a3b8", // slate — fallback / legacy
 ];
+
+function TotalCostCard({
+  chatThb,
+  translationThb,
+}: {
+  chatThb: number;
+  translationThb: number;
+}) {
+  const total = chatThb + translationThb;
+  return (
+    <div className="bg-gradient-to-br from-violet-50 to-white rounded-2xl border border-violet-100 p-5 shadow-sm">
+      <h3 className="font-semibold text-gray-800 flex items-center gap-2 mb-1">
+        <DollarSign size={16} className="text-violet-600" />
+        ค่าใช้จ่าย AI รวม (ในช่วงที่เลือก)
+      </h3>
+      <p className="text-3xl font-bold text-violet-700">฿{total.toFixed(2)}</p>
+      <p className="text-xs text-gray-500 mt-1">
+        แชท ฿{chatThb.toFixed(2)} · แปลเอกสาร ฿{translationThb.toFixed(2)}
+      </p>
+    </div>
+  );
+}
+
 
 function TranslationCostCard({ t }: { t?: Overview["translation"] }) {
   if (!t) return null;
