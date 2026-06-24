@@ -430,3 +430,8 @@ export type TranslateReview = {
 export function getTranslationReview(jobId: string): Promise<TranslateReview> {
   return api<TranslateReview>(`/translate/review/${jobId}`);
 }
+
+
+export function deleteTranslation(jobId: string): Promise<void> {
+  return api(`/translate/jobs/${jobId}`, { method: "DELETE" });
+}

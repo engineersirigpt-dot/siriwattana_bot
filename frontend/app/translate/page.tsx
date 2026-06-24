@@ -10,9 +10,11 @@ import {
   Download,
   FileText,
   Loader2,
+  Trash2,
   Upload,
 } from "lucide-react";
 import {
+  deleteTranslation,
   downloadTranslation,
   getToken,
   getTranslationReview,
@@ -137,6 +139,16 @@ export default function TranslatePage() {
   function downloadHist(h: TranslateJob, fmt: "docx" | "pdf") {
     const base = h.filename.replace(/\.pdf$/i, "");
     downloadTranslation(h.id, fmt, `${base}_แปลไทย.${fmt}`).catch((e) => setErr(errMsg(e)));
+  }
+
+  async function deleteHist(h: TranslateJob) {
+    if (!confirm(`ลบงานแปล "${h.filename}" ?`)) return;
+    try {
+      await deleteTranslation(h.id);
+      setHistory((prev) => prev.filter((x) => x.id !== h.id));
+    } catch (e) {
+      setErr(errMsg(e));
+    }
   }
 
   const pct = job && job.total ? Math.round((job.done / job.total) * 100) : 0;
@@ -318,28 +330,40 @@ export default function TranslatePage() {
                         {h.status === "error" && h.error ? ` · ${h.error}` : ""}
                       </p>
                     </div>
-                    {h.status === "done" ? (
-                      <div className="flex shrink-0 gap-1">
-                        <button
-                          onClick={() => downloadHist(h, "docx")}
-                          className="rounded-md border border-slate-200 px-2 py-1 text-xs text-violet-600 hover:bg-violet-50"
-                        >
-                          Word
-                        </button>
-                        {h.pdf && (
+                    <div className="flex shrink-0 items-center gap-1">
+                      {h.status === "done" && (
+                        <>
                           <button
-                            onClick={() => downloadHist(h, "pdf")}
-                            className="rounded-md border border-slate-200 px-2 py-1 text-xs text-slate-500 hover:bg-slate-50"
+                            onClick={() => downloadHist(h, "docx")}
+                            className="rounded-md border border-slate-200 px-2 py-1 text-xs text-violet-600 hover:bg-violet-50"
                           >
-                            PDF
+                            Word
                           </button>
-                        )}
-                      </div>
-                    ) : h.status === "running" ? (
-                      <span className="shrink-0 text-xs text-violet-500">
-                        {h.done}/{h.total}
-                      </span>
-                    ) : null}
+                          {h.pdf && (
+                            <button
+                              onClick={() => downloadHist(h, "pdf")}
+                              className="rounded-md border border-slate-200 px-2 py-1 text-xs text-slate-500 hover:bg-slate-50"
+                            >
+                              PDF
+                            </button>
+                          )}
+                        </>
+                      )}
+                      {h.status === "running" && (
+                        <span className="text-xs text-violet-500">
+                          {h.done}/{h.total}
+                        </span>
+                      )}
+                      {h.status !== "running" && h.status !== "queued" && (
+                        <button
+                          onClick={() => deleteHist(h)}
+                          title="ลบงานแปลนี้"
+                          className="rounded-md p-1.5 text-slate-300 hover:bg-rose-50 hover:text-rose-500"
+                        >
+                          <Trash2 size={14} />
+                        </button>
+                      )}
+                    </div>
                   </li>
                 ))}
             </ul>

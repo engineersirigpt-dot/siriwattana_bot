@@ -3144,6 +3144,13 @@ def translate_jobs(user: dict = Depends(current_user)):
     return doctr.list_jobs(user["id"])
 
 
+@app.delete("/translate/jobs/{job_id}")
+def translate_delete(job_id: str, user: dict = Depends(current_user)):
+    if not doctr.delete_job(job_id, user["id"]):
+        raise HTTPException(404, "ไม่พบงานแปล")
+    return {"ok": True}
+
+
 @app.get("/translate/download/{job_id}")
 def translate_download(job_id: str, fmt: str = "docx", user: dict = Depends(current_user)):
     job = doctr.get_job(job_id)

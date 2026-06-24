@@ -256,6 +256,35 @@ def _run(job_id: str, pdf_path: str, out_dir: str, base: str) -> None:
         _db_update(job_id, status="error", error=str(e)[:300])
 
 
+def delete_job(job_id: str, user_id) -> bool:
+    """ลบงานแปล (ตรวจสิทธิ์เจ้าของ) — เอาออกจาก DB + หน่วยความจำ + ลบไฟล์ผลลัพธ์.
+    คืน True ถ้าลบสำเร็จ, False ถ้าไม่พบ/ไม่ใช่เจ้าของ"""
+    job = get_job(job_id)
+    if not job or job.get("user_id") != user_id:
+        return False
+    with _lock:
+        _jobs.pop(job_id, None)
+    if _db_on():
+        try:
+            import db_pg
+            with db_pg.get_pg_conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "DELETE FROM translation_jobs WHERE id = %s AND user_id = %s",
+                        (job_id, user_id),
+                    )
+        except Exception:
+            pass
+    try:
+        import shutil
+        d = OUTPUT_ROOT / job_id
+        if d.exists():
+            shutil.rmtree(d, ignore_errors=True)
+    except Exception:
+        pass
+    return True
+
+
 def get_review(job_id: str) -> dict | None:
     """อ่านรายงานตรวจทาน (_ตรวจทาน.md) ของงาน แล้ว parse เป็นรายหน้า
     คืน {"pages": [{"page": N, "issues": [...]}], "raw": str} หรือ None"""

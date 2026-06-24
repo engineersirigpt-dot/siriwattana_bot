@@ -625,16 +625,30 @@ def _render_page_body(doc, md: str, images: list | None = None):
             break
 
 
-# รูปใน markdown แบบ ![alt](url) — เจอในช่อง "รูปภาพ/Picture" ของตารางอะไหล่
-_MD_IMG_RE = re.compile(r"!\[([^\]]*)\]\([^)]*\)")
+# รูปในช่อง "รูปภาพ/Picture" ของตารางอะไหล่ — โมเดลออกได้หลายแบบ:
+#   ![alt](url) , ![alt] (ไม่มี url) , [[alt][image]]
+_MD_IMG_RE = re.compile(r"^!\[([^\]]*)\](?:\([^)]*\))?\s*$")
+_BRACKET_IMG_RE = re.compile(r"\[\[?([^\]\[]*)\]\s*\[image\]\]?", re.IGNORECASE)
+
+
+def _cell_image_alt(txt: str) -> str | None:
+    """ถ้าเซลล์เป็น 'รูป' คืน alt text (ใช้แสดงถ้าไม่มีรูปจริง); ไม่ใช่รูปคืน None"""
+    t = (txt or "").strip()
+    m = _MD_IMG_RE.match(t)
+    if m:
+        return m.group(1).strip() or "(รูป)"
+    if "[image]" in t.lower():
+        m2 = _BRACKET_IMG_RE.search(t)
+        return (m2.group(1).strip() if m2 else "") or "(รูป)"
+    return None
 
 
 def _fill_cell(cell, txt, size, bold, next_image):
-    """ใส่เนื้อหาลงเซลล์ — ถ้าเป็นรูป ![..](..) ให้ฝังรูปจริงในช่อง (ถ้ามี)"""
+    """ใส่เนื้อหาลงเซลล์ — ถ้าเป็นรูป ให้ฝังรูปจริงในช่อง (ถ้ามี) ไม่ใช่ก็ใส่ข้อความ"""
     from docx.shared import Inches
     cell.paragraphs[0].clear()
-    m = _MD_IMG_RE.search(txt or "")
-    if not m:
+    alt = _cell_image_alt(txt)
+    if alt is None:
         _add_inline(cell.paragraphs[0], txt, size=size, base_bold=bold)
         return
     item = next_image() if next_image else None    # บริโภครูป -> เรียงรูปอื่นไม่เลื่อน
@@ -648,7 +662,7 @@ def _fill_cell(cell, txt, size, bold, next_image):
         except Exception:
             placed = False
     if not placed:                                  # ไม่มีรูป -> โชว์ alt text แทน (ไม่ใช่ markdown ดิบ)
-        _add_inline(cell.paragraphs[0], m.group(1) or "(รูป)", size=size, base_bold=bold)
+        _add_inline(cell.paragraphs[0], alt, size=size, base_bold=bold)
 
 
 def _add_table(doc, header: list[str], rows: list[list[str]], next_image=None):
