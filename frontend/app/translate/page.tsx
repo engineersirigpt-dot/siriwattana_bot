@@ -17,10 +17,18 @@ import {
   getToken,
   getTranslationReview,
   getTranslationStatus,
+  listTranslationJobs,
   startTranslation,
   type TranslateJob,
   type TranslateReview,
 } from "../../lib/api";
+
+const STATUS_LABEL: Record<string, string> = {
+  queued: "อยู่ในคิว",
+  running: "กำลังแปล",
+  done: "เสร็จ",
+  error: "ผิดพลาด",
+};
 
 function errMsg(e: unknown): string {
   return e instanceof Error ? e.message : "เกิดข้อผิดพลาด";
@@ -33,11 +41,24 @@ export default function TranslatePage() {
   const [err, setErr] = useState<string | null>(null);
   const [review, setReview] = useState<TranslateReview | null>(null);
   const [showReview, setShowReview] = useState(false);
+  const [history, setHistory] = useState<TranslateJob[]>([]);
   const fileRef = useRef<HTMLInputElement>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
+  async function loadHistory() {
+    try {
+      setHistory(await listTranslationJobs());
+    } catch {
+      /* ignore */
+    }
+  }
+
   useEffect(() => {
-    if (!getToken()) router.replace("/login");
+    if (!getToken()) {
+      router.replace("/login");
+      return;
+    }
+    loadHistory();
   }, [router]);
 
   useEffect(() => {
@@ -54,6 +75,7 @@ export default function TranslatePage() {
         setJob(j);
         if (j.status === "done" || j.status === "error") {
           if (pollRef.current) clearInterval(pollRef.current);
+          loadHistory();
         }
       } catch {
         /* transient — keep polling */
@@ -110,6 +132,11 @@ export default function TranslatePage() {
     } catch (e) {
       setErr(errMsg(e));
     }
+  }
+
+  function downloadHist(h: TranslateJob, fmt: "docx" | "pdf") {
+    const base = h.filename.replace(/\.pdf$/i, "");
+    downloadTranslation(h.id, fmt, `${base}_แปลไทย.${fmt}`).catch((e) => setErr(errMsg(e)));
   }
 
   const pct = job && job.total ? Math.round((job.done / job.total) * 100) : 0;
@@ -264,6 +291,55 @@ export default function TranslatePage() {
             </div>
           )}
         </div>
+
+        {history.filter((h) => h.id !== job?.id).length > 0 && (
+          <div className="mt-6 rounded-2xl bg-white p-6 shadow-sm">
+            <h2 className="mb-3 text-sm font-semibold text-slate-700">
+              งานแปลที่ผ่านมา
+            </h2>
+            <ul className="divide-y divide-slate-100">
+              {history
+                .filter((h) => h.id !== job?.id)
+                .map((h) => (
+                  <li
+                    key={h.id}
+                    className="flex items-center justify-between gap-3 py-2.5"
+                  >
+                    <div className="min-w-0">
+                      <p className="truncate text-sm text-slate-700">{h.filename}</p>
+                      <p className="text-xs text-slate-400">
+                        {STATUS_LABEL[h.status] ?? h.status}
+                        {h.status === "done" ? ` · ${h.done} หน้า` : ""}
+                        {h.status === "error" && h.error ? ` · ${h.error}` : ""}
+                      </p>
+                    </div>
+                    {h.status === "done" ? (
+                      <div className="flex shrink-0 gap-1">
+                        <button
+                          onClick={() => downloadHist(h, "docx")}
+                          className="rounded-md border border-slate-200 px-2 py-1 text-xs text-violet-600 hover:bg-violet-50"
+                        >
+                          Word
+                        </button>
+                        {h.pdf && (
+                          <button
+                            onClick={() => downloadHist(h, "pdf")}
+                            className="rounded-md border border-slate-200 px-2 py-1 text-xs text-slate-500 hover:bg-slate-50"
+                          >
+                            PDF
+                          </button>
+                        )}
+                      </div>
+                    ) : h.status === "running" ? (
+                      <span className="shrink-0 text-xs text-violet-500">
+                        {h.done}/{h.total}
+                      </span>
+                    ) : null}
+                  </li>
+                ))}
+            </ul>
+          </div>
+        )}
       </div>
     </div>
   );

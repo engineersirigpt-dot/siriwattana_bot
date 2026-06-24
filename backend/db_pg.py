@@ -282,6 +282,39 @@ def init_pg_schema() -> None:
                 """
             )
 
+            # Document-translation jobs (Phase 3) — persisted so the history
+            # survives backend restarts and users can re-download past results.
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS translation_jobs (
+                    id TEXT PRIMARY KEY,
+                    user_id BIGINT NOT NULL REFERENCES users(id),
+                    filename TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'queued',
+                    total_pages INTEGER NOT NULL DEFAULT 0,
+                    translated_pages INTEGER NOT NULL DEFAULT 0,
+                    done INTEGER NOT NULL DEFAULT 0,
+                    exceeds_cap BOOLEAN NOT NULL DEFAULT false,
+                    max_pages INTEGER NOT NULL DEFAULT 150,
+                    docx_path TEXT,
+                    pdf_path TEXT,
+                    review_path TEXT,
+                    review_flagged INTEGER NOT NULL DEFAULT 0,
+                    cost_usd NUMERIC(10, 4) NOT NULL DEFAULT 0,
+                    error TEXT,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                );
+                """
+            )
+
+            cur.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_translation_jobs_user
+                ON translation_jobs(user_id, created_at DESC);
+                """
+            )
+
 
 def smoke_test_pg() -> None:
     init_pg_schema()

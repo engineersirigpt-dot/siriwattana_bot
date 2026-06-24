@@ -41,15 +41,141 @@ def _update(job_id: str, **kw) -> None:
             _jobs[job_id].update(kw)
 
 
+# ---------------------------------------------------------------- DB persistence
+# งานแปลถูกบันทึกลง postgres เพื่อให้ประวัติไม่หายตอน backend restart และโหลดซ้ำได้
+# ถ้าไม่มี DATABASE_URL (dev/sqlite) จะทำงานในหน่วยความจำอย่างเดียว (graceful)
+
+# map คีย์ใน job dict -> ชื่อคอลัมน์ใน DB
+_COL = {
+    "filename": "filename", "status": "status", "total": "total_pages",
+    "translated_pages": "translated_pages", "done": "done",
+    "exceeds_cap": "exceeds_cap", "max_pages": "max_pages",
+    "docx": "docx_path", "pdf": "pdf_path", "review": "review_path",
+    "review_flagged": "review_flagged", "cost_usd": "cost_usd", "error": "error",
+}
+_SELECT = ("SELECT id, user_id, filename, status, total_pages, translated_pages, done, "
+           "exceeds_cap, max_pages, docx_path, pdf_path, review_path, review_flagged, "
+           "cost_usd, error FROM translation_jobs ")
+
+
+def _db_on() -> bool:
+    return bool(os.getenv("DATABASE_URL"))
+
+
+def _row_to_job(r) -> dict:
+    return {
+        "id": r[0], "user_id": r[1], "filename": r[2], "status": r[3],
+        "total": r[4], "translated_pages": r[5], "done": r[6],
+        "exceeds_cap": r[7], "max_pages": r[8], "docx": r[9], "pdf": r[10],
+        "review": r[11], "review_flagged": r[12],
+        "cost_usd": float(r[13]) if r[13] is not None else 0.0, "error": r[14],
+    }
+
+
+def _db_insert(job: dict) -> None:
+    if not _db_on():
+        return
+    try:
+        import db_pg
+        with db_pg.get_pg_conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO translation_jobs (id, user_id, filename, status, total_pages, "
+                "translated_pages, done, exceeds_cap, max_pages) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT (id) DO NOTHING",
+                (job["id"], job["user_id"], job["filename"], job["status"], job["total"],
+                 job["translated_pages"], job["done"], job["exceeds_cap"], job["max_pages"]),
+            )
+    except Exception:
+        pass
+
+
+def _db_update(job_id: str, **fields) -> None:
+    if not _db_on() or not fields:
+        return
+    sets, vals = [], []
+    for k, v in fields.items():
+        col = _COL.get(k)
+        if col:
+            sets.append(f"{col} = %s")
+            vals.append(v)
+    if not sets:
+        return
+    sets.append("updated_at = now()")
+    try:
+        import db_pg
+        with db_pg.get_pg_conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                f"UPDATE translation_jobs SET {', '.join(sets)} WHERE id = %s",
+                (*vals, job_id),
+            )
+    except Exception:
+        pass
+
+
+def _db_get(job_id: str) -> dict | None:
+    if not _db_on():
+        return None
+    try:
+        import db_pg
+        with db_pg.get_pg_conn() as conn, conn.cursor() as cur:
+            cur.execute(_SELECT + "WHERE id = %s", (job_id,))
+            r = cur.fetchone()
+            return _row_to_job(r) if r else None
+    except Exception:
+        return None
+
+
+def _db_list(user_id, limit: int = 50) -> list[dict]:
+    if not _db_on():
+        return []
+    try:
+        import db_pg
+        with db_pg.get_pg_conn() as conn, conn.cursor() as cur:
+            cur.execute(_SELECT + "WHERE user_id = %s ORDER BY created_at DESC LIMIT %s",
+                        (user_id, limit))
+            return [_row_to_job(r) for r in cur.fetchall()]
+    except Exception:
+        return []
+
+
+def mark_orphans_interrupted() -> None:
+    """งานที่ค้าง 'queued'/'running' ตอน backend ดับ -> ตั้งเป็น error (worker หายไปแล้ว)
+    เรียกตอน startup"""
+    if not _db_on():
+        return
+    try:
+        import db_pg
+        with db_pg.get_pg_conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                "UPDATE translation_jobs SET status='error', "
+                "error='งานถูกหยุดเพราะระบบรีสตาร์ท — กรุณาอัปโหลดแปลใหม่', updated_at=now() "
+                "WHERE status IN ('queued','running')"
+            )
+    except Exception:
+        pass
+
+
 def get_job(job_id: str) -> dict | None:
     with _lock:
         j = _jobs.get(job_id)
-        return dict(j) if j else None
+        if j:
+            return dict(j)
+    return _db_get(job_id)          # หลัง restart: อ่านจาก DB
 
 
 def list_jobs(user_id) -> list[dict]:
+    db_jobs = _db_list(user_id)
     with _lock:
-        return [dict(j) for j in _jobs.values() if j.get("user_id") == user_id]
+        mem = {j["id"]: dict(j) for j in _jobs.values() if j.get("user_id") == user_id}
+    if not db_jobs:
+        return list(mem.values())
+    db_ids = {j["id"] for j in db_jobs}
+    # งานในหน่วยความจำมีความคืบหน้าล่าสุด -> ใช้ทับของ DB
+    merged = [mem.get(j["id"], j) for j in db_jobs]
+    for jid, j in mem.items():
+        if jid not in db_ids:
+            merged.insert(0, j)
+    return merged
 
 
 def pdf_page_count(pdf_path: str) -> int:
@@ -89,18 +215,22 @@ def start_job(pdf_path: str, filename: str, user_id) -> dict:
     }
     with _lock:
         _jobs[job_id] = job
+    _db_insert(job)
     _executor.submit(_run, job_id, pdf_path, str(out_dir), base)
     return dict(job)
 
 
 def _run(job_id: str, pdf_path: str, out_dir: str, base: str) -> None:
     _update(job_id, status="running")
+    _db_update(job_id, status="running")
     try:
         job = get_job(job_id) or {}
         pages = f"1-{MAX_PAGES}" if job.get("total", 0) > MAX_PAGES else None
 
         def progress(done: int, total: int) -> None:
             _update(job_id, done=done, total=total)
+            if done % 10 == 0:                  # อัปเดต DB เป็นช่วงๆ (ไม่ถี่เกิน)
+                _db_update(job_id, done=done, total=total)
 
         res = tm.translate_pdf(
             pdf_path, out_dir, base,
@@ -109,8 +239,7 @@ def _run(job_id: str, pdf_path: str, out_dir: str, base: str) -> None:
             progress=progress,
             log=lambda _m: None,     # ไม่พิมพ์ลง stdout ของ backend
         )
-        _update(
-            job_id,
+        done_fields = dict(
             status="done",
             docx=res["docx"],
             pdf=res["pdf"],
@@ -120,8 +249,11 @@ def _run(job_id: str, pdf_path: str, out_dir: str, base: str) -> None:
             done=res["n_pages"],
             total=res["n_pages"],
         )
+        _update(job_id, **done_fields)
+        _db_update(job_id, **done_fields)
     except Exception as e:  # noqa: BLE001 — เก็บ error ไว้ให้ frontend แสดง ไม่ให้ worker ตาย
         _update(job_id, status="error", error=str(e)[:300])
+        _db_update(job_id, status="error", error=str(e)[:300])
 
 
 def get_review(job_id: str) -> dict | None:

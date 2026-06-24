@@ -138,6 +138,11 @@ def _startup() -> None:
                 "pg_schema_migrate_failed",
                 detail={"error_type": e.__class__.__name__, "error": str(e)},
             )
+    # งานแปลที่ค้างตอน backend ดับ -> ตั้งเป็น error (worker หายไปแล้ว)
+    try:
+        doctr.mark_orphans_interrupted()
+    except Exception:
+        pass
     audit_log("app_startup", detail={"status": "ok"})
 
 
