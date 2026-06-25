@@ -1793,17 +1793,8 @@ def share_session(
 
     from chat_pg import share_session_pg
 
+    # empty recipient_ids = link-only share; non-empty = targeted. Always shares.
     token = share_session_pg(session_id, user["id"], body.recipient_ids)
-
-    if not body.recipient_ids:
-        audit_log(
-            "chat_session_share_revoked",
-            user=user,
-            detail={"session_id": session_id},
-            request=request,
-        )
-        return {"ok": True, "shared": False, "token": None, "path": None}
-
     if not token:
         raise HTTPException(404, "session not found")
 

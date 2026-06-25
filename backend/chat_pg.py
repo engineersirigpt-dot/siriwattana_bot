@@ -446,12 +446,16 @@ def list_shared_with_me_pg(user_id: int) -> list[dict]:
 
 
 def share_session_pg(session_id: int, user_id: int, recipient_ids: list[int]) -> str | None:
-    """Share a session the user owns with SPECIFIC recipients (targeted sharing).
+    """Share a session the user owns. Returns a stable token, or None if not owner.
 
-    Sets (or keeps) a stable share token and replaces the recipient set so only
-    those users see it in their "แชร์ร่วมกันในทีม" panel. Empty recipients →
-    unshare (clears token + recipients). Returns token, or None if not owner /
-    unshared. The owner is never added as a recipient (they own it already).
+    Two access models, decided by whether recipients are set:
+      * recipient_ids empty  → LINK-ONLY: anyone signed in who has the link opens
+        it (what regular users get).
+      * recipient_ids given  → TARGETED: only those users (+owner) can open it and
+        it shows in their team panel (what admins can do).
+
+    Always sets/keeps a token (never unshares — unshare is revoke_share_pg).
+    The owner is never added as a recipient (they own it already).
     """
     recipient_ids = sorted({int(r) for r in (recipient_ids or []) if int(r) != user_id})
     with get_pg_conn() as conn:
@@ -465,25 +469,13 @@ def share_session_pg(session_id: int, user_id: int, recipient_ids: list[int]) ->
             if not row:
                 return None
 
-            if not recipient_ids:
-                # No recipients → unshare entirely.
-                cur.execute(
-                    "UPDATE chat_sessions SET shared_token = NULL WHERE id = %s",
-                    (session_id,),
-                )
-                cur.execute(
-                    "DELETE FROM chat_session_recipients WHERE session_id = %s",
-                    (session_id,),
-                )
-                return None
-
             token = row[1] or secrets.token_urlsafe(16)
             if not row[1]:
                 cur.execute(
                     "UPDATE chat_sessions SET shared_token = %s WHERE id = %s",
                     (token, session_id),
                 )
-            # Replace the recipient set.
+            # Replace the recipient set (empty = link-only share).
             cur.execute(
                 "DELETE FROM chat_session_recipients WHERE session_id = %s",
                 (session_id,),
@@ -567,14 +559,16 @@ def get_shared_session_pg(token: str, viewer_id: int) -> dict | None:
             if not session:
                 return None
 
-            # access: owner หรือ recipient เท่านั้น
+            # access: เจ้าของเปิดได้เสมอ; ถ้ามีผู้รับ (targeted) ต้องเป็นผู้รับ;
+            # ถ้าไม่มีผู้รับ (link-only) ใครมีลิงก์ + login ก็เปิดได้
             if viewer_id != session[5]:
                 cur.execute(
-                    "SELECT 1 FROM chat_session_recipients "
-                    "WHERE session_id = %s AND recipient_user_id = %s",
-                    (session[0], viewer_id),
+                    "SELECT recipient_user_id FROM chat_session_recipients "
+                    "WHERE session_id = %s",
+                    (session[0],),
                 )
-                if not cur.fetchone():
+                recips = [r[0] for r in cur.fetchall()]
+                if recips and viewer_id not in recips:
                     return None
 
             cur.execute(
@@ -635,14 +629,15 @@ def fork_shared_session_pg(token: str, new_user_id: int) -> int | None:
                 return None
             src_id, src_title, src_mode, owner_id = src
 
-            # access: owner หรือ recipient เท่านั้นที่ fork ได้
+            # access: เจ้าของ + ผู้รับ (targeted) หรือใครก็ได้ที่มีลิงก์ (link-only) fork ได้
             if new_user_id != owner_id:
                 cur.execute(
-                    "SELECT 1 FROM chat_session_recipients "
-                    "WHERE session_id = %s AND recipient_user_id = %s",
-                    (src_id, new_user_id),
+                    "SELECT recipient_user_id FROM chat_session_recipients "
+                    "WHERE session_id = %s",
+                    (src_id,),
                 )
-                if not cur.fetchone():
+                recips = [r[0] for r in cur.fetchall()]
+                if recips and new_user_id not in recips:
                     return None
 
             forked_title = ("📋 " + (src_title or "บทสนทนา"))[:80]

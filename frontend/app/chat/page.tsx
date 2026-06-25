@@ -700,21 +700,43 @@ export default function ChatPage() {
     setStarterSeed((s) => s + 1);
   }
 
-  // เปิด dialog เลือกผู้รับ — โหลดรายชื่อผู้ใช้ + ผู้รับปัจจุบัน (ติ๊กไว้ล่วงหน้า)
+  // เปิด dialog แชร์ — admin: เลือกผู้รับได้; user ปกติ: copy link อย่างเดียว
   async function handleShareToggle() {
     if (!currentSid) return;
     setShareBusy(true);
     setShareOpen(true);
     try {
-      const [users, current] = await Promise.all([
-        listShareableUsers(),
-        getSessionRecipients(currentSid),
-      ]);
-      setShareUsers(users);
-      setShareSel(new Set(current));
+      if (role === "admin") {
+        const [users, current] = await Promise.all([
+          listShareableUsers(),
+          getSessionRecipients(currentSid),
+        ]);
+        setShareUsers(users);
+        setShareSel(new Set(current));
+      } else if (!sharedToken) {
+        // user ปกติ: สร้างลิงก์ (link-only) ถ้ายังไม่ได้แชร์ -> ลิงก์โผล่ให้คัดลอก
+        const { token } = await shareSession(currentSid, []);
+        setSharedToken(token);
+        refreshSharedTeamSessions();
+      }
     } catch (e: unknown) {
-      setAlertMsg("โหลดรายชื่อไม่สำเร็จ: " + (e instanceof Error ? e.message : ""));
+      setAlertMsg("เปิดการแชร์ไม่สำเร็จ: " + (e instanceof Error ? e.message : ""));
       setShareOpen(false);
+    } finally {
+      setShareBusy(false);
+    }
+  }
+
+  async function unshareCurrent() {
+    if (!currentSid) return;
+    setShareBusy(true);
+    try {
+      await revokeSessionShare(currentSid);
+      setSharedToken(null);
+      refreshSharedTeamSessions();
+      setShareOpen(false);
+    } catch (e: unknown) {
+      setAlertMsg("ยกเลิกการแชร์ไม่สำเร็จ: " + (e instanceof Error ? e.message : ""));
     } finally {
       setShareBusy(false);
     }
@@ -2019,6 +2041,7 @@ export default function ChatPage() {
       <ShareModal
         open={shareOpen}
         busy={shareBusy}
+        isAdmin={role === "admin"}
         users={shareUsers}
         selected={shareSel}
         sharedToken={sharedToken}
@@ -2031,6 +2054,7 @@ export default function ChatPage() {
           })
         }
         onSave={saveShare}
+        onUnshare={unshareCurrent}
         onClose={() => setShareOpen(false)}
       />
     </div>
@@ -2040,20 +2064,24 @@ export default function ChatPage() {
 function ShareModal({
   open,
   busy,
+  isAdmin,
   users,
   selected,
   sharedToken,
   onToggleUser,
   onSave,
+  onUnshare,
   onClose,
 }: {
   open: boolean;
   busy: boolean;
+  isAdmin: boolean;
   users: ShareUser[];
   selected: Set<number>;
   sharedToken: string | null;
   onToggleUser: (id: number) => void;
   onSave: () => void;
+  onUnshare: () => void;
   onClose: () => void;
 }) {
   const [q, setQ] = useState("");
@@ -2068,7 +2096,6 @@ function ShareModal({
   async function copyUrl() {
     if (!url) return;
     let ok = false;
-    // secure context (HTTPS/localhost) — modern clipboard API
     if (typeof navigator !== "undefined" && navigator.clipboard && window.isSecureContext) {
       try {
         await navigator.clipboard.writeText(url);
@@ -2077,7 +2104,6 @@ function ShareModal({
         ok = false;
       }
     }
-    // HTTP fallback — select the visible input + execCommand (works บน LAN IP)
     if (!ok && urlRef.current) {
       urlRef.current.focus();
       urlRef.current.select();
@@ -2093,7 +2119,6 @@ function ShareModal({
       setCopyHint(false);
       setTimeout(() => setCopied(false), 1800);
     } else {
-      // คัดลอกอัตโนมัติไม่ได้ -> เลือกข้อความไว้ให้ผู้ใช้กด Ctrl+C เอง
       urlRef.current?.focus();
       urlRef.current?.select();
       setCopyHint(true);
@@ -2102,6 +2127,49 @@ function ShareModal({
   const filtered = users.filter((u) =>
     u.username.toLowerCase().includes(q.toLowerCase()),
   );
+
+  const linkBlock = sharedToken ? (
+    <div className="mt-4 pt-4 border-t border-gray-100">
+      <p className="text-xs font-medium text-gray-600 mb-2">
+        🔗 ลิงก์สำหรับส่งให้ผู้รับ
+        <span className="font-normal text-gray-400">
+          {isAdmin && selected.size > 0
+            ? " — เฉพาะคนที่เลือกไว้เท่านั้นที่เปิดได้"
+            : " — ใครมีลิงก์นี้ + login ก็เปิดได้"}
+        </span>
+      </p>
+      <div className="flex items-center gap-2">
+        <input
+          ref={urlRef}
+          type="text"
+          readOnly
+          value={url}
+          onFocus={(e) => e.target.select()}
+          className="flex-1 px-3 py-2 text-xs border border-gray-200 rounded-lg bg-gray-50 text-gray-600"
+        />
+        <button
+          onClick={copyUrl}
+          className="px-3 py-2 text-sm rounded-lg bg-gray-800 text-white hover:bg-gray-700 flex items-center gap-1 shrink-0"
+        >
+          {copied ? <Check size={14} /> : <Copy size={14} />}
+          {copied ? "คัดลอกแล้ว" : "คัดลอก"}
+        </button>
+      </div>
+      {copyHint && (
+        <p className="mt-1.5 text-xs text-amber-600">
+          เลือกข้อความให้แล้ว — กด <strong>Ctrl+C</strong> เพื่อคัดลอก
+        </p>
+      )}
+      <button
+        onClick={onUnshare}
+        disabled={busy}
+        className="mt-3 text-xs text-rose-500 hover:underline disabled:opacity-50"
+      >
+        ยกเลิกการแชร์ (แชทยังอยู่ของคุณ)
+      </button>
+    </div>
+  ) : null;
+
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4"
@@ -2124,95 +2192,77 @@ function ShareModal({
             <X size={20} />
           </button>
         </div>
-        <p className="text-sm text-gray-500 mb-3">
-          เลือกคนที่จะให้เห็นแชทนี้ — เฉพาะคนที่เลือกเท่านั้นที่เห็นในกล่อง
-          &quot;แชร์ร่วมกันในทีม&quot; (อ่านอย่างเดียว + รับเป็นแชทตัวเองได้)
-        </p>
-        <input
-          value={q}
-          onChange={(e) => setQ(e.target.value)}
-          placeholder="ค้นหาชื่อ..."
-          className="w-full mb-3 px-3 py-2 text-sm border border-gray-200 rounded-lg focus:outline-none focus:border-purple-400"
-        />
-        <div className="max-h-64 overflow-y-auto border border-gray-100 rounded-lg divide-y divide-gray-50">
-          {busy && users.length === 0 ? (
-            <div className="p-4 text-center text-sm text-gray-400">
-              <Loader2 className="inline animate-spin" size={16} /> กำลังโหลด...
-            </div>
-          ) : filtered.length === 0 ? (
-            <div className="p-4 text-center text-sm text-gray-400">ไม่พบผู้ใช้</div>
-          ) : (
-            filtered.map((u) => (
-              <label
-                key={u.id}
-                className="flex items-center gap-3 px-3 py-2 hover:bg-gray-50 cursor-pointer"
-              >
-                <input
-                  type="checkbox"
-                  checked={selected.has(u.id)}
-                  onChange={() => onToggleUser(u.id)}
-                  className="accent-purple-600"
-                />
-                <span className="text-sm text-gray-700">{u.username}</span>
-              </label>
-            ))
-          )}
-        </div>
-        <div className="mt-4 flex items-center justify-between">
-          <span className="text-xs text-gray-500">
-            เลือกแล้ว {selected.size} คน
-            {selected.size === 0 && sharedToken ? " (บันทึก = ยกเลิกแชร์)" : ""}
-          </span>
-          <div className="flex gap-2">
-            <button
-              onClick={onClose}
-              className="px-4 py-2 text-sm text-gray-600 rounded-lg hover:bg-gray-100"
-            >
-              ยกเลิก
-            </button>
-            <button
-              onClick={onSave}
-              disabled={busy}
-              className="px-4 py-2 text-sm font-medium text-white bg-purple-600 rounded-lg hover:bg-purple-700 disabled:opacity-50 flex items-center gap-1"
-            >
-              {busy && <Loader2 size={14} className="animate-spin" />}
-              บันทึก
-            </button>
-          </div>
-        </div>
 
-        {sharedToken && (
-          <div className="mt-4 pt-4 border-t border-gray-100">
-            <p className="text-xs font-medium text-gray-600 mb-2">
-              🔗 ลิงก์สำหรับส่งให้ผู้รับ
-              <span className="font-normal text-gray-400">
-                {" "}
-                — เฉพาะคนที่เลือกไว้เท่านั้นที่เปิดได้
-              </span>
+        {isAdmin ? (
+          <>
+            <p className="text-sm text-gray-500 mb-3">
+              เลือกคนที่จะให้เห็นแชทนี้ — เฉพาะคนที่เลือกเท่านั้นที่เห็นในกล่อง
+              &quot;แชร์ร่วมกันในทีม&quot;. ถ้าไม่เลือกใคร = ลิงก์เปิดได้ทุกคนที่ login
             </p>
-            <div className="flex items-center gap-2">
-              <input
-                ref={urlRef}
-                type="text"
-                readOnly
-                value={url}
-                onFocus={(e) => e.target.select()}
-                className="flex-1 px-3 py-2 text-xs border border-gray-200 rounded-lg bg-gray-50 text-gray-600"
-              />
-              <button
-                onClick={copyUrl}
-                className="px-3 py-2 text-sm rounded-lg bg-gray-800 text-white hover:bg-gray-700 flex items-center gap-1 shrink-0"
-              >
-                {copied ? <Check size={14} /> : <Copy size={14} />}
-                {copied ? "คัดลอกแล้ว" : "คัดลอก"}
-              </button>
+            <input
+              value={q}
+              onChange={(e) => setQ(e.target.value)}
+              placeholder="ค้นหาชื่อ..."
+              className="w-full mb-3 px-3 py-2 text-sm border border-gray-200 rounded-lg focus:outline-none focus:border-purple-400"
+            />
+            <div className="max-h-56 overflow-y-auto border border-gray-100 rounded-lg divide-y divide-gray-50">
+              {busy && users.length === 0 ? (
+                <div className="p-4 text-center text-sm text-gray-400">
+                  <Loader2 className="inline animate-spin" size={16} /> กำลังโหลด...
+                </div>
+              ) : filtered.length === 0 ? (
+                <div className="p-4 text-center text-sm text-gray-400">ไม่พบผู้ใช้</div>
+              ) : (
+                filtered.map((u) => (
+                  <label
+                    key={u.id}
+                    className="flex items-center gap-3 px-3 py-2 hover:bg-gray-50 cursor-pointer"
+                  >
+                    <input
+                      type="checkbox"
+                      checked={selected.has(u.id)}
+                      onChange={() => onToggleUser(u.id)}
+                      className="accent-purple-600"
+                    />
+                    <span className="text-sm text-gray-700">{u.username}</span>
+                  </label>
+                ))
+              )}
             </div>
-            {copyHint && (
-              <p className="mt-1.5 text-xs text-amber-600">
-                เลือกข้อความให้แล้ว — กด <strong>Ctrl+C</strong> เพื่อคัดลอก
-              </p>
+            <div className="mt-4 flex items-center justify-between">
+              <span className="text-xs text-gray-500">เลือกแล้ว {selected.size} คน</span>
+              <div className="flex gap-2">
+                <button
+                  onClick={onClose}
+                  className="px-4 py-2 text-sm text-gray-600 rounded-lg hover:bg-gray-100"
+                >
+                  ปิด
+                </button>
+                <button
+                  onClick={onSave}
+                  disabled={busy}
+                  className="px-4 py-2 text-sm font-medium text-white bg-purple-600 rounded-lg hover:bg-purple-700 disabled:opacity-50 flex items-center gap-1"
+                >
+                  {busy && <Loader2 size={14} className="animate-spin" />}
+                  บันทึก
+                </button>
+              </div>
+            </div>
+            {linkBlock}
+          </>
+        ) : (
+          <>
+            <p className="text-sm text-gray-500 mb-1">
+              คัดลอกลิงก์ส่งให้เพื่อน — เปิดดูแบบอ่านอย่างเดียว และรับเป็นแชทตัวเองได้
+            </p>
+            {busy && !sharedToken ? (
+              <div className="py-6 text-center text-sm text-gray-400">
+                <Loader2 className="inline animate-spin" size={16} /> กำลังสร้างลิงก์...
+              </div>
+            ) : (
+              linkBlock
             )}
-          </div>
+          </>
         )}
       </div>
     </div>
