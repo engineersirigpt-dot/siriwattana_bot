@@ -2056,7 +2056,31 @@ function ShareModal({
   onClose: () => void;
 }) {
   const [q, setQ] = useState("");
+  const [copied, setCopied] = useState(false);
   if (!open) return null;
+  const url =
+    typeof window !== "undefined" && sharedToken
+      ? `${window.location.origin}/chat/shared/${sharedToken}`
+      : "";
+  async function copyUrl() {
+    if (!url) return;
+    try {
+      await navigator.clipboard.writeText(url);
+    } catch {
+      const ta = document.createElement("textarea");
+      ta.value = url;
+      document.body.appendChild(ta);
+      ta.select();
+      try {
+        document.execCommand("copy");
+      } catch {
+        /* ignore */
+      }
+      ta.remove();
+    }
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1800);
+  }
   const filtered = users.filter((u) =>
     u.username.toLowerCase().includes(q.toLowerCase()),
   );
@@ -2138,6 +2162,34 @@ function ShareModal({
             </button>
           </div>
         </div>
+
+        {sharedToken && (
+          <div className="mt-4 pt-4 border-t border-gray-100">
+            <p className="text-xs font-medium text-gray-600 mb-2">
+              🔗 ลิงก์สำหรับส่งให้ผู้รับ
+              <span className="font-normal text-gray-400">
+                {" "}
+                — เฉพาะคนที่เลือกไว้เท่านั้นที่เปิดได้
+              </span>
+            </p>
+            <div className="flex items-center gap-2">
+              <input
+                type="text"
+                readOnly
+                value={url}
+                onFocus={(e) => e.target.select()}
+                className="flex-1 px-3 py-2 text-xs border border-gray-200 rounded-lg bg-gray-50 text-gray-600"
+              />
+              <button
+                onClick={copyUrl}
+                className="px-3 py-2 text-sm rounded-lg bg-gray-800 text-white hover:bg-gray-700 flex items-center gap-1 shrink-0"
+              >
+                {copied ? <Check size={14} /> : <Copy size={14} />}
+                {copied ? "คัดลอกแล้ว" : "คัดลอก"}
+              </button>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
