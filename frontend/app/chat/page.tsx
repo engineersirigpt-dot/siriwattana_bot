@@ -726,8 +726,9 @@ export default function ChatPage() {
     try {
       const { token } = await shareSession(currentSid, [...shareSel]);
       setSharedToken(token); // null ถ้าไม่ได้เลือกใคร = ยกเลิกแชร์
-      setShareOpen(false);
       refreshSharedTeamSessions();
+      // แชร์สำเร็จ -> เปิด modal ค้างไว้เพื่อให้คัดลอกลิงก์ได้; ยกเลิกแชร์ -> ปิด
+      if (!token) setShareOpen(false);
     } catch (e: unknown) {
       setAlertMsg("ทำรายการแชร์ไม่สำเร็จ: " + (e instanceof Error ? e.message : ""));
     } finally {
