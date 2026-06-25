@@ -315,6 +315,29 @@ def init_pg_schema() -> None:
                 """
             )
 
+            # Targeted chat sharing — which users a shared session is shared TO.
+            # A session is "shared with the team panel" only for its recipients;
+            # no row here (but shared_token set) = shared with nobody specific.
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS chat_session_recipients (
+                    session_id BIGINT NOT NULL
+                        REFERENCES chat_sessions(id) ON DELETE CASCADE,
+                    recipient_user_id BIGINT NOT NULL
+                        REFERENCES users(id) ON DELETE CASCADE,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    PRIMARY KEY (session_id, recipient_user_id)
+                );
+                """
+            )
+
+            cur.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_csr_recipient
+                ON chat_session_recipients(recipient_user_id);
+                """
+            )
+
 
 def smoke_test_pg() -> None:
     init_pg_schema()

@@ -405,12 +405,12 @@ def delete_session_pg(session_id: int, user_id: int) -> list[str] | None:
 # ─────────────────────── Sharing (read-only + fork) ─────────────────────────
 
 
-def list_shared_sessions_pg() -> list[dict]:
-    """Every session that has an active share token, newest first.
+def list_shared_with_me_pg(user_id: int) -> list[dict]:
+    """Sessions shared TO this user (they are an explicit recipient), newest first.
 
-    Visible to any signed-in user — this powers the "แชร์ร่วมกันในทีม" panel
-    where teammates browse each other's shared chats read-only (and fork them).
-    Only chats the owner explicitly shared show up; private chats never appear.
+    Powers the "แชร์ร่วมกันในทีม" panel — read-only + forkable. Targeted: a chat
+    shows up only for the users its owner chose; everyone else (and the owner's
+    own panel) never sees it. Private chats never appear.
     """
     with get_pg_conn() as conn:
         with conn.cursor() as cur:
@@ -420,12 +420,14 @@ def list_shared_sessions_pg() -> list[dict]:
                        s.shared_token, s.updated_at,
                        (SELECT COUNT(*) FROM chat_history
                         WHERE session_id = s.id) AS message_count
-                FROM chat_sessions s
+                FROM chat_session_recipients r
+                JOIN chat_sessions s ON s.id = r.session_id
                 JOIN users u ON u.id = s.user_id
-                WHERE s.shared_token IS NOT NULL
+                WHERE r.recipient_user_id = %s AND s.shared_token IS NOT NULL
                 ORDER BY s.updated_at DESC
                 LIMIT 500
-                """
+                """,
+                (user_id,),
             )
             rows = cur.fetchall()
 
@@ -443,13 +445,15 @@ def list_shared_sessions_pg() -> list[dict]:
     ]
 
 
-def share_session_pg(session_id: int, user_id: int) -> str | None:
-    """Generate (or reuse) a share token for a session the user owns.
+def share_session_pg(session_id: int, user_id: int, recipient_ids: list[int]) -> str | None:
+    """Share a session the user owns with SPECIFIC recipients (targeted sharing).
 
-    Returns the token string, or None if the user doesn't own the session.
-    Tokens are URL-safe and ~22 chars (16 bytes base64). The owner can revoke
-    them via `revoke_share_pg`; once cleared, the old URL stops working.
+    Sets (or keeps) a stable share token and replaces the recipient set so only
+    those users see it in their "แชร์ร่วมกันในทีม" panel. Empty recipients →
+    unshare (clears token + recipients). Returns token, or None if not owner /
+    unshared. The owner is never added as a recipient (they own it already).
     """
+    recipient_ids = sorted({int(r) for r in (recipient_ids or []) if int(r) != user_id})
     with get_pg_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -460,16 +464,66 @@ def share_session_pg(session_id: int, user_id: int) -> str | None:
             row = cur.fetchone()
             if not row:
                 return None
-            if row[1]:
-                # Already shared — return the existing token so the URL is stable.
-                return row[1]
 
-            token = secrets.token_urlsafe(16)
+            if not recipient_ids:
+                # No recipients → unshare entirely.
+                cur.execute(
+                    "UPDATE chat_sessions SET shared_token = NULL WHERE id = %s",
+                    (session_id,),
+                )
+                cur.execute(
+                    "DELETE FROM chat_session_recipients WHERE session_id = %s",
+                    (session_id,),
+                )
+                return None
+
+            token = row[1] or secrets.token_urlsafe(16)
+            if not row[1]:
+                cur.execute(
+                    "UPDATE chat_sessions SET shared_token = %s WHERE id = %s",
+                    (token, session_id),
+                )
+            # Replace the recipient set.
             cur.execute(
-                "UPDATE chat_sessions SET shared_token = %s WHERE id = %s",
-                (token, session_id),
+                "DELETE FROM chat_session_recipients WHERE session_id = %s",
+                (session_id,),
             )
+            for rid in recipient_ids:
+                cur.execute(
+                    "INSERT INTO chat_session_recipients (session_id, recipient_user_id) "
+                    "VALUES (%s, %s) ON CONFLICT DO NOTHING",
+                    (session_id, rid),
+                )
     return token
+
+
+def list_share_recipients_pg(session_id: int, owner_id: int) -> list[int]:
+    """recipient user_ids ที่แชทนี้ถูกแชร์ให้ (เฉพาะเจ้าของถึงเรียกดูได้)"""
+    with get_pg_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT 1 FROM chat_sessions WHERE id = %s AND user_id = %s",
+                (session_id, owner_id),
+            )
+            if not cur.fetchone():
+                return []
+            cur.execute(
+                "SELECT recipient_user_id FROM chat_session_recipients WHERE session_id = %s",
+                (session_id,),
+            )
+            return [r[0] for r in cur.fetchall()]
+
+
+def list_shareable_users_pg(exclude_id: int) -> list[dict]:
+    """รายชื่อผู้ใช้สำหรับเลือกเป็นผู้รับ (ไม่รวมตัวเอง / ผู้ใช้ที่ถูกปิด)"""
+    with get_pg_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT id, username FROM users "
+                "WHERE is_disabled = false AND id <> %s ORDER BY username",
+                (exclude_id,),
+            )
+            return [{"id": r[0], "username": r[1]} for r in cur.fetchall()]
 
 
 def revoke_share_pg(session_id: int, user_id: int) -> bool:
@@ -480,15 +534,21 @@ def revoke_share_pg(session_id: int, user_id: int) -> bool:
                 "WHERE id = %s AND user_id = %s AND shared_token IS NOT NULL",
                 (session_id, user_id),
             )
-            return cur.rowcount > 0
+            revoked = cur.rowcount > 0
+            if revoked:
+                cur.execute(
+                    "DELETE FROM chat_session_recipients WHERE session_id = %s",
+                    (session_id,),
+                )
+            return revoked
 
 
-def get_shared_session_pg(token: str) -> dict | None:
-    """Look up a shared session by token. Any signed-in user can read it.
+def get_shared_session_pg(token: str, viewer_id: int) -> dict | None:
+    """Look up a shared session by token — only the owner or an explicit
+    recipient may read it (targeted sharing).
 
-    Returns owner info + the full message thread, similar to
-    get_session_messages_pg but keyed by token instead of (session_id, user_id).
-    Returns None if the token is unknown / has been revoked.
+    Returns owner info + the full message thread. Returns None if the token is
+    unknown/revoked, or the viewer isn't allowed to see it.
     """
     with get_pg_conn() as conn:
         with conn.cursor() as cur:
@@ -506,6 +566,16 @@ def get_shared_session_pg(token: str) -> dict | None:
             session = cur.fetchone()
             if not session:
                 return None
+
+            # access: owner หรือ recipient เท่านั้น
+            if viewer_id != session[5]:
+                cur.execute(
+                    "SELECT 1 FROM chat_session_recipients "
+                    "WHERE session_id = %s AND recipient_user_id = %s",
+                    (session[0], viewer_id),
+                )
+                if not cur.fetchone():
+                    return None
 
             cur.execute(
                 """
@@ -556,14 +626,24 @@ def fork_shared_session_pg(token: str, new_user_id: int) -> int | None:
     with get_pg_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT id, title, COALESCE(mode, 'normal') "
+                "SELECT id, title, COALESCE(mode, 'normal'), user_id "
                 "FROM chat_sessions WHERE shared_token = %s",
                 (token,),
             )
             src = cur.fetchone()
             if not src:
                 return None
-            src_id, src_title, src_mode = src
+            src_id, src_title, src_mode, owner_id = src
+
+            # access: owner หรือ recipient เท่านั้นที่ fork ได้
+            if new_user_id != owner_id:
+                cur.execute(
+                    "SELECT 1 FROM chat_session_recipients "
+                    "WHERE session_id = %s AND recipient_user_id = %s",
+                    (src_id, new_user_id),
+                )
+                if not cur.fetchone():
+                    return None
 
             forked_title = ("📋 " + (src_title or "บทสนทนา"))[:80]
 

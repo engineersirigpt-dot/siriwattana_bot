@@ -197,18 +197,37 @@ export async function sendFeedback(
   });
 }
 
+export type ShareUser = { id: number; username: string };
+
+export function listShareableUsers(): Promise<ShareUser[]> {
+  return api<ShareUser[]>(`/users/list`);
+}
+
+export function getSessionRecipients(sessionId: number): Promise<number[]> {
+  return api<{ recipient_ids: number[] }>(
+    `/chat/sessions/${sessionId}/recipients`,
+  ).then((d) => d.recipient_ids);
+}
+
+// Targeted share: pass the recipient user ids. Empty list = unshare.
 export async function shareSession(
   sessionId: number,
-): Promise<{ token: string; url: string }> {
-  const data = await api<{ token: string; path: string }>(
-    `/chat/sessions/${sessionId}/share`,
-    { method: "POST" },
-  );
-  // Build the full URL relative to the current origin so the recipient
-  // doesn't need to know API_BASE.
-  const origin =
-    typeof window !== "undefined" ? window.location.origin : "";
-  return { token: data.token, url: `${origin}${data.path}` };
+  recipientIds: number[],
+): Promise<{ shared: boolean; token: string | null; url: string | null }> {
+  const data = await api<{
+    shared: boolean;
+    token: string | null;
+    path: string | null;
+  }>(`/chat/sessions/${sessionId}/share`, {
+    method: "POST",
+    body: JSON.stringify({ recipient_ids: recipientIds }),
+  });
+  const origin = typeof window !== "undefined" ? window.location.origin : "";
+  return {
+    shared: data.shared,
+    token: data.token,
+    url: data.path ? `${origin}${data.path}` : null,
+  };
 }
 
 export async function revokeSessionShare(sessionId: number): Promise<void> {

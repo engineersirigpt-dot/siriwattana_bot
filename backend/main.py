@@ -1775,29 +1775,75 @@ def get_session(session_id: int, user: dict = Depends(current_user)):
     }
 
 
+class ShareIn(BaseModel):
+    recipient_ids: list[int] = []
+
+
 @app.post("/chat/sessions/{session_id}/share")
 @limiter.limit("20/minute")
 def share_session(
-    session_id: int, request: Request, user: dict = Depends(current_user)
+    session_id: int, request: Request, body: ShareIn, user: dict = Depends(current_user)
 ):
-    """Mint (or reuse) a read-only share token for a session the user owns."""
+    """Share a session the user owns with SPECIFIC recipients (targeted).
+
+    Empty recipient_ids → unshare. Returns the stable token + path when shared.
+    """
     if not use_postgres_auth():
         raise HTTPException(501, "share is only available on postgres deployment")
 
     from chat_pg import share_session_pg
 
-    token = share_session_pg(session_id, user["id"])
+    token = share_session_pg(session_id, user["id"], body.recipient_ids)
+
+    if not body.recipient_ids:
+        audit_log(
+            "chat_session_share_revoked",
+            user=user,
+            detail={"session_id": session_id},
+            request=request,
+        )
+        return {"ok": True, "shared": False, "token": None, "path": None}
+
     if not token:
         raise HTTPException(404, "session not found")
 
     audit_log(
         "chat_session_shared",
         user=user,
-        detail={"session_id": session_id, "token_prefix": token[:6]},
+        detail={
+            "session_id": session_id,
+            "token_prefix": token[:6],
+            "recipients": len(set(body.recipient_ids)),
+        },
         request=request,
     )
 
-    return {"token": token, "path": f"/chat/shared/{token}"}
+    return {
+        "ok": True,
+        "shared": True,
+        "token": token,
+        "path": f"/chat/shared/{token}",
+    }
+
+
+@app.get("/chat/sessions/{session_id}/recipients")
+def session_recipients(session_id: int, user: dict = Depends(current_user)):
+    """recipient user_ids ที่แชทนี้ถูกแชร์ให้ (เฉพาะเจ้าของ) — ให้ dialog ติ๊กไว้ล่วงหน้า"""
+    if not use_postgres_auth():
+        raise HTTPException(501, "share is only available on postgres deployment")
+    from chat_pg import list_share_recipients_pg
+
+    return {"recipient_ids": list_share_recipients_pg(session_id, user["id"])}
+
+
+@app.get("/users/list")
+def users_list(user: dict = Depends(current_user)):
+    """รายชื่อผู้ใช้สำหรับเลือกเป็นผู้รับการแชร์ (ไม่รวมตัวเอง)"""
+    if not use_postgres_auth():
+        raise HTTPException(501, "only available on postgres deployment")
+    from chat_pg import list_shareable_users_pg
+
+    return list_shareable_users_pg(user["id"])
 
 
 @app.delete("/chat/sessions/{session_id}/share")
@@ -1833,20 +1879,20 @@ def list_shared_sessions(user: dict = Depends(current_user)):
     if not use_postgres_auth():
         raise HTTPException(501, "share is only available on postgres deployment")
 
-    from chat_pg import list_shared_sessions_pg
+    from chat_pg import list_shared_with_me_pg
 
-    return list_shared_sessions_pg()
+    return list_shared_with_me_pg(user["id"])
 
 
 @app.get("/chat/shared/{token}")
 def get_shared_session(token: str, user: dict = Depends(current_user)):
-    """Read-only view of a shared chat. Any signed-in user can open it."""
+    """Read-only view of a shared chat — only owner or recipient can open it."""
     if not use_postgres_auth():
         raise HTTPException(501, "share is only available on postgres deployment")
 
     from chat_pg import get_shared_session_pg
 
-    session = get_shared_session_pg(token)
+    session = get_shared_session_pg(token, user["id"])
     if not session:
         raise HTTPException(404, "ลิงค์นี้ใช้งานไม่ได้แล้ว — เจ้าของอาจยกเลิกการแชร์")
     # Flag whether the viewer is the owner so the UI can show "your own chat".
@@ -1865,7 +1911,7 @@ def fork_shared_session(
 
     from chat_pg import fork_shared_session_pg, get_shared_session_pg
 
-    original = get_shared_session_pg(token)
+    original = get_shared_session_pg(token, user["id"])
     if not original:
         raise HTTPException(404, "ลิงค์นี้ใช้งานไม่ได้แล้ว")
 
