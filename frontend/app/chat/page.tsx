@@ -2057,6 +2057,8 @@ function ShareModal({
 }) {
   const [q, setQ] = useState("");
   const [copied, setCopied] = useState(false);
+  const [copyHint, setCopyHint] = useState(false);
+  const urlRef = useRef<HTMLInputElement>(null);
   if (!open) return null;
   const url =
     typeof window !== "undefined" && sharedToken
@@ -2064,22 +2066,37 @@ function ShareModal({
       : "";
   async function copyUrl() {
     if (!url) return;
-    try {
-      await navigator.clipboard.writeText(url);
-    } catch {
-      const ta = document.createElement("textarea");
-      ta.value = url;
-      document.body.appendChild(ta);
-      ta.select();
+    let ok = false;
+    // secure context (HTTPS/localhost) — modern clipboard API
+    if (typeof navigator !== "undefined" && navigator.clipboard && window.isSecureContext) {
       try {
-        document.execCommand("copy");
+        await navigator.clipboard.writeText(url);
+        ok = true;
       } catch {
-        /* ignore */
+        ok = false;
       }
-      ta.remove();
     }
-    setCopied(true);
-    setTimeout(() => setCopied(false), 1800);
+    // HTTP fallback — select the visible input + execCommand (works บน LAN IP)
+    if (!ok && urlRef.current) {
+      urlRef.current.focus();
+      urlRef.current.select();
+      urlRef.current.setSelectionRange(0, url.length);
+      try {
+        ok = document.execCommand("copy");
+      } catch {
+        ok = false;
+      }
+    }
+    if (ok) {
+      setCopied(true);
+      setCopyHint(false);
+      setTimeout(() => setCopied(false), 1800);
+    } else {
+      // คัดลอกอัตโนมัติไม่ได้ -> เลือกข้อความไว้ให้ผู้ใช้กด Ctrl+C เอง
+      urlRef.current?.focus();
+      urlRef.current?.select();
+      setCopyHint(true);
+    }
   }
   const filtered = users.filter((u) =>
     u.username.toLowerCase().includes(q.toLowerCase()),
@@ -2174,6 +2191,7 @@ function ShareModal({
             </p>
             <div className="flex items-center gap-2">
               <input
+                ref={urlRef}
                 type="text"
                 readOnly
                 value={url}
@@ -2188,6 +2206,11 @@ function ShareModal({
                 {copied ? "คัดลอกแล้ว" : "คัดลอก"}
               </button>
             </div>
+            {copyHint && (
+              <p className="mt-1.5 text-xs text-amber-600">
+                เลือกข้อความให้แล้ว — กด <strong>Ctrl+C</strong> เพื่อคัดลอก
+              </p>
+            )}
           </div>
         )}
       </div>
