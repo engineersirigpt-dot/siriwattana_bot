@@ -1586,17 +1586,6 @@ export default function ChatPage() {
                 <span>{sharedToken ? "แชร์อยู่" : "แชร์"}</span>
               </button>
             )}
-            {chatMode === "company" && !readOnlyOwner && (
-              <button
-                onClick={() => setChatMode("normal")}
-                className="flex items-center gap-1.5 px-3 py-1.5 bg-amber-100 hover:bg-amber-200 text-amber-800 rounded-lg text-sm transition-all border border-amber-300"
-                title="ปิดโหมดคู่มือบริษัท (ยังอยู่ในแชทเดิม)"
-              >
-                <span>📘</span>
-                <span>โหมด: คู่มือบริษัท</span>
-                <X size={14} />
-              </button>
-            )}
             {readOnlyOwner && (
               <button
                 onClick={exitReadOnly}
@@ -1646,6 +1635,25 @@ export default function ChatPage() {
           </div>
         )}
 
+        {/* Prominent full-width banner so it's obvious the company-manual
+            "expert" mode is active. Doubles as the exit control. */}
+        {chatMode === "company" && !readOnlyOwner && (
+          <div className="bg-gradient-to-r from-amber-100 via-amber-50 to-amber-100 border-b-2 border-amber-300 px-8 py-2.5 flex items-center gap-2.5 text-amber-900 shadow-sm">
+            <span className="text-lg">📘</span>
+            <span className="flex-1 text-sm font-semibold">
+              โหมดคู่มือบริษัท — ผู้เชี่ยวชาญเฉพาะเรื่องภายในบริษัทศิริวัฒนาฯ
+            </span>
+            <button
+              onClick={() => setChatMode("normal")}
+              className="flex-shrink-0 inline-flex items-center gap-1 px-3 py-1 bg-white/70 hover:bg-white text-amber-800 rounded-lg text-xs font-medium border border-amber-300 transition-all"
+              title="ปิดโหมดคู่มือบริษัท (ยังอยู่ในแชทเดิม)"
+            >
+              <X size={13} />
+              ปิดโหมด
+            </button>
+          </div>
+        )}
+
         <div
           ref={scrollRef}
           className="flex-1 overflow-y-auto bg-gradient-to-b from-purple-50/30 to-white"
@@ -1658,11 +1666,24 @@ export default function ChatPage() {
                   alt="Sirivatana"
                   className="mx-auto w-20 h-20 rounded-2xl object-cover mb-4 shadow-md"
                 />
-                <p>พิมพ์คำถามเกี่ยวกับบริษัทหรือคำถามทั่วไปได้เลย</p>
+                {chatMode === "company" ? (
+                  <>
+                    <p className="text-base font-semibold text-amber-700">
+                      ผู้เชี่ยวชาญเฉพาะเรื่องบริษัท
+                    </p>
+                    <p className="text-sm text-gray-400 mt-1">
+                      ใช้ถามเรื่องที่ลงลึกเกี่ยวกับบริษัทโดยเฉพาะ — ระเบียบ นโยบาย คู่มือ และข้อมูลภายใน
+                    </p>
+                  </>
+                ) : (
+                  <p>พิมพ์คำถามเกี่ยวกับบริษัทหรือคำถามทั่วไปได้เลย</p>
+                )}
                 {/* Starter prompts — give new users a sense of what to ask.
                     Clicking fills the box (doesn't auto-send) so they can edit.
-                    Sampled client-side, so empty until after mount. */}
-                {!readOnlyOwner && starters.length > 0 && (
+                    Sampled client-side, so empty until after mount. Hidden in
+                    company mode — that mode is a focused expert entry point, no
+                    generic suggestions. */}
+                {!readOnlyOwner && chatMode !== "company" && starters.length > 0 && (
                   <div className="mt-6 flex flex-wrap justify-center gap-2 max-w-xl mx-auto">
                     <span className="w-full text-xs text-gray-400 mb-1">
                       ตัวอย่างคำถาม
