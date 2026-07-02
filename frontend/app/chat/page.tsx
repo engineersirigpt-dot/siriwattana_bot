@@ -1145,7 +1145,6 @@ export default function ChatPage() {
       ? teamSessions.find((s) => s.id === currentSid)?.title ?? "บทสนทนา"
       : sessions.find((s) => s.id === currentSid)?.title ?? "แชท"
     : "แชทใหม่";
-  const avatarLetter = (username ?? "?").charAt(0).toUpperCase();
 
   return (
     <div
@@ -1526,8 +1525,12 @@ export default function ChatPage() {
         {/* Profile + actions */}
         <div className="p-4 border-t border-white/20 space-y-2">
           <div className="flex items-center gap-3 px-2 py-2 rounded-xl bg-white/5 border border-white/10">
-            <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-purple-300 to-purple-500 flex items-center justify-center text-white font-medium shadow-md flex-shrink-0">
-              {avatarLetter}
+            <div className="w-10 h-10 rounded-xl bg-white flex items-center justify-center shadow-md flex-shrink-0 overflow-hidden p-0.5">
+              <img
+                src="/Logo_siri.jpg"
+                alt="Sirivatana"
+                className="w-full h-full object-cover rounded-lg"
+              />
             </div>
             <div className="flex-1 min-w-0">
               <p className="text-white text-sm font-medium truncate">
