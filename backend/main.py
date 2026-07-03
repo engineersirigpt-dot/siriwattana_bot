@@ -558,14 +558,35 @@ def _handle_image_generation(
 
     try:
         data, usage = generate_image(question)
-    except Exception:
-        text = "ขออภัยค่ะ ระบบสร้างรูปไม่สำเร็จ กรุณาลองใหม่อีกครั้งค่ะ"
+    except Exception as e:
+        # Distinguish OpenAI's content-policy rejection (copyrighted characters,
+        # brands, real people, unsafe content) from a real system error so the
+        # user knows to reword instead of just "try again". Neither consumes the
+        # daily quota — record_image_generation_pg only runs on success below.
+        msg = str(e).lower()
+        blocked = any(
+            k in msg
+            for k in (
+                "safety", "moderation", "content_policy", "content policy",
+                "rejected", "blocked", "not allowed",
+            )
+        )
+        if blocked:
+            text = (
+                "ขออภัยค่ะ ไม่สามารถสร้างรูปนี้ได้ เนื่องจากติดนโยบายเนื้อหาของ AI "
+                "(เช่น ตัวการ์ตูน/แบรนด์/โลโก้ที่มีลิขสิทธิ์ บุคคลจริง หรือเนื้อหาที่ไม่เหมาะสม) "
+                "🙏 ลองเปลี่ยนเป็นคำอธิบายทั่วไปดูนะคะ เช่น 'รถเก๋งสีแดง' แทนชื่อแบรนด์/ตัวละคร"
+            )
+            source = "image_blocked"
+        else:
+            text = "ขออภัยค่ะ ระบบสร้างรูปไม่สำเร็จ กรุณาลองใหม่อีกครั้งค่ะ"
+            source = "image_error"
         mid = save_chat_message_pg(
             user_id=user["id"], session_id=sid, question=question,
-            answer=text, source="image_error", knowledge_id=None, mode=mode,
+            answer=text, source=source, knowledge_id=None, mode=mode,
         )
         return {
-            "answer": text, "source": "image_error", "session_id": sid,
+            "answer": text, "source": source, "session_id": sid,
             "session_title": stitle, "message_id": mid, "attachment": None,
         }
 
