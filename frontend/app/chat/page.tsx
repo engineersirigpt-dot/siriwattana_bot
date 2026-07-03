@@ -828,6 +828,36 @@ export default function ChatPage() {
     addFiles(Array.from(e.dataTransfer.files ?? []));
   }
 
+  // Ctrl+V / Cmd+V paste of an image from the clipboard (e.g. a screenshot).
+  // Clipboard images arrive unnamed, so we give them a friendly filename.
+  // Only preventDefault when we actually grabbed an image, so normal text
+  // paste keeps working.
+  function handlePaste(e: React.ClipboardEvent<HTMLTextAreaElement>) {
+    if (readOnlyOwner || sending) return;
+
+    const items = e.clipboardData?.items;
+    if (!items) return;
+
+    const images: File[] = [];
+    for (const item of Array.from(items)) {
+      if (item.kind === "file" && item.type.startsWith("image/")) {
+        const blob = item.getAsFile();
+        if (!blob) continue;
+        const ext = (blob.type.split("/")[1] || "png").split("+")[0];
+        images.push(
+          new File([blob], `pasted-${Date.now()}-${images.length + 1}.${ext}`, {
+            type: blob.type,
+          }),
+        );
+      }
+    }
+
+    if (images.length > 0) {
+      e.preventDefault();
+      addFiles(images);
+    }
+  }
+
   function removePendingFile(idx: number) {
     setPendingFiles((prev) => prev.filter((_, i) => i !== idx));
   }
@@ -1940,6 +1970,7 @@ export default function ChatPage() {
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
                 onKeyDown={handleInputKeyDown}
+                onPaste={handlePaste}
                 rows={1}
                 placeholder={
                   readOnlyOwner
