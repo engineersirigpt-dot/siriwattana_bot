@@ -1780,7 +1780,11 @@ export default function ChatPage() {
                   />
                   <div className="flex-1 min-w-0 pt-1">
                     {m.attachments && m.attachments.length > 0 && (
-                      <AttachmentList attachments={m.attachments} onUserBubble={false} />
+                      <AttachmentList
+                        attachments={m.attachments}
+                        onUserBubble={false}
+                        large={m.source === "image_gen"}
+                      />
                     )}
                     {isStreaming && !m.text ? (
                       // Streaming but no token yet — show a "thinking" indicator
@@ -2581,15 +2585,23 @@ function PendingFileChip({ file, onRemove }: { file: File; onRemove: () => void 
 function AttachmentList({
   attachments,
   onUserBubble,
+  large = false,
 }: {
   attachments: Attachment[];
   onUserBubble: boolean;
+  // `large` = AI-generated image → show a big preview instead of a thumbnail.
+  large?: boolean;
 }) {
   return (
     <div className={`flex flex-wrap gap-2 ${onUserBubble ? "mb-2" : ""}`}>
       {attachments.map((a) =>
         a.content_type.startsWith("image/") ? (
-          <AttachmentImage key={a.id} attachment={a} onUserBubble={onUserBubble} />
+          <AttachmentImage
+            key={a.id}
+            attachment={a}
+            onUserBubble={onUserBubble}
+            large={large}
+          />
         ) : (
           <AttachmentFile key={a.id} attachment={a} onUserBubble={onUserBubble} />
         ),
@@ -2601,9 +2613,11 @@ function AttachmentList({
 function AttachmentImage({
   attachment,
   onUserBubble,
+  large = false,
 }: {
   attachment: Attachment;
   onUserBubble: boolean;
+  large?: boolean;
 }) {
   const [url, setUrl] = useState<string | null>(null);
 
@@ -2623,21 +2637,27 @@ function AttachmentImage({
   if (!url) {
     return (
       <div
-        className={`w-32 h-32 rounded-lg flex items-center justify-center ${
-          onUserBubble ? "bg-white/10" : "bg-gray-100"
-        }`}
+        className={`rounded-lg flex items-center justify-center ${
+          large ? "w-72 h-72 sm:w-80 sm:h-80" : "w-32 h-32"
+        } ${onUserBubble ? "bg-white/10" : "bg-gray-100"}`}
       >
         <ImageIcon size={24} className={onUserBubble ? "text-white/60" : "text-gray-400"} />
       </div>
     );
   }
 
+  // Generated images (large) show the full picture uncropped at a big size;
+  // uploaded thumbnails stay small and cropped to keep the bubble compact.
   return (
     <a href={url} target="_blank" rel="noreferrer">
       <img
         src={url}
         alt={attachment.filename}
-        className="w-32 h-32 rounded-lg object-cover border border-white/20 hover:opacity-90 transition-opacity"
+        className={
+          large
+            ? "w-72 sm:w-80 h-auto rounded-xl object-contain border border-gray-200 shadow-sm hover:opacity-95 transition-opacity"
+            : "w-32 h-32 rounded-lg object-cover border border-white/20 hover:opacity-90 transition-opacity"
+        }
       />
     </a>
   );
