@@ -338,6 +338,28 @@ def init_pg_schema() -> None:
                 """
             )
 
+            # AI image generation log — one row per generated image. Powers the
+            # per-user daily quota (count today's rows) and lets the dashboard
+            # total the image-generation spend later.
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS image_generations (
+                    id BIGSERIAL PRIMARY KEY,
+                    user_id BIGINT NOT NULL REFERENCES users(id),
+                    prompt TEXT NOT NULL,
+                    cost_usd NUMERIC(10, 4) NOT NULL DEFAULT 0,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                );
+                """
+            )
+
+            cur.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_image_gen_user_created
+                ON image_generations(user_id, created_at DESC);
+                """
+            )
+
 
 def smoke_test_pg() -> None:
     init_pg_schema()

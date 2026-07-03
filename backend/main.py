@@ -47,6 +47,7 @@ from llm import (
     answer_from_context,
     answer_with_files,
     classify_query,
+    generate_image,
     stream_freely,
     stream_from_context,
 )
@@ -490,6 +491,106 @@ def _is_export_request(text: str) -> bool:
     return True
 
 
+# ── AI image generation ─────────────────────────────────────────────────────
+# Detect a "please draw/generate an image" request so we route it to the image
+# model instead of the text LLM. A create-verb must sit right before the
+# image-noun (Thai is written without spaces, so they're contiguous; English
+# allows an article/pronoun). Keeps ordinary questions like "รูปแบบการทำงาน" or
+# "ขอข้อมูลรูปเครื่องจักร" from tripping it.
+_IMAGE_INTENT_RE = re.compile(
+    r"(?:สร้าง|วาด|ออกแบบ|เจน)\s*"
+    r"(?:รูปภาพ|รูป|ภาพประกอบ|ภาพ|โลโก้|อินโฟกราฟิก)"
+    r"|(?:generate|create|draw|make|gen)\s+"
+    r"(?:an?\s+|the\s+|me\s+(?:an?\s+)?|us\s+(?:an?\s+)?)?"
+    r"(?:image|picture|logo|illustration|drawing|photo|graphic)",
+    re.IGNORECASE,
+)
+
+# Per-user cap on generated images per calendar day (Asia/Bangkok).
+IMAGE_GEN_DAILY_LIMIT = int(os.getenv("IMAGE_GEN_DAILY_LIMIT", "10"))
+
+
+def _is_image_request(text: str) -> bool:
+    """True when the user is asking the bot to CREATE an image."""
+    if not text:
+        return False
+    return _IMAGE_INTENT_RE.search(text.strip()) is not None
+
+
+def _handle_image_generation(
+    user: dict, question: str, session_id: int | None, mode: str
+) -> dict:
+    """Generate an image (or refuse if over the daily quota) and persist it.
+
+    Postgres-only (mirrors the streaming pipeline). Returns a dict the caller
+    turns into a ChatResponse / stream 'done' event:
+        {answer, source, session_id, session_title, message_id, attachment}
+    `attachment` is the saved-image row dict (or None when limited/failed).
+    """
+    import attachments as att
+    from chat_pg import (
+        count_images_today_pg,
+        ensure_session_pg,
+        record_image_generation_pg,
+        save_attachment_pg,
+        save_chat_message_pg,
+    )
+
+    sid, stitle = ensure_session_pg(
+        user_id=user["id"], session_id=session_id,
+        first_question=question, mode=mode,
+    )
+
+    used = count_images_today_pg(user["id"])
+    if used >= IMAGE_GEN_DAILY_LIMIT:
+        text = (
+            f"ขออภัยค่ะ วันนี้คุณสร้างรูปครบ {IMAGE_GEN_DAILY_LIMIT} รูปแล้ว "
+            "(จำกัด 10 รูป/วัน/บัญชี) กรุณาลองใหม่พรุ่งนี้ค่ะ 🙏"
+        )
+        mid = save_chat_message_pg(
+            user_id=user["id"], session_id=sid, question=question,
+            answer=text, source="image_limit", knowledge_id=None, mode=mode,
+        )
+        return {
+            "answer": text, "source": "image_limit", "session_id": sid,
+            "session_title": stitle, "message_id": mid, "attachment": None,
+        }
+
+    try:
+        data, usage = generate_image(question)
+    except Exception:
+        text = "ขออภัยค่ะ ระบบสร้างรูปไม่สำเร็จ กรุณาลองใหม่อีกครั้งค่ะ"
+        mid = save_chat_message_pg(
+            user_id=user["id"], session_id=sid, question=question,
+            answer=text, source="image_error", knowledge_id=None, mode=mode,
+        )
+        return {
+            "answer": text, "source": "image_error", "session_id": sid,
+            "session_title": stitle, "message_id": mid, "attachment": None,
+        }
+
+    display, ctype, size, path = att.save_generated_image(data)
+    remaining = IMAGE_GEN_DAILY_LIMIT - used - 1
+    caption = (
+        "นี่คือรูปที่สร้างตามคำขอของคุณค่ะ 🎨\n\n"
+        f"_(วันนี้สร้างได้อีก {remaining} รูป)_"
+    )
+    mid = save_chat_message_pg(
+        user_id=user["id"], session_id=sid, question=question,
+        answer=caption, source="image_gen", knowledge_id=None, mode=mode,
+        usage=usage,
+    )
+    arow = save_attachment_pg(
+        message_id=mid, user_id=user["id"], filename=display,
+        content_type=ctype, size_bytes=size, file_path=path,
+    )
+    record_image_generation_pg(user["id"], question, usage["cost_usd"])
+    return {
+        "answer": caption, "source": "image_gen", "session_id": sid,
+        "session_title": stitle, "message_id": mid, "attachment": arow,
+    }
+
+
 HISTORY_TURNS = 6
 
 # Hard cap on number of question turns per chat session. Once exceeded, /chat
@@ -762,6 +863,28 @@ async def chat(
             session_id=sid,
             session_title=stitle,
             attachments=[],
+        )
+
+    # Image generation intent (postgres only — mirrors /chat/stream). Handled
+    # here too so the streaming client's non-stream fallback still works.
+    if question and not files and use_postgres_auth() and _is_image_request(question):
+        audit_log(
+            "image_generation_requested",
+            user=user,
+            detail={"prompt": question[:300], "via": "chat"},
+            request=request,
+        )
+        res = _handle_image_generation(user, question, session_id, mode)
+        return ChatResponse(
+            answer=res["answer"],
+            source=res["source"],
+            similarity=None,
+            session_id=res["session_id"],
+            session_title=res["session_title"],
+            message_id=res["message_id"],
+            attachments=[res["attachment"]] if res["attachment"] else [],
+            turn_count=_count_session_turns(res["session_id"]),
+            turn_limit=MAX_TURNS_PER_SESSION,
         )
 
     saved_files: list[dict] = []
@@ -1298,6 +1421,32 @@ async def chat_stream(
                     "turn_count": _count_session_turns(sid),
                     "turn_limit": MAX_TURNS_PER_SESSION,
                 })
+                return
+
+            # 3.5) Image generation intent — "วาดรูป / สร้างภาพ ...". Runs the
+            #      image model (slow, no token stream), saves the PNG as an
+            #      attachment on the answer row, and hands the frontend the
+            #      attachment via the 'done' event so it renders inline.
+            if _is_image_request(question):
+                audit_log(
+                    "image_generation_requested",
+                    user=user,
+                    detail={"prompt": question[:300], "via": "stream"},
+                    request=request,
+                )
+                res = _handle_image_generation(user, question, session_id, mode)
+                yield ev({"type": "delta", "v": res["answer"]})
+                done_evt = {
+                    "type": "done", "source": res["source"],
+                    "session_id": res["session_id"],
+                    "session_title": res["session_title"],
+                    "message_id": res["message_id"],
+                    "turn_count": _count_session_turns(res["session_id"]),
+                    "turn_limit": MAX_TURNS_PER_SESSION,
+                }
+                if res["attachment"]:
+                    done_evt["attachments"] = [res["attachment"]]
+                yield ev(done_evt)
                 return
 
             # 4) Normal answer — stream the LLM tokens.

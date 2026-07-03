@@ -113,6 +113,32 @@ def _default_ext_for(content_type: str) -> str:
     return ".bin"
 
 
+def save_generated_image(
+    data: bytes, display_name: str = "ai-image.png"
+) -> tuple[str, str, int, str]:
+    """Persist AI-generated image bytes into UPLOAD_DIR.
+
+    Returns (display_filename, content_type, size_bytes, file_path) — the same
+    tuple shape as save_upload, so it drops straight into save_attachment_pg.
+    The on-disk name is a random uuid; display_name is what the user sees.
+    """
+    _ensure_dir()
+
+    stored_name = f"{uuid.uuid4().hex}.png"
+    file_path = (_upload_root() / stored_name).resolve()
+
+    # Safety: generated path must stay inside UPLOAD_DIR.
+    try:
+        file_path.relative_to(_upload_root())
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid upload path")
+
+    with open(file_path, "wb") as fh:
+        fh.write(data)
+
+    return display_name, "image/png", len(data), str(file_path)
+
+
 async def save_upload(upload: UploadFile) -> tuple[str, str, int, str]:
     if not _is_allowed(upload.content_type or "", upload.filename or ""):
         raise HTTPException(

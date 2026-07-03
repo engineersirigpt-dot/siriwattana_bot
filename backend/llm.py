@@ -1,3 +1,4 @@
+import base64
 import os
 from typing import Any
 
@@ -12,6 +13,14 @@ LLM_MODEL_CALC = os.getenv("LLM_MODEL_CALC", "gpt-5-mini")
 # doesn't need strong Thai context reasoning like the main answer model.
 LLM_MODEL_CLASSIFIER = os.getenv("LLM_MODEL_CLASSIFIER", "gpt-4o-mini")
 
+# Image generation (gpt-image-1). Billed per image by size/quality; OpenAI's
+# token-based billing varies, so we store a flat per-image cost estimate for
+# the dashboard. 1024x1024 @ medium quality ≈ $0.042 (~1.5 ฿).
+IMAGE_MODEL = os.getenv("IMAGE_MODEL", "gpt-image-1")
+IMAGE_SIZE = os.getenv("IMAGE_SIZE", "1024x1024")
+IMAGE_QUALITY = os.getenv("IMAGE_QUALITY", "medium")
+IMAGE_GEN_COST_USD = float(os.getenv("IMAGE_GEN_COST_USD", "0.042"))
+
 _client: OpenAI | None = None
 
 
@@ -20,6 +29,44 @@ def _get_client() -> OpenAI:
     if _client is None:
         _client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
     return _client
+
+
+def generate_image(prompt: str) -> tuple[bytes, dict]:
+    """Generate one image from a text prompt via gpt-image-1.
+
+    Returns (png_bytes, usage_row). usage_row is shaped like accumulate_usage's
+    output so it can be persisted straight to chat_history:
+        {"model_used", "prompt_tokens", "completion_tokens", "cost_usd"}
+    Raises on API error — callers should catch and surface a friendly message.
+    """
+    client = _get_client()
+
+    kwargs: dict = {"model": IMAGE_MODEL, "prompt": prompt, "size": IMAGE_SIZE, "n": 1}
+    if IMAGE_MODEL.startswith("gpt-image"):
+        # gpt-image-1 always returns b64 and rejects response_format.
+        kwargs["quality"] = IMAGE_QUALITY
+    else:
+        # dall-e-* return a URL by default — ask for b64 so we handle it uniformly.
+        kwargs["response_format"] = "b64_json"
+
+    resp = client.images.generate(**kwargs)
+    item = resp.data[0]
+    b64 = getattr(item, "b64_json", None)
+    if b64:
+        data = base64.b64decode(b64)
+    else:
+        # Fallback: model returned a URL instead of inline b64 — fetch it.
+        import urllib.request
+
+        with urllib.request.urlopen(item.url) as r:  # noqa: S310 (trusted OpenAI URL)
+            data = r.read()
+    usage = {
+        "model_used": IMAGE_MODEL,
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "cost_usd": IMAGE_GEN_COST_USD,
+    }
+    return data, usage
 
 
 def _token_kwargs(model: str, n: int) -> dict:

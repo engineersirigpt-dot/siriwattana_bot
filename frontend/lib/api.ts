@@ -115,6 +115,14 @@ export type StreamDone = {
   source_file?: string | null;
   turn_count?: number | null;
   turn_limit?: number | null;
+  // Present only for AI image-generation answers (source="image_gen"): the
+  // saved image, rendered inline on the bot bubble.
+  attachments?: Array<{
+    id: number;
+    filename: string;
+    content_type: string;
+    size_bytes: number;
+  }>;
 };
 
 // Streaming twin of sendChat for text-only questions. Calls onDelta for each

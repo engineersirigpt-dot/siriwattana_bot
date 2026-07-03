@@ -794,6 +794,40 @@ def save_attachment_pg(
     }
 
 
+def count_images_today_pg(user_id: int) -> int:
+    """How many images this user has generated today (Asia/Bangkok calendar day).
+
+    created_at is timestamptz; `AT TIME ZONE 'Asia/Bangkok'` converts it to the
+    local wall-clock so the quota resets at Thai midnight, not UTC midnight.
+    """
+    with get_pg_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT COUNT(*) FROM image_generations
+                WHERE user_id = %s
+                  AND (created_at AT TIME ZONE 'Asia/Bangkok')::date
+                      = (now() AT TIME ZONE 'Asia/Bangkok')::date
+                """,
+                (user_id,),
+            )
+            row = cur.fetchone()
+    return int(row[0]) if row else 0
+
+
+def record_image_generation_pg(user_id: int, prompt: str, cost_usd: float) -> None:
+    """Log one generated image so it counts against the daily quota."""
+    with get_pg_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO image_generations (user_id, prompt, cost_usd)
+                VALUES (%s, %s, %s)
+                """,
+                (user_id, (prompt or "")[:2000], cost_usd),
+            )
+
+
 def list_message_attachments_pg(message_id: int) -> list[dict]:
     with get_pg_conn() as conn:
         with conn.cursor() as cur:

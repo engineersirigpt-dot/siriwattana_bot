@@ -466,7 +466,15 @@ export default function ChatPage() {
   function hydrateMessages(loaded: LoadedMessage[]): Msg[] {
     const result: Msg[] = [];
     for (const m of loaded) {
-      result.push({ role: "user", text: m.question, attachments: m.attachments ?? [] });
+      // Attachments live on the chat_history row (which holds both Q and A).
+      // For AI-generated images the attachment is the bot's OUTPUT, so it
+      // belongs on the bot bubble; everything else is a user upload.
+      const isBotImage = m.source === "image_gen";
+      result.push({
+        role: "user",
+        text: m.question,
+        attachments: isBotImage ? [] : m.attachments ?? [],
+      });
       result.push({
         role: "bot",
         text: m.answer,
@@ -476,6 +484,7 @@ export default function ChatPage() {
         question: m.question,
         id: m.id,
         myVote: m.my_vote ?? null,
+        attachments: isBotImage ? m.attachments ?? [] : undefined,
       });
     }
     return result;
@@ -1018,6 +1027,11 @@ export default function ChatPage() {
               source_file: meta.source_file ?? null,
               id: meta.message_id ?? undefined,
               streaming: false,
+              // AI-generated image (source="image_gen") rides along on the
+              // done event so it renders inline on this bot bubble.
+              ...(meta.attachments && meta.attachments.length > 0
+                ? { attachments: meta.attachments }
+                : {}),
             });
             setCurrentSid(meta.session_id);
             if (typeof meta.turn_count === "number") setTurnCount(meta.turn_count);
