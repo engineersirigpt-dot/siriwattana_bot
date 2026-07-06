@@ -42,10 +42,12 @@ from db import get_db
 from llm import (
     LLM_MODEL,
     LLM_MODEL_CALC,
+    WEB_SEARCH_MODEL,
     accumulate_usage,
     answer_freely,
     answer_from_context,
     answer_with_files,
+    answer_with_web_search,
     classify_query,
     generate_image,
     stream_freely,
@@ -655,6 +657,125 @@ def _count_session_turns(session_id: int) -> int:
     return int(row["n"]) if row else 0
 
 
+# ── Live web search ─────────────────────────────────────────────────────────
+# Route to a web-searching model only when the question clearly wants FRESH
+# info (news, today's prices, latest rules). Keeps normal/company questions on
+# the fast, cheap pipeline. Over-triggering is low-risk (capped per day), so we
+# lean slightly inclusive on the obvious "live info" signals.
+_WEB_SEARCH_INTENT_RE = re.compile(
+    r"ล่าสุด|ตอนนี้|ขณะนี้|วันนี้|เมื่อวาน|สัปดาห์นี้|เดือนนี้|ปีนี้|ปัจจุบัน|"
+    r"อัปเดต|อัพเดท|ข่าว|พยากรณ์อากาศ|อากาศ|ค้นเว็บ|ค้นในเน็ต|หาในเน็ต|"
+    r"ราคาทอง|ค่าเงิน|อัตราแลกเปลี่ยน|หุ้น|"
+    r"25[67]\d|20[23]\d|"
+    r"\blatest\b|\btoday\b|\bright now\b|\bcurrent(?:ly)?\b|\bnews\b|"
+    r"\bthis (?:year|week|month)\b|\bas of\b|\bsearch (?:the )?web\b|\bgoogle\b",
+    re.IGNORECASE,
+)
+
+# Per-user cap on live web searches per calendar day (Asia/Bangkok).
+WEB_SEARCH_DAILY_LIMIT = int(os.getenv("WEB_SEARCH_DAILY_LIMIT", "20"))
+
+
+def _is_web_search_request(text: str) -> bool:
+    """True when the question likely needs fresh/live info from the web."""
+    if not text:
+        return False
+    return _WEB_SEARCH_INTENT_RE.search(text) is not None
+
+
+def _format_citations(citations: list[dict]) -> str:
+    """Render url citations as a Markdown source list appended to the answer."""
+    if not citations:
+        return ""
+    lines = ["\n\n**แหล่งอ้างอิง:**"]
+    for c in citations[:5]:
+        title = (c.get("title") or c.get("url") or "").strip()
+        url = c.get("url") or ""
+        lines.append(f"- [{title}]({url})")
+    return "\n".join(lines)
+
+
+def _try_web_search_answer(
+    user: dict, question: str, session_id: int | None, mode: str, request: Request
+) -> dict | None:
+    """Handle a live-web-search question, or return None to fall through.
+
+    Returns None when: not a web-search request, company mode, or the search
+    failed (so the caller runs the normal brain/KB/LLM pipeline instead).
+    On success/quota-hit returns a result dict:
+        {answer, source, session_id, session_title, message_id}
+    """
+    if mode == "company" or not _is_web_search_request(question):
+        return None
+
+    from chat_pg import (
+        count_web_searches_today_pg,
+        ensure_session_pg,
+        get_session_history_pg,
+        record_web_search_pg,
+        save_chat_message_pg,
+    )
+
+    used = count_web_searches_today_pg(user["id"])
+    if used >= WEB_SEARCH_DAILY_LIMIT:
+        sid, stitle = ensure_session_pg(
+            user_id=user["id"], session_id=session_id,
+            first_question=question, mode=mode,
+        )
+        text = (
+            f"ขออภัยค่ะ วันนี้ค้นเว็บครบ {WEB_SEARCH_DAILY_LIMIT} ครั้งแล้ว "
+            "(จำกัดเพื่อคุมค่าใช้จ่าย) กรุณาลองใหม่พรุ่งนี้ค่ะ 🙏"
+        )
+        mid = save_chat_message_pg(
+            user_id=user["id"], session_id=sid, question=question,
+            answer=text, source="web_limit", knowledge_id=None, mode=mode,
+        )
+        return {
+            "answer": text, "source": "web_limit", "session_id": sid,
+            "session_title": stitle, "message_id": mid,
+        }
+
+    history = get_session_history_pg(
+        session_id=session_id, user_id=user["id"], limit=HISTORY_TURNS,
+    )
+    try:
+        answer, citations, ws_usage = answer_with_web_search(question, history=history)
+    except Exception as e:
+        audit_log(
+            "web_search_failed",
+            user=user,
+            detail={"error": str(e)[:300], "prompt": question[:200]},
+            request=request,
+        )
+        return None  # fall through to the normal pipeline
+
+    answer = (answer + _format_citations(citations)).strip()
+    usage_row = accumulate_usage(ws_usage, primary_model=WEB_SEARCH_MODEL)
+    sid, stitle = ensure_session_pg(
+        user_id=user["id"], session_id=session_id,
+        first_question=question, mode=mode,
+    )
+    mid = save_chat_message_pg(
+        user_id=user["id"], session_id=sid, question=question,
+        answer=answer, source="web", knowledge_id=None, mode=mode,
+        usage=usage_row,
+    )
+    record_web_search_pg(user["id"], question, ws_usage.get("cost_usd", 0.0))
+    audit_log(
+        "web_search",
+        user=user,
+        detail={
+            "session_id": sid, "message_id": mid,
+            "n_citations": len(citations), "prompt": question[:200],
+        },
+        request=request,
+    )
+    return {
+        "answer": answer, "source": "web", "session_id": sid,
+        "session_title": stitle, "message_id": mid,
+    }
+
+
 def _get_session_history(conn, session_id: int | None, user_id: int) -> list[dict]:
     if not session_id:
         return []
@@ -907,6 +1028,22 @@ async def chat(
             turn_count=_count_session_turns(res["session_id"]),
             turn_limit=MAX_TURNS_PER_SESSION,
         )
+
+    # Live web search intent (postgres only — mirrors /chat/stream). Returns
+    # None to fall through to the normal pipeline on non-match / failure.
+    if question and not files and use_postgres_auth():
+        ws = _try_web_search_answer(user, question, session_id, mode, request)
+        if ws is not None:
+            return ChatResponse(
+                answer=ws["answer"],
+                source=ws["source"],
+                similarity=None,
+                session_id=ws["session_id"],
+                session_title=ws["session_title"],
+                message_id=ws["message_id"],
+                turn_count=_count_session_turns(ws["session_id"]),
+                turn_limit=MAX_TURNS_PER_SESSION,
+            )
 
     saved_files: list[dict] = []
     # Initialised here so it's defined regardless of which branch (files vs RAG
@@ -1468,6 +1605,23 @@ async def chat_stream(
                 if res["attachment"]:
                     done_evt["attachments"] = [res["attachment"]]
                 yield ev(done_evt)
+                return
+
+            # 3.6) Live web search — questions wanting fresh info ("ข่าวล่าสุด",
+            #      "ราคาทองวันนี้"). Skipped in company mode; falls through to
+            #      the normal pipeline if the search fails or quota is hit-and-
+            #      returned. Non-streaming (search is slow) — emitted as one delta.
+            ws = _try_web_search_answer(user, question, session_id, mode, request)
+            if ws is not None:
+                yield ev({"type": "delta", "v": ws["answer"]})
+                yield ev({
+                    "type": "done", "source": ws["source"],
+                    "session_id": ws["session_id"],
+                    "session_title": ws["session_title"],
+                    "message_id": ws["message_id"],
+                    "turn_count": _count_session_turns(ws["session_id"]),
+                    "turn_limit": MAX_TURNS_PER_SESSION,
+                })
                 return
 
             # 4) Normal answer — stream the LLM tokens.

@@ -828,6 +828,36 @@ def record_image_generation_pg(user_id: int, prompt: str, cost_usd: float) -> No
             )
 
 
+def count_web_searches_today_pg(user_id: int) -> int:
+    """How many web searches this user ran today (Asia/Bangkok calendar day)."""
+    with get_pg_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT COUNT(*) FROM web_searches
+                WHERE user_id = %s
+                  AND (created_at AT TIME ZONE 'Asia/Bangkok')::date
+                      = (now() AT TIME ZONE 'Asia/Bangkok')::date
+                """,
+                (user_id,),
+            )
+            row = cur.fetchone()
+    return int(row[0]) if row else 0
+
+
+def record_web_search_pg(user_id: int, query: str, cost_usd: float) -> None:
+    """Log one web search so it counts against the daily quota."""
+    with get_pg_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO web_searches (user_id, query, cost_usd)
+                VALUES (%s, %s, %s)
+                """,
+                (user_id, (query or "")[:2000], cost_usd),
+            )
+
+
 def list_message_attachments_pg(message_id: int) -> list[dict]:
     with get_pg_conn() as conn:
         with conn.cursor() as cur:

@@ -360,6 +360,27 @@ def init_pg_schema() -> None:
                 """
             )
 
+            # Web search log — one row per live web search. Powers the per-user
+            # daily quota and the dashboard's web-search spend.
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS web_searches (
+                    id BIGSERIAL PRIMARY KEY,
+                    user_id BIGINT NOT NULL REFERENCES users(id),
+                    query TEXT NOT NULL,
+                    cost_usd NUMERIC(10, 4) NOT NULL DEFAULT 0,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                );
+                """
+            )
+
+            cur.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_web_search_user_created
+                ON web_searches(user_id, created_at DESC);
+                """
+            )
+
 
 def smoke_test_pg() -> None:
     init_pg_schema()

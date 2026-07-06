@@ -24,6 +24,9 @@ MODEL_PRICING_USD_PER_1M_TOKENS: dict[str, dict[str, float]] = {
     "gpt-4.1-nano":    {"input": 0.10,  "output": 0.40},
     "gpt-4o":          {"input": 2.50,  "output": 10.00},
     "gpt-4o-mini":     {"input": 0.15,  "output": 0.60},
+    # Web-search-enabled model. Token rates match gpt-4o; the per-call search
+    # fee is added separately in llm.WEB_SEARCH_SURCHARGE_USD.
+    "gpt-4o-search-preview": {"input": 2.50, "output": 10.00},
     "gpt-5":           {"input": 1.25,  "output": 10.00},
     "gpt-5-mini":      {"input": 0.25,  "output": 2.00},
     "gpt-5-nano":      {"input": 0.05,  "output": 0.40},

@@ -469,6 +469,67 @@ def answer_freely(
     return text, _extract_usage(res, chosen)
 
 
+# Web search — for questions needing fresh/live info (news, today's prices,
+# latest regulations). Uses OpenAI's search-enabled model so we reuse the same
+# API key; the model browses and returns url citations in message.annotations.
+WEB_SEARCH_MODEL = os.getenv("WEB_SEARCH_MODEL", "gpt-4o-search-preview")
+# Flat surcharge per search on top of token cost (OpenAI bills web-search tool
+# calls separately). ~$0.03/search is a safe estimate for the dashboard.
+WEB_SEARCH_SURCHARGE_USD = float(os.getenv("WEB_SEARCH_SURCHARGE_USD", "0.03"))
+
+SYSTEM_PROMPT_WEB = (
+    "คุณเป็นผู้ช่วยของบริษัทศิริวัฒนาอินเตอร์พริ้นท์ ที่ค้นข้อมูลสดจากเว็บมาตอบ\n"
+    "- ตอบเป็นภาษาไทย กระชับ ตรงประเด็น เป็นข้อ ๆ ถ้าเหมาะสม\n"
+    "- ใช้ข้อมูลล่าสุดจากผลการค้นหา และระบุตัวเลข/วันที่ให้ชัด\n"
+    "- ถ้าข้อมูลไม่แน่ชัดหรือขัดแย้งกัน ให้บอกตามตรง อย่าเดา\n"
+    "- ไม่ต้องใส่รายการแหล่งอ้างอิงเอง ระบบจะแนบลิงก์ให้อัตโนมัติ"
+)
+
+
+def answer_with_web_search(
+    question: str,
+    history: list[dict] | None = None,
+) -> tuple[str, list[dict], dict]:
+    """Answer a question using live web search.
+
+    Returns (answer_text, citations, usage):
+        citations: [{"title": str, "url": str}, ...] extracted from the model's
+                   url_citation annotations.
+        usage: per-call dict (like _extract_usage) with the web-search surcharge
+               already folded into cost_usd.
+    Raises on API error — the caller falls back to the normal pipeline.
+    """
+    messages: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT_WEB}]
+    if history:
+        messages.extend(history)
+    messages.append({"role": "user", "content": question})
+
+    # Search-preview models reject temperature/some params — keep the call minimal.
+    res = _get_client().chat.completions.create(
+        model=WEB_SEARCH_MODEL,
+        messages=messages,
+        max_tokens=4000,
+    )
+    msg = res.choices[0].message
+    text = (msg.content or "").strip()
+
+    citations: list[dict] = []
+    seen_urls: set[str] = set()
+    for ann in (getattr(msg, "annotations", None) or []):
+        if getattr(ann, "type", None) != "url_citation":
+            continue
+        uc = getattr(ann, "url_citation", None)
+        url = getattr(uc, "url", None) if uc else None
+        if not url or url in seen_urls:
+            continue
+        seen_urls.add(url)
+        citations.append({"title": getattr(uc, "title", "") or url, "url": url})
+
+    usage = _extract_usage(res, WEB_SEARCH_MODEL)
+    usage["cost_usd"] = usage.get("cost_usd", 0.0) + WEB_SEARCH_SURCHARGE_USD
+    return text, citations, usage
+
+
 def stream_from_context(
     question: str,
     context_question: str,
