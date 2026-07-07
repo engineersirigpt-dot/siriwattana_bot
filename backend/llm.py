@@ -6,7 +6,11 @@ from openai import OpenAI
 
 from pricing import estimate_cost_usd
 
-LLM_MODEL = os.getenv("LLM_MODEL", "gpt-4.1")
+# Main answer model. gpt-5 (better instruction-following + reasoning) is the
+# default; override with the LLM_MODEL env var (e.g. back to "gpt-4.1") without
+# a rebuild. Cost is tracked per-answer in the dashboard so the swap is easy to
+# evaluate/revert.
+LLM_MODEL = os.getenv("LLM_MODEL", "gpt-5")
 LLM_MODEL_FILES = os.getenv("LLM_MODEL_FILES", "gpt-4.1")
 LLM_MODEL_CALC = os.getenv("LLM_MODEL_CALC", "gpt-5-mini")
 # Keep classifier on the cheapest model — it just routes "general" vs "calc",
