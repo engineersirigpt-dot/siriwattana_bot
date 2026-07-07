@@ -183,6 +183,12 @@ function isAcceptedFile(f: File): boolean {
 // more — only the user-facing modes (normal vs. คู่มือบริษัท) remain.
 type ChatMode = "normal" | "company";
 
+// Feature flag: the "คู่มือบริษัท" (company manual) mode is hidden for now —
+// management wants to focus on general chat quality first and revisit company
+// mode once the internal knowledge base is richer. Flip to `true` to bring the
+// mode button + banner back; all the underlying code stays intact.
+const COMPANY_MODE_ENABLED = false;
+
 const STARTER_COUNT = 3;
 const STARTER_PROMPTS: Record<ChatMode, string[]> = {
   company: [
@@ -505,8 +511,10 @@ export default function ChatPage() {
       }>(`/chat/sessions/${sid}`);
       setMessages(hydrateMessages(data.messages));
       // Restore the toggle to whatever mode the user was last in on this session.
+      // While company mode is disabled, coerce any old company-mode chat to
+      // normal so the banner never resurfaces.
       setChatMode(
-        data.mode === "company" ? "company" : "normal",
+        COMPANY_MODE_ENABLED && data.mode === "company" ? "company" : "normal",
       );
       // Reseed the per-session counter from server so the UI is correct even
       // if the user reopens a chat from another tab/device.
@@ -1221,13 +1229,15 @@ export default function ChatPage() {
             <Plus size={20} />
             <span>แชทใหม่</span>
           </button>
-          <button
-            onClick={() => newChat("company")}
-            className="w-full flex items-center justify-center gap-2 bg-amber-400/30 hover:bg-amber-400/50 text-white py-3 px-4 rounded-xl transition-all backdrop-blur-sm border border-amber-200/40 shadow-lg"
-          >
-            <span className="text-base">📘</span>
-            <span>คู่มือบริษัท</span>
-          </button>
+          {COMPANY_MODE_ENABLED && (
+            <button
+              onClick={() => newChat("company")}
+              className="w-full flex items-center justify-center gap-2 bg-amber-400/30 hover:bg-amber-400/50 text-white py-3 px-4 rounded-xl transition-all backdrop-blur-sm border border-amber-200/40 shadow-lg"
+            >
+              <span className="text-base">📘</span>
+              <span>คู่มือบริษัท</span>
+            </button>
+          )}
         </div>
 
         <form onSubmit={runSearch} className="px-4 pb-3">
