@@ -12,7 +12,41 @@ import hashlib
 import logging
 import os
 
+from jose import JWTError, jwt
+
 logger = logging.getLogger(__name__)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MI single-sign-on (SSO) — the central MI portal issues an HS256 JWT signed
+# with a secret shared between MI and this app, and redirects the browser to
+# our /sso page with ?token=<JWT>. We verify the signature + expiry and read
+# the employee id from the payload. MI's token shape:
+#   {user_id, user_name, user_account, emp_id, user_expired, iat, exp}
+# ─────────────────────────────────────────────────────────────────────────────
+
+MI_JWT_SECRET = os.getenv("MI_JWT_SECRET", "").strip()
+MI_JWT_ALG = "HS256"
+
+
+def mi_sso_enabled() -> bool:
+    """True if the shared MI SSO secret is configured."""
+    return bool(MI_JWT_SECRET)
+
+
+def decode_mi_sso_token(token: str) -> dict | None:
+    """Verify an MI SSO JWT and return its payload.
+
+    Returns None on: no secret configured, empty token, bad signature, or
+    expired token (jose checks `exp` automatically). Never raises.
+    """
+    if not MI_JWT_SECRET or not token:
+        return None
+    try:
+        return jwt.decode(token, MI_JWT_SECRET, algorithms=[MI_JWT_ALG])
+    except JWTError as exc:
+        logger.info("MI SSO token rejected: %s", exc)
+        return None
 
 
 MI_DB_SERVER = os.getenv("MI_DB_SERVER", "").strip()

@@ -63,6 +63,27 @@ export async function login(username: string, password: string) {
   return res.json() as Promise<{ access_token: string; role: string; username: string }>;
 }
 
+// Exchange an MI-issued SSO token (from the central MI portal) for our own
+// session. The /sso page calls this with the ?token= it received from MI.
+export async function miSsoLogin(token: string) {
+  const res = await fetch(`${API_BASE}/auth/mi-sso`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ token }),
+  });
+  if (!res.ok) {
+    let detail = "";
+    try {
+      const body = await res.json();
+      detail = typeof body?.detail === "string" ? body.detail : "";
+    } catch {
+      detail = "";
+    }
+    throw new Error(detail || "เข้าสู่ระบบผ่าน MI ไม่สำเร็จ");
+  }
+  return res.json() as Promise<{ access_token: string; role: string; username: string }>;
+}
+
 export async function sendChat(opts: {
   message: string;
   sessionId: number | null;

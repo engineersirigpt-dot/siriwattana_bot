@@ -414,6 +414,89 @@ def _ensure_mi_user_provisioned(username: str) -> dict:
     return {"id": new_id, "username": username, "role": "user", "is_disabled": False}
 
 
+class MiSsoIn(BaseModel):
+    token: str
+
+
+@app.post("/auth/mi-sso")
+@limiter.limit("30/minute")
+def mi_sso_login(request: Request, body: MiSsoIn):
+    """Single-sign-on entry from the central MI portal.
+
+    The frontend /sso page forwards the MI-issued JWT here. We verify it with
+    the shared MI_JWT_SECRET, provision/find the local user by emp_id, and
+    return our own session token — same response shape as /auth/login.
+    Roles come from the local user record (existing admins keep 'admin';
+    first-time MI users get 'user').
+    """
+    from mi_auth import decode_mi_sso_token, mi_sso_enabled
+
+    if not mi_sso_enabled():
+        raise HTTPException(503, "MI SSO ยังไม่ได้เปิดใช้งาน (ยังไม่ได้ตั้ง MI_JWT_SECRET)")
+
+    payload = decode_mi_sso_token(body.token)
+    if not payload:
+        audit_log(
+            "mi_sso_failed",
+            detail={"reason": "invalid_or_expired_token"},
+            request=request,
+        )
+        raise HTTPException(401, "Token จาก MI ไม่ถูกต้องหรือหมดอายุ")
+
+    # Reject MI accounts flagged expired (matches MI's `user_expired = 0` = active).
+    try:
+        expired = int(payload.get("user_expired", 0)) != 0
+    except (TypeError, ValueError):
+        expired = False
+    if expired:
+        raise HTTPException(403, "บัญชี MI นี้หมดอายุการใช้งาน")
+
+    emp_id = str(payload.get("emp_id") or payload.get("user_account") or "").strip()
+    if not emp_id:
+        audit_log("mi_sso_failed", detail={"reason": "no_emp_id"}, request=request)
+        raise HTTPException(401, "Token ไม่มี emp_id")
+
+    user_row = _ensure_mi_user_provisioned(emp_id)
+
+    if user_row.get("is_disabled"):
+        audit_log(
+            "login_blocked_disabled",
+            user={
+                "id": user_row["id"],
+                "username": user_row["username"],
+                "role": user_row["role"],
+            },
+            detail={"auth_source": "mi_sso", "emp_id": emp_id},
+            request=request,
+        )
+        raise HTTPException(403, "บัญชีนี้ถูกระงับการใช้งาน กรุณาติดต่อ admin")
+
+    token = create_token(user_row["id"], user_row["username"], user_row["role"])
+
+    audit_log(
+        "login_success",
+        user={
+            "id": user_row["id"],
+            "username": user_row["username"],
+            "role": user_row["role"],
+        },
+        detail={
+            "auth_source": "mi_sso",
+            "emp_id": emp_id,
+            "mi_user_name": payload.get("user_name"),
+            "db_engine": "postgres" if use_postgres_auth() else "sqlite",
+        },
+        request=request,
+    )
+
+    return {
+        "access_token": token,
+        "token_type": "bearer",
+        "username": user_row["username"],
+        "role": user_row["role"],
+    }
+
+
 @app.get("/auth/me")
 def me(user: dict = Depends(current_user)):
     return user
