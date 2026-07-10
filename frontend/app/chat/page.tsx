@@ -175,9 +175,6 @@ function isAcceptedFile(f: File): boolean {
   return OFFICE_EXTS.has(ext) || TEXT_EXTS.has(ext);
 }
 
-// Pools of example questions shown on an empty chat. We sample 3 at random
-// each time a fresh chat opens (see STARTER_COUNT), so users see variety on
-// reload. Mode-aware: company manual vs. general assistant.
 // "brain" used to be a third mode toggle for the central AI Brain. It's now
 // queried automatically on every chat, so we don't expose it as a mode any
 // more — only the user-facing modes (normal vs. คู่มือบริษัท) remain.
@@ -188,34 +185,6 @@ type ChatMode = "normal" | "company";
 // mode once the internal knowledge base is richer. Flip to `true` to bring the
 // mode button + banner back; all the underlying code stays intact.
 const COMPANY_MODE_ENABLED = false;
-
-const STARTER_COUNT = 3;
-const STARTER_PROMPTS: Record<ChatMode, string[]> = {
-  company: [
-    "สรุปขั้นตอนการลางานของบริษัท",
-    "นโยบายการเบิกค่าใช้จ่ายมีอะไรบ้าง",
-    "ติดต่อฝ่าย HR / ฝ่ายบุคคล ได้อย่างไร",
-    "สวัสดิการพนักงานมีอะไรบ้าง",
-    "ขั้นตอนการเบิกวันลาพักร้อนทำอย่างไร",
-    "ระเบียบการเข้า-ออกงาน และการตอกบัตรเป็นอย่างไร",
-    "ขั้นตอนการขอใบรับรองเงินเดือนทำอย่างไร",
-    "นโยบายความปลอดภัยในโรงงานมีอะไรบ้าง",
-    "วิธีแจ้งลาป่วยและส่งใบรับรองแพทย์",
-    "ติดต่อแผนก IT / ฝ่ายซ่อมบำรุง ได้อย่างไร",
-  ],
-  normal: [
-    "ช่วยร่างอีเมลแจ้งลูกค้าเรื่องเลื่อนนัดหมาย",
-    "สรุปประเด็นสำคัญจากข้อความที่แนบให้หน่อย",
-    "ช่วยสรุปงานนี้เป็นขั้นตอนทำทีละสเต็ป",
-    "ช่วยร่างข้อความตอบกลับลูกค้าอย่างสุภาพ",
-    "ช่วยแปลข้อความนี้เป็นภาษาอังกฤษ",
-    "ช่วยเขียนสรุปการประชุมจากโน้ตที่ให้",
-    "ช่วยตรวจแก้คำผิดและปรับสำนวนข้อความนี้",
-    "ช่วยคิดหัวข้ออีเมลให้น่าสนใจ 5 แบบ",
-    "ช่วยร่างประกาศภายในบริษัทสั้นๆ",
-    "ช่วยสรุปไฟล์เอกสารที่แนบเป็นข้อๆ",
-  ],
-};
 
 // Which export format the user's request asked for (drives the download button
 // under the matching answer). Mirrors the backend keyword set. Returns null
@@ -246,15 +215,6 @@ function hasMarkdownTable(text: string): boolean {
   return false;
 }
 
-// Pick `n` distinct random items from `arr` (Fisher-Yates partial shuffle).
-function sampleN<T>(arr: T[], n: number): T[] {
-  const copy = [...arr];
-  for (let i = copy.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [copy[i], copy[j]] = [copy[j], copy[i]];
-  }
-  return copy.slice(0, n);
-}
 
 function groupBySaved(sessions: Session[]) {
   const groups: Record<string, Session[]> = {
@@ -315,12 +275,6 @@ export default function ChatPage() {
   const [isDragging, setIsDragging] = useState(false);
   const [typingIndex, setTypingIndex] = useState<number | null>(null);
   const [typedChars, setTypedChars] = useState(0);
-  // Bumped on each "new chat" so the starter-prompt sample reshuffles.
-  const [starterSeed, setStarterSeed] = useState(0);
-  // Sampled client-side (in an effect) — NOT during render — so Math.random
-  // can't desync server vs client HTML (hydration mismatch). Empty on the
-  // server; filled right after mount, then on mode change / new chat.
-  const [starters, setStarters] = useState<string[]>([]);
   const [chatMode, setChatMode] = useState<ChatMode>("normal");
   // Per-session question budget. Server is the source of truth: every /chat
   // response refreshes turnCount, and loadSession seeds it from the GET.
@@ -383,11 +337,6 @@ export default function ChatPage() {
     if (role === "admin") refreshTeamSessions();
   }, [role]);
 
-  // Reshuffle the starter prompts (client-side only) on mount, mode change,
-  // and each new chat (starterSeed bump).
-  useEffect(() => {
-    setStarters(sampleN(STARTER_PROMPTS[chatMode], STARTER_COUNT));
-  }, [chatMode, starterSeed]);
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
@@ -714,7 +663,6 @@ export default function ChatPage() {
     setChatMode(mode);
     setTurnCount(0);
     setSharedToken(null);
-    setStarterSeed((s) => s + 1);
   }
 
   // เปิด dialog แชร์ — admin: เลือกผู้รับได้; user ปกติ: copy link อย่างเดียว
@@ -1734,31 +1682,6 @@ export default function ChatPage() {
                   </>
                 ) : (
                   <p>พิมพ์คำถามเกี่ยวกับบริษัทหรือคำถามทั่วไปได้เลย</p>
-                )}
-                {/* Starter prompts — give new users a sense of what to ask.
-                    Clicking fills the box (doesn't auto-send) so they can edit.
-                    Sampled client-side, so empty until after mount. Hidden in
-                    company mode — that mode is a focused expert entry point, no
-                    generic suggestions. */}
-                {!readOnlyOwner && chatMode !== "company" && starters.length > 0 && (
-                  <div className="mt-6 flex flex-wrap justify-center gap-2 max-w-xl mx-auto">
-                    <span className="w-full text-xs text-gray-400 mb-1">
-                      ตัวอย่างคำถาม
-                    </span>
-                    {starters.map((p) => (
-                      <button
-                        key={p}
-                        type="button"
-                        onClick={() => {
-                          setInput(p);
-                          inputRef.current?.focus();
-                        }}
-                        className="px-3 py-2 text-sm text-gray-600 bg-white border border-gray-200 rounded-xl hover:border-purple-300 hover:text-purple-700 hover:bg-purple-50 transition-all shadow-sm"
-                      >
-                        {p}
-                      </button>
-                    ))}
-                  </div>
                 )}
               </div>
             )}
