@@ -54,7 +54,8 @@ services:
       context: ./frontend
       args:
         # Baked into the JS bundle at build time. Team's browser hits this URL.
-        NEXT_PUBLIC_API_BASE: http://192.168.5.32:8010
+        # Production server = 192.168.5.31.
+        NEXT_PUBLIC_API_BASE: http://192.168.5.31:8010
     container_name: siriwattana-frontend-prod
     ports:
       - "3031:3000"
