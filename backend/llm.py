@@ -11,6 +11,14 @@ from pricing import estimate_cost_usd
 # a rebuild. Cost is tracked per-answer in the dashboard so the swap is easy to
 # evaluate/revert.
 LLM_MODEL = os.getenv("LLM_MODEL", "gpt-5")
+
+# How hard gpt-5 / o-series "think" before answering. The API default (medium)
+# put a simple chat answer at 30-40s — unusable for an interactive assistant.
+# "low" keeps gpt-5's language quality, knowledge and instruction-following
+# (incl. the anti-fabrication rules) while cutting the deep multi-step
+# deliberation that only pays off on hard problems. Tune without a rebuild:
+# minimal | low | medium | high.
+LLM_REASONING_EFFORT = os.getenv("LLM_REASONING_EFFORT", "low")
 LLM_MODEL_FILES = os.getenv("LLM_MODEL_FILES", "gpt-4.1")
 LLM_MODEL_CALC = os.getenv("LLM_MODEL_CALC", "gpt-5-mini")
 # Keep classifier on the cheapest model — it just routes "general" vs "calc",
@@ -73,11 +81,29 @@ def generate_image(prompt: str) -> tuple[bytes, dict]:
     return data, usage
 
 
-def _token_kwargs(model: str, n: int) -> dict:
-    """gpt-5-* and o1/o3 use max_completion_tokens; older models use max_tokens."""
+def _is_reasoning_model(model: str) -> bool:
     m = model.lower()
-    if m.startswith("gpt-5") or m.startswith("o1") or m.startswith("o3") or m.startswith("o4"):
-        return {"max_completion_tokens": n}
+    return (
+        m.startswith("gpt-5")
+        or m.startswith("o1")
+        or m.startswith("o3")
+        or m.startswith("o4")
+    )
+
+
+def _model_kwargs(model: str, n: int) -> dict:
+    """Per-model call kwargs.
+
+    Reasoning models (gpt-5-*, o-series) take max_completion_tokens (not
+    max_tokens) and accept reasoning_effort — we pass LLM_REASONING_EFFORT so
+    chat answers stay fast. Older models (gpt-4.1, gpt-4o-mini) take max_tokens
+    and reject reasoning_effort, so they get neither.
+    """
+    if _is_reasoning_model(model):
+        return {
+            "max_completion_tokens": n,
+            "reasoning_effort": LLM_REASONING_EFFORT,
+        }
     return {"max_tokens": n}
 
 
@@ -407,7 +433,7 @@ def classify_query(question: str) -> tuple[str, dict]:
                 {"role": "system", "content": CLASSIFY_PROMPT},
                 {"role": "user", "content": question},
             ],
-            **_token_kwargs(LLM_MODEL_CLASSIFIER, 5),
+            **_model_kwargs(LLM_MODEL_CLASSIFIER, 5),
         )
         text = (res.choices[0].message.content or "").strip().lower()
         category = "calc" if "calc" in text else "general"
@@ -445,7 +471,7 @@ def answer_from_context(
     res = _get_client().chat.completions.create(
         model=chosen,
         messages=messages,
-        **_token_kwargs(chosen, 8000),
+        **_model_kwargs(chosen, 8000),
     )
     text = (res.choices[0].message.content or "").strip()
     return text, _extract_usage(res, chosen)
@@ -471,7 +497,7 @@ def answer_freely(
     res = _get_client().chat.completions.create(
         model=chosen,
         messages=messages,
-        **_token_kwargs(chosen, 8000),
+        **_model_kwargs(chosen, 8000),
     )
     text = (res.choices[0].message.content or "").strip()
     return text, _extract_usage(res, chosen)
@@ -573,7 +599,7 @@ def stream_from_context(
         model=chosen,
         messages=messages,
         stream=True,
-        **_token_kwargs(chosen, 8000),
+        **_model_kwargs(chosen, 8000),
     )
     if usage_holder is not None:
         stream_kwargs["stream_options"] = {"include_usage": True}
@@ -609,7 +635,7 @@ def stream_freely(
         model=chosen,
         messages=messages,
         stream=True,
-        **_token_kwargs(chosen, 8000),
+        **_model_kwargs(chosen, 8000),
     )
     if usage_holder is not None:
         stream_kwargs["stream_options"] = {"include_usage": True}
@@ -662,7 +688,7 @@ def answer_with_files(
     res = _get_client().chat.completions.create(
         model=LLM_MODEL_FILES,
         messages=messages,
-        **_token_kwargs(LLM_MODEL_FILES, 8000),
+        **_model_kwargs(LLM_MODEL_FILES, 8000),
     )
     text = (res.choices[0].message.content or "").strip()
     return text, _extract_usage(res, LLM_MODEL_FILES)
