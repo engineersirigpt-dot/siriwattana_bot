@@ -4,7 +4,13 @@ __pycache__
 *.pyo
 *.pyd
 .env
+# Runtime data dirs — bind-mounted at run time (./backend/data-prod:/app/data),
+# never needed in the image. They also hold root-owned files written by the
+# container (e.g. LibreOffice profiles from document translation), which make
+# the build context unreadable to the host user and fail the build.
 data
+data-prod
+data-*
 *.db
 *.db-shm
 *.db-wal
