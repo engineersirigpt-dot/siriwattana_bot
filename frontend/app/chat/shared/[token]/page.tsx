@@ -123,11 +123,6 @@ export default function SharedChatPage() {
                 <span className="font-medium text-purple-700">
                   {session.owner_username}
                 </span>
-                {session.mode === "company" && (
-                  <span className="ml-1 bg-amber-100 text-amber-800 text-[10px] px-1.5 py-0.5 rounded">
-                    📘 คู่มือบริษัท
-                  </span>
-                )}
               </p>
               <h1 className="text-base sm:text-lg font-medium text-gray-800 truncate">
                 {session.title}
