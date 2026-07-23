@@ -74,10 +74,24 @@ echo "        OK  ${DB_SIZE}"
 echo ""
 echo "[2/3] Archiving uploads -> ${UPLOADS_BACKUP_FILE}"
 
+# The container writes some files as root (uploads, LibreOffice profiles from
+# document translation), so tar run as the host user can hit "permission
+# denied". That must NOT abort the run — the database dump above is the
+# critical part and has already succeeded. --ignore-failed-read skips
+# unreadable files; we report a warning instead of failing the whole backup.
 if [ -d "${UPLOAD_DIR}" ] && [ -n "$(ls -A "${UPLOAD_DIR}" 2>/dev/null)" ]; then
-    tar -czf "${UPLOADS_BACKUP_FILE}" -C "$(dirname "${UPLOAD_DIR}")" "$(basename "${UPLOAD_DIR}")"
-    UP_SIZE="$(du -h "${UPLOADS_BACKUP_FILE}" | cut -f1)"
-    echo "        OK  ${UP_SIZE}"
+    if tar --ignore-failed-read -czf "${UPLOADS_BACKUP_FILE}" \
+           -C "$(dirname "${UPLOAD_DIR}")" "$(basename "${UPLOAD_DIR}")" 2>/tmp/uploads_tar_err.$$; then
+        UP_SIZE="$(du -h "${UPLOADS_BACKUP_FILE}" | cut -f1)"
+        echo "        OK  ${UP_SIZE}"
+    else
+        UP_SIZE="$(du -h "${UPLOADS_BACKUP_FILE}" 2>/dev/null | cut -f1 || echo '0')"
+        echo "        WARNING: uploads archive incomplete (${UP_SIZE}) — some files unreadable."
+        echo "                 Database dump is still valid. First errors:"
+        head -n 3 /tmp/uploads_tar_err.$$ | sed 's/^/                 /' || true
+        echo "                 Fix with: sudo chown -R \$USER:\$USER ${UPLOAD_DIR}"
+    fi
+    rm -f /tmp/uploads_tar_err.$$
 else
     echo "        skipped (upload dir empty or missing: ${UPLOAD_DIR})"
 fi
