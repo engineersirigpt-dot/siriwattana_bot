@@ -2575,6 +2575,7 @@ function AttachmentImage({
   large?: boolean;
 }) {
   const [url, setUrl] = useState<string | null>(null);
+  const [zoomed, setZoomed] = useState(false);
 
   useEffect(() => {
     if (attachment.id < 0) return; // optimistic, no URL yet
@@ -2588,6 +2589,20 @@ function AttachmentImage({
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [attachment.id]);
+
+  // While the lightbox is open: close on ESC and lock background scroll.
+  useEffect(() => {
+    if (!zoomed) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setZoomed(false);
+    };
+    window.addEventListener("keydown", onKey);
+    document.body.style.overflow = "hidden";
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      document.body.style.overflow = "";
+    };
+  }, [zoomed]);
 
   if (!url) {
     return (
@@ -2603,18 +2618,63 @@ function AttachmentImage({
 
   // Generated images (large) show the full picture uncropped at a big size;
   // uploaded thumbnails stay small and cropped to keep the bubble compact.
+  // Clicking opens an in-page lightbox (ChatGPT-style) instead of a new tab.
   return (
-    <a href={url} target="_blank" rel="noreferrer">
-      <img
-        src={url}
-        alt={attachment.filename}
-        className={
-          large
-            ? "w-72 sm:w-80 h-auto rounded-xl object-contain border border-gray-200 shadow-sm hover:opacity-95 transition-opacity"
-            : "w-32 h-32 rounded-lg object-cover border border-white/20 hover:opacity-90 transition-opacity"
-        }
-      />
-    </a>
+    <>
+      <button
+        type="button"
+        onClick={() => setZoomed(true)}
+        className="block cursor-zoom-in"
+        title="กดเพื่อดูรูปเต็ม"
+      >
+        <img
+          src={url}
+          alt={attachment.filename}
+          className={
+            large
+              ? "w-72 sm:w-80 h-auto rounded-xl object-contain border border-gray-200 shadow-sm hover:opacity-95 transition-opacity"
+              : "w-32 h-32 rounded-lg object-cover border border-white/20 hover:opacity-90 transition-opacity"
+          }
+        />
+      </button>
+
+      {zoomed && (
+        <div
+          className="fixed inset-0 z-[100] bg-black/80 backdrop-blur-sm flex items-center justify-center p-4"
+          onClick={() => setZoomed(false)}
+        >
+          {/* Controls (stop propagation so clicks here don't close) */}
+          <div
+            className="absolute top-4 right-4 flex items-center gap-2"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <a
+              href={url}
+              download={attachment.filename || "image.png"}
+              className="w-10 h-10 flex items-center justify-center rounded-full bg-white/15 hover:bg-white/25 text-white transition-colors"
+              title="ดาวน์โหลด"
+            >
+              <FileDown size={18} />
+            </a>
+            <button
+              type="button"
+              onClick={() => setZoomed(false)}
+              className="w-10 h-10 flex items-center justify-center rounded-full bg-white/15 hover:bg-white/25 text-white transition-colors"
+              title="ปิด (ESC)"
+            >
+              <X size={20} />
+            </button>
+          </div>
+
+          <img
+            src={url}
+            alt={attachment.filename}
+            className="max-w-[92vw] max-h-[90vh] object-contain rounded-lg shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          />
+        </div>
+      )}
+    </>
   );
 }
 
