@@ -30,13 +30,18 @@ LLM_MODEL_CLASSIFIER = os.getenv("LLM_MODEL_CLASSIFIER", "gpt-4o-mini")
 # token-based billing varies, so we store a flat per-image cost estimate for
 # the dashboard. high quality (default) ≈ $0.12-0.17/image (~4-6 ฿).
 IMAGE_MODEL = os.getenv("IMAGE_MODEL", "gpt-image-1")
-IMAGE_SIZE = os.getenv("IMAGE_SIZE", "1024x1024")            # default = square
+# "auto" lets gpt-image-1 pick the aspect ratio that fits the content (a
+# landscape scene comes out wide, a portrait subject tall, etc.). Posters are
+# the one case we pin explicitly (see below) so headings never get clipped.
+IMAGE_SIZE = os.getenv("IMAGE_SIZE", "auto")
 IMAGE_SIZE_PORTRAIT = os.getenv("IMAGE_SIZE_PORTRAIT", "1024x1536")  # posters
 IMAGE_QUALITY = os.getenv("IMAGE_QUALITY", "high")           # crisper text
 IMAGE_GEN_COST_USD = float(os.getenv("IMAGE_GEN_COST_USD", "0.12"))
 
-# Poster/flyer/vertical requests → portrait canvas so headings + subtitles have
-# vertical room and don't get clipped at the bottom edge (square was too tight).
+# Poster/flyer/vertical requests → force a portrait canvas so headings +
+# subtitles have vertical room and don't get clipped at the bottom edge.
+# Everything else uses IMAGE_SIZE ("auto") so the model fits the ratio to the
+# content.
 _PORTRAIT_IMAGE_RE = re.compile(
     r"โปสเตอร์|โพสเตอร์|ใบปลิว|แผ่นพับ|ปฏิทิน|การ์ดเชิญ|ป้ายแนวตั้ง|แนวตั้ง|"
     r"poster|flyer|leaflet|portrait|vertical",
@@ -45,7 +50,7 @@ _PORTRAIT_IMAGE_RE = re.compile(
 
 
 def _pick_image_size(prompt: str) -> str:
-    """Portrait canvas for poster-like requests, else the default square."""
+    """Portrait canvas for poster-like requests, else 'auto' (model decides)."""
     if prompt and _PORTRAIT_IMAGE_RE.search(prompt):
         return IMAGE_SIZE_PORTRAIT
     return IMAGE_SIZE
