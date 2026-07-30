@@ -63,6 +63,31 @@ export async function login(username: string, password: string) {
   return res.json() as Promise<{ access_token: string; role: string; username: string }>;
 }
 
+// Voice input: send a recorded audio blob to be transcribed to text.
+export async function transcribeAudio(blob: Blob): Promise<string> {
+  const fd = new FormData();
+  const ext = blob.type.includes("mp4") ? "mp4" : blob.type.includes("ogg") ? "ogg" : "webm";
+  fd.append("audio", blob, `voice.${ext}`);
+  const token = getToken();
+  const res = await fetch(`${API_BASE}/transcribe`, {
+    method: "POST",
+    headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+    body: fd,
+  });
+  if (!res.ok) {
+    let detail = "";
+    try {
+      const b = await res.json();
+      detail = typeof b?.detail === "string" ? b.detail : "";
+    } catch {
+      detail = "";
+    }
+    throw new Error(detail || "ถอดเสียงไม่สำเร็จ");
+  }
+  const data = (await res.json()) as { text: string };
+  return data.text ?? "";
+}
+
 // Exchange an MI-issued SSO token (from the central MI portal) for our own
 // session. The /sso page calls this with the ?token= it received from MI.
 export async function miSsoLogin(token: string) {

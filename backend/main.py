@@ -502,6 +502,50 @@ def me(user: dict = Depends(current_user)):
     return user
 
 
+@app.post("/transcribe")
+@limiter.limit("30/minute")
+async def transcribe(
+    request: Request,
+    audio: UploadFile = File(...),
+    user: dict = Depends(current_user),
+):
+    """Voice input: transcribe a short recording to text for the chat box.
+
+    The frontend mic button records audio and posts it here; we return the text
+    so the user can review/edit before sending.
+    """
+    import os as _os
+    import tempfile
+
+    from llm import transcribe_audio
+
+    data = await audio.read()
+    if not data:
+        raise HTTPException(400, "ไม่พบเสียง")
+    if len(data) > 25 * 1024 * 1024:  # Whisper API hard limit
+        raise HTTPException(400, "ไฟล์เสียงใหญ่เกิน 25MB")
+
+    suffix = _os.path.splitext(audio.filename or "")[1] or ".webm"
+    tmp = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
+    try:
+        tmp.write(data)
+        tmp.close()
+        text = transcribe_audio(tmp.name)
+    finally:
+        try:
+            _os.unlink(tmp.name)
+        except OSError:
+            pass
+
+    audit_log(
+        "voice_transcribed",
+        user=user,
+        detail={"bytes": len(data), "chars": len(text)},
+        request=request,
+    )
+    return {"text": text}
+
+
 def _title_from_question(question: str, max_len: int = 40) -> str:
     one_line = " ".join(question.split())
     return one_line if len(one_line) <= max_len else one_line[: max_len - 1] + "…"
@@ -1194,6 +1238,23 @@ async def chat(
                             att.encode_image_data_url(sf["file_path"], sf["content_type"])
                         )
                         sf["extracted_text"] = None
+                        continue
+
+                    # Audio → transcribe (Whisper) → treat the transcript as the
+                    # file's text so the model can summarise/answer about it.
+                    if att.is_audio(sf["content_type"], sf["filename"]):
+                        from llm import transcribe_audio
+
+                        transcript = transcribe_audio(sf["file_path"])
+                        text = (
+                            f"[ถอดเสียงจากไฟล์เสียง: {sf['filename']}]\n{transcript}"
+                            if transcript
+                            else ""
+                        )
+                        sf["extracted_text"] = text or None
+                        total_text_chars += len(text)
+                        if text:
+                            text_attachments.append((sf["filename"], text))
                         continue
 
                     extracted = att.extract_any_text(

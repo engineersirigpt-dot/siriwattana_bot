@@ -71,6 +71,26 @@ def _get_client() -> OpenAI:
     return _client
 
 
+# Speech-to-text (Whisper). Powers voice input ("พูดถาม") and audio-file
+# summaries. TRANSCRIBE_LANGUAGE="" lets Whisper auto-detect (handles Thai +
+# English); set e.g. "th" to force Thai.
+TRANSCRIBE_MODEL = os.getenv("TRANSCRIBE_MODEL", "whisper-1")
+TRANSCRIBE_LANGUAGE = os.getenv("TRANSCRIBE_LANGUAGE", "").strip()
+
+
+def transcribe_audio(file_path: str) -> str:
+    """Transcribe an audio file to text via Whisper. Returns '' on failure."""
+    try:
+        kwargs: dict = {"model": TRANSCRIBE_MODEL}
+        if TRANSCRIBE_LANGUAGE:
+            kwargs["language"] = TRANSCRIBE_LANGUAGE
+        with open(file_path, "rb") as f:
+            res = _get_client().audio.transcriptions.create(file=f, **kwargs)
+        return (getattr(res, "text", "") or "").strip()
+    except Exception:
+        return ""
+
+
 _IMAGE_ENHANCE_SYSTEM = (
     "You rewrite a user's short image request (often in Thai) into ONE detailed "
     "English prompt for an image generator (gpt-image-1). Describe the subject, "

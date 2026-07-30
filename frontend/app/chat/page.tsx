@@ -23,6 +23,7 @@ import {
   ImageIcon,
   LogOut,
   MessageSquare,
+  Mic,
   Paperclip,
   Pencil,
   Plus,
@@ -57,6 +58,7 @@ import {
   sendChatStream,
   sendFeedback,
   shareSession,
+  transcribeAudio,
   type ShareUser,
 } from "@/lib/api";
 import { AlertModal, ConfirmModal, PromptModal } from "@/components/Modal";
@@ -160,9 +162,14 @@ const TEXT_EXTS = new Set([
   ".vue", ".svelte", ".gradle", ".pl", ".pm",
 ]);
 
+// Audio files are transcribed (Whisper) then summarised like any document.
+const AUDIO_EXTS = new Set([".mp3", ".m4a", ".wav", ".webm", ".ogg", ".flac", ".mp4", ".mpga"]);
+
 const FILE_ACCEPT_ATTR = [
   "image/*",
+  "audio/*",
   ".pdf", ".docx", ".xlsx", ".xls", ".pptx",
+  ...Array.from(AUDIO_EXTS),
   ...Array.from(TEXT_EXTS),
 ].join(",");
 
@@ -173,9 +180,10 @@ function fileExtension(name: string): string {
 
 function isAcceptedFile(f: File): boolean {
   if (f.type.startsWith("image/")) return true;
+  if (f.type.startsWith("audio/")) return true;
   if (OFFICE_MIMES.has(f.type)) return true;
   const ext = fileExtension(f.name);
-  return OFFICE_EXTS.has(ext) || TEXT_EXTS.has(ext);
+  return OFFICE_EXTS.has(ext) || TEXT_EXTS.has(ext) || AUDIO_EXTS.has(ext);
 }
 
 // "brain" used to be a third mode toggle for the central AI Brain. It's now
@@ -303,6 +311,23 @@ export default function ChatPage() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const abortRef = useRef<AbortController | null>(null);
+
+  // Voice input (mic → Whisper → fill the input box). getUserMedia only works
+  // on HTTPS or localhost, so the button is hidden on plain-HTTP origins.
+  const [micSupported, setMicSupported] = useState(false);
+  const [isRecording, setIsRecording] = useState(false);
+  const [transcribing, setTranscribing] = useState(false);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const audioChunksRef = useRef<Blob[]>([]);
+
+  useEffect(() => {
+    setMicSupported(
+      typeof navigator !== "undefined" &&
+        !!navigator.mediaDevices?.getUserMedia &&
+        typeof window !== "undefined" &&
+        typeof window.MediaRecorder !== "undefined",
+    );
+  }, []);
 
   useEffect(() => {
     if (!getToken()) {
@@ -828,6 +853,61 @@ export default function ChatPage() {
 
   function removePendingFile(idx: number) {
     setPendingFiles((prev) => prev.filter((_, i) => i !== idx));
+  }
+
+  // Mic button: click to start recording, click again to stop → transcribe →
+  // append the text into the input box (user reviews/edits before sending).
+  async function toggleRecording() {
+    if (readOnlyOwner || transcribing) return;
+
+    if (isRecording) {
+      mediaRecorderRef.current?.stop();
+      return;
+    }
+
+    if (!micSupported) {
+      setAlertMsg(
+        "อัดเสียงในเบราว์เซอร์ต้องใช้ HTTPS — ตอนนี้ยังใช้ไม่ได้ค่ะ " +
+          "ลองแนบไฟล์เสียงแทน (ปุ่ม 📎) ระบบจะถอดเสียง+สรุปให้",
+      );
+      return;
+    }
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const mr = new MediaRecorder(stream);
+      audioChunksRef.current = [];
+      mr.ondataavailable = (e) => {
+        if (e.data.size > 0) audioChunksRef.current.push(e.data);
+      };
+      mr.onstop = async () => {
+        stream.getTracks().forEach((t) => t.stop());
+        setIsRecording(false);
+        const blob = new Blob(audioChunksRef.current, {
+          type: mr.mimeType || "audio/webm",
+        });
+        if (blob.size === 0) return;
+        setTranscribing(true);
+        try {
+          const text = await transcribeAudio(blob);
+          if (text) {
+            setInput((prev) => (prev ? prev + " " : "") + text);
+            inputRef.current?.focus();
+          } else {
+            setAlertMsg("ไม่พบข้อความจากเสียง ลองพูดใหม่อีกครั้งค่ะ");
+          }
+        } catch (e) {
+          setAlertMsg(e instanceof Error ? e.message : "ถอดเสียงไม่สำเร็จ");
+        } finally {
+          setTranscribing(false);
+        }
+      };
+      mediaRecorderRef.current = mr;
+      mr.start();
+      setIsRecording(true);
+    } catch {
+      setAlertMsg("ไม่สามารถเข้าถึงไมโครโฟน — กรุณาอนุญาตสิทธิ์ไมค์ในเบราว์เซอร์");
+    }
   }
 
   function exitReadOnly() {
@@ -1934,10 +2014,31 @@ export default function ChatPage() {
                   turnCount >= turnLimit
                 }
                 className="flex-shrink-0 p-3 bg-gray-50 border border-gray-200 rounded-2xl hover:bg-gray-100 transition-all text-gray-600 disabled:opacity-50 disabled:cursor-not-allowed"
-                title="แนบไฟล์ (รูป, PDF, Word, Excel, PowerPoint, Text/Code — สูงสุด 5 ไฟล์)"
+                title="แนบไฟล์ (รูป, PDF, Word, Excel, PowerPoint, ไฟล์เสียง, Text/Code — สูงสุด 5 ไฟล์)"
               >
                 <Paperclip size={20} />
               </button>
+              {micSupported && (
+                <button
+                  type="button"
+                  onClick={toggleRecording}
+                  disabled={sending || !!readOnlyOwner || transcribing || turnCount >= turnLimit}
+                  className={`flex-shrink-0 p-3 rounded-2xl border transition-all disabled:opacity-50 disabled:cursor-not-allowed ${
+                    isRecording
+                      ? "bg-red-500 border-red-500 text-white animate-pulse"
+                      : "bg-gray-50 border-gray-200 hover:bg-gray-100 text-gray-600"
+                  }`}
+                  title={isRecording ? "กำลังอัด — กดเพื่อหยุดและถอดเสียง" : "พูดถาม (อัดเสียง)"}
+                >
+                  {transcribing ? (
+                    <Loader2 size={20} className="animate-spin" />
+                  ) : isRecording ? (
+                    <Square size={20} fill="currentColor" />
+                  ) : (
+                    <Mic size={20} />
+                  )}
+                </button>
+              )}
               <textarea
                 ref={inputRef}
                 value={input}

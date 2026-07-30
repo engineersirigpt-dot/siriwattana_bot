@@ -34,6 +34,14 @@ PPTX_TYPES = {
     "application/vnd.openxmlformats-officedocument.presentationml.presentation",
 }
 
+# Audio — transcribed to text via Whisper, then summarised like any document.
+# Browsers send varied/empty MIME for audio, so we also allow by extension.
+AUDIO_TYPES = {
+    "audio/mpeg", "audio/mp3", "audio/mp4", "audio/m4a", "audio/x-m4a",
+    "audio/wav", "audio/x-wav", "audio/webm", "audio/ogg", "audio/flac",
+}
+AUDIO_EXTENSIONS = {".mp3", ".m4a", ".wav", ".webm", ".ogg", ".flac", ".mp4", ".mpga", ".mpeg"}
+
 # Text/code files come with many different MIME types from browsers (text/plain,
 # application/octet-stream, or empty). Allow them by extension instead of MIME.
 TEXT_EXTENSIONS = {
@@ -48,7 +56,7 @@ TEXT_EXTENSIONS = {
     ".vue", ".svelte", ".gradle", ".pl", ".pm",
 }
 
-MIME_ALLOWED = IMAGE_TYPES | PDF_TYPES | DOCX_TYPES | XLSX_TYPES | XLS_TYPES | PPTX_TYPES
+MIME_ALLOWED = IMAGE_TYPES | PDF_TYPES | DOCX_TYPES | XLSX_TYPES | XLS_TYPES | PPTX_TYPES | AUDIO_TYPES
 
 
 def _upload_root() -> Path:
@@ -94,7 +102,14 @@ def _is_allowed(content_type: str, filename: str) -> bool:
     if content_type in MIME_ALLOWED:
         return True
     ext = Path(filename or "").suffix.lower()
-    return ext in TEXT_EXTENSIONS or ext in XLS_EXTENSIONS
+    return ext in TEXT_EXTENSIONS or ext in XLS_EXTENSIONS or ext in AUDIO_EXTENSIONS
+
+
+def is_audio(content_type: str, filename: str = "") -> bool:
+    """True for audio uploads (by MIME or extension)."""
+    if content_type in AUDIO_TYPES:
+        return True
+    return Path(filename or "").suffix.lower() in AUDIO_EXTENSIONS
 
 
 def _default_ext_for(content_type: str) -> str:
