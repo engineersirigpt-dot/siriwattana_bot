@@ -7,3 +7,8 @@ body {
   @apply bg-purple-50 text-slate-900;
   font-family: var(--font-noto-thai), "Noto Sans Thai Looped", ui-sans-serif, system-ui, sans-serif;
 }
+
+/* Shimmer sweep for the "creating image" placeholder (image generation). */
+@keyframes shimmer {
+  100% { transform: translateX(100%); }
+}

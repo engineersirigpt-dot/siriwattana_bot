@@ -87,6 +87,9 @@ type Msg = {
   // id is absent for optimistic/streaming placeholders and blocked replies.
   id?: number;
   myVote?: "up" | "down" | null;
+  // True while the backend is generating an image for this (streaming) bubble,
+  // so we can show a "creating image" placeholder instead of the thinking dots.
+  generatingImage?: boolean;
   // True while this bot bubble is being streamed token-by-token. Drives the
   // "กำลังคิด…" indicator (when still empty) and the live cursor.
   streaming?: boolean;
@@ -976,6 +979,11 @@ export default function ChatPage() {
             receivedAny = true;
             appendLastBot(t);
           },
+          onStatus: (state) => {
+            // Backend signals the slow image-generation step — swap the
+            // "thinking" dots for a "creating image" placeholder.
+            if (state === "generating_image") patchLastBot({ generatingImage: true });
+          },
           onDone: (meta) => {
             patchLastBot({
               source: meta.source,
@@ -983,6 +991,7 @@ export default function ChatPage() {
               source_file: meta.source_file ?? null,
               id: meta.message_id ?? undefined,
               streaming: false,
+              generatingImage: false,
               // AI-generated image (source="image_gen") rides along on the
               // done event so it renders inline on this bot bubble.
               ...(meta.attachments && meta.attachments.length > 0
@@ -1719,7 +1728,20 @@ export default function ChatPage() {
                         large={m.source === "image_gen"}
                       />
                     )}
-                    {isStreaming && !m.text ? (
+                    {isStreaming && m.generatingImage ? (
+                      // Image generation is running (10-20s) — ChatGPT-style
+                      // "creating image" placeholder with a shimmering canvas.
+                      <div className="w-72 sm:w-80">
+                        <div className="relative w-full aspect-square rounded-xl bg-gradient-to-br from-purple-50 to-gray-100 border border-gray-200 overflow-hidden">
+                          <div className="absolute inset-0 -translate-x-full animate-[shimmer_1.6s_infinite] bg-gradient-to-r from-transparent via-white/60 to-transparent" />
+                          <div className="absolute inset-0 flex flex-col items-center justify-center gap-2">
+                            <ImageIcon size={30} className="text-purple-300" />
+                            <span className="text-sm text-gray-500">🎨 กำลังสร้างรูป…</span>
+                            <span className="text-xs text-gray-400">อาจใช้เวลาสักครู่</span>
+                          </div>
+                        </div>
+                      </div>
+                    ) : isStreaming && !m.text ? (
                       // Streaming but no token yet — show a "thinking" indicator
                       // (classifier + RAG + first token take ~1-2s).
                       <div className="flex items-center gap-1.5 py-1">

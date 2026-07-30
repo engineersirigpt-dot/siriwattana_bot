@@ -1675,6 +1675,9 @@ async def chat_stream(
                     detail={"prompt": question[:300], "via": "stream"},
                     request=request,
                 )
+                # Tell the client to show a "creating image" placeholder — the
+                # generation below is slow (10-20s) and emits no tokens.
+                yield ev({"type": "status", "state": "generating_image"})
                 res = _handle_image_generation(user, question, session_id, mode)
                 yield ev({"type": "delta", "v": res["answer"]})
                 done_evt = {

@@ -38,6 +38,12 @@ IMAGE_SIZE_PORTRAIT = os.getenv("IMAGE_SIZE_PORTRAIT", "1024x1536")  # posters
 IMAGE_QUALITY = os.getenv("IMAGE_QUALITY", "high")           # crisper text
 IMAGE_GEN_COST_USD = float(os.getenv("IMAGE_GEN_COST_USD", "0.12"))
 
+# Prompt enhancement: rewrite the user's short (often Thai) request into a rich
+# English image prompt before hitting gpt-image-1 — the same trick ChatGPT uses
+# to get polished results. Set IMAGE_PROMPT_ENHANCE=0 to send prompts raw.
+IMAGE_PROMPT_ENHANCE = os.getenv("IMAGE_PROMPT_ENHANCE", "1").strip().lower() not in {"0", "false", "no"}
+IMAGE_PROMPT_MODEL = os.getenv("IMAGE_PROMPT_MODEL", "gpt-4.1")
+
 # Poster/flyer/vertical requests → force a portrait canvas so headings +
 # subtitles have vertical room and don't get clipped at the bottom edge.
 # Everything else uses IMAGE_SIZE ("auto") so the model fits the ratio to the
@@ -65,9 +71,52 @@ def _get_client() -> OpenAI:
     return _client
 
 
+_IMAGE_ENHANCE_SYSTEM = (
+    "You rewrite a user's short image request (often in Thai) into ONE detailed "
+    "English prompt for an image generator (gpt-image-1). Describe the subject, "
+    "composition/layout, art style, colour palette, lighting, mood and background "
+    "so the result looks polished and professional.\n"
+    "Rules:\n"
+    "- Stay faithful to what the user asked; don't invent unrelated elements, and "
+    "keep any text minimal.\n"
+    "- If the image should contain text (poster/flyer/card), specify each text "
+    "element and the EXACT characters to render, wrapped in double quotes. Keep "
+    "the user's script and numerals — Thai text stays Thai; if they asked for Thai "
+    "numerals (เลขไทย) write the exact Thai digits.\n"
+    "- For posters, lay out a clear title and, if given, a date/subtitle; leave "
+    "margins so nothing is clipped.\n"
+    "Output ONLY the final image prompt as one paragraph — no preamble, no quotes "
+    "around the whole thing, no explanation."
+)
+
+
+def _enhance_image_prompt(prompt: str) -> str:
+    """Expand a short user request into a rich image-gen prompt (ChatGPT-style).
+
+    Fails open: any error (or empty result) returns the original prompt so image
+    generation still works.
+    """
+    if not IMAGE_PROMPT_ENHANCE or not prompt.strip():
+        return prompt
+    try:
+        res = _get_client().chat.completions.create(
+            model=IMAGE_PROMPT_MODEL,
+            messages=[
+                {"role": "system", "content": _IMAGE_ENHANCE_SYSTEM},
+                {"role": "user", "content": prompt},
+            ],
+            **_model_kwargs(IMAGE_PROMPT_MODEL, 700),
+        )
+        enhanced = (res.choices[0].message.content or "").strip()
+        return enhanced or prompt
+    except Exception:
+        return prompt
+
+
 def generate_image(prompt: str) -> tuple[bytes, dict]:
     """Generate one image from a text prompt via gpt-image-1.
 
+    The prompt is first enhanced (see _enhance_image_prompt) for polished results.
     Returns (png_bytes, usage_row). usage_row is shaped like accumulate_usage's
     output so it can be persisted straight to chat_history:
         {"model_used", "prompt_tokens", "completion_tokens", "cost_usd"}
@@ -75,8 +124,11 @@ def generate_image(prompt: str) -> tuple[bytes, dict]:
     """
     client = _get_client()
 
+    # Aspect ratio is chosen from the ORIGINAL request (keeps the Thai poster
+    # keywords), but the image is generated from the enhanced English prompt.
     size = _pick_image_size(prompt)
-    kwargs: dict = {"model": IMAGE_MODEL, "prompt": prompt, "size": size, "n": 1}
+    final_prompt = _enhance_image_prompt(prompt)
+    kwargs: dict = {"model": IMAGE_MODEL, "prompt": final_prompt, "size": size, "n": 1}
     if IMAGE_MODEL.startswith("gpt-image"):
         # gpt-image-1 always returns b64 and rejects response_format.
         kwargs["quality"] = IMAGE_QUALITY

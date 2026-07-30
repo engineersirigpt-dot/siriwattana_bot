@@ -160,6 +160,9 @@ export async function sendChatStream(
     onDelta: (text: string) => void;
     onDone: (meta: StreamDone) => void;
     onError: (detail: string, code?: string) => void;
+    // Progress signal before any token (e.g. "generating_image" during the
+    // slow image-generation step). Optional.
+    onStatus?: (state: string) => void;
   },
 ): Promise<void> {
   const fd = new FormData();
@@ -193,6 +196,7 @@ export async function sendChatStream(
       return; // ignore malformed partial lines
     }
     if (evt.type === "delta") handlers.onDelta(String(evt.v ?? ""));
+    else if (evt.type === "status") handlers.onStatus?.(String(evt.state ?? ""));
     else if (evt.type === "done") handlers.onDone(evt as unknown as StreamDone);
     else if (evt.type === "error")
       handlers.onError(String(evt.detail ?? "เกิดข้อผิดพลาด"), evt.code as string | undefined);
