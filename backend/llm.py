@@ -1,5 +1,6 @@
 import base64
 import os
+import re
 from typing import Any
 
 from openai import OpenAI
@@ -27,11 +28,27 @@ LLM_MODEL_CLASSIFIER = os.getenv("LLM_MODEL_CLASSIFIER", "gpt-4o-mini")
 
 # Image generation (gpt-image-1). Billed per image by size/quality; OpenAI's
 # token-based billing varies, so we store a flat per-image cost estimate for
-# the dashboard. 1024x1024 @ medium quality ≈ $0.042 (~1.5 ฿).
+# the dashboard. high quality (default) ≈ $0.12-0.17/image (~4-6 ฿).
 IMAGE_MODEL = os.getenv("IMAGE_MODEL", "gpt-image-1")
-IMAGE_SIZE = os.getenv("IMAGE_SIZE", "1024x1024")
-IMAGE_QUALITY = os.getenv("IMAGE_QUALITY", "medium")
-IMAGE_GEN_COST_USD = float(os.getenv("IMAGE_GEN_COST_USD", "0.042"))
+IMAGE_SIZE = os.getenv("IMAGE_SIZE", "1024x1024")            # default = square
+IMAGE_SIZE_PORTRAIT = os.getenv("IMAGE_SIZE_PORTRAIT", "1024x1536")  # posters
+IMAGE_QUALITY = os.getenv("IMAGE_QUALITY", "high")           # crisper text
+IMAGE_GEN_COST_USD = float(os.getenv("IMAGE_GEN_COST_USD", "0.12"))
+
+# Poster/flyer/vertical requests → portrait canvas so headings + subtitles have
+# vertical room and don't get clipped at the bottom edge (square was too tight).
+_PORTRAIT_IMAGE_RE = re.compile(
+    r"โปสเตอร์|โพสเตอร์|ใบปลิว|แผ่นพับ|ปฏิทิน|การ์ดเชิญ|ป้ายแนวตั้ง|แนวตั้ง|"
+    r"poster|flyer|leaflet|portrait|vertical",
+    re.IGNORECASE,
+)
+
+
+def _pick_image_size(prompt: str) -> str:
+    """Portrait canvas for poster-like requests, else the default square."""
+    if prompt and _PORTRAIT_IMAGE_RE.search(prompt):
+        return IMAGE_SIZE_PORTRAIT
+    return IMAGE_SIZE
 
 _client: OpenAI | None = None
 
@@ -53,7 +70,8 @@ def generate_image(prompt: str) -> tuple[bytes, dict]:
     """
     client = _get_client()
 
-    kwargs: dict = {"model": IMAGE_MODEL, "prompt": prompt, "size": IMAGE_SIZE, "n": 1}
+    size = _pick_image_size(prompt)
+    kwargs: dict = {"model": IMAGE_MODEL, "prompt": prompt, "size": size, "n": 1}
     if IMAGE_MODEL.startswith("gpt-image"):
         # gpt-image-1 always returns b64 and rejects response_format.
         kwargs["quality"] = IMAGE_QUALITY
