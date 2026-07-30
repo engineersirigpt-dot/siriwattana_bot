@@ -13,6 +13,10 @@ from pricing import estimate_cost_usd
 # evaluate/revert.
 LLM_MODEL = os.getenv("LLM_MODEL", "gpt-5")
 
+# NOTE: LLM_MODEL_FILES (below) reads images + documents. gpt-5 is multimodal
+# and reads them more accurately than gpt-4.1; run at LLM_REASONING_EFFORT (low)
+# so files stay reasonably fast. Override with the env var if needed.
+
 # How hard gpt-5 / o-series "think" before answering. The API default (medium)
 # put a simple chat answer at 30-40s — unusable for an interactive assistant.
 # "low" keeps gpt-5's language quality, knowledge and instruction-following
@@ -20,7 +24,7 @@ LLM_MODEL = os.getenv("LLM_MODEL", "gpt-5")
 # deliberation that only pays off on hard problems. Tune without a rebuild:
 # minimal | low | medium | high.
 LLM_REASONING_EFFORT = os.getenv("LLM_REASONING_EFFORT", "low")
-LLM_MODEL_FILES = os.getenv("LLM_MODEL_FILES", "gpt-4.1")
+LLM_MODEL_FILES = os.getenv("LLM_MODEL_FILES", "gpt-5")
 LLM_MODEL_CALC = os.getenv("LLM_MODEL_CALC", "gpt-5-mini")
 # Keep classifier on the cheapest model — it just routes "general" vs "calc",
 # doesn't need strong Thai context reasoning like the main answer model.
@@ -71,24 +75,36 @@ def _get_client() -> OpenAI:
     return _client
 
 
-# Speech-to-text (Whisper). Powers voice input ("พูดถาม") and audio-file
-# summaries. TRANSCRIBE_LANGUAGE="" lets Whisper auto-detect (handles Thai +
+# Speech-to-text. Powers voice input ("พูดถาม") and audio-file summaries.
+# gpt-4o-transcribe transcribes Thai noticeably better than whisper-1; if it's
+# unavailable or errors, we fall back to whisper-1 so transcription never
+# silently dies. TRANSCRIBE_LANGUAGE="" lets the model auto-detect (Thai +
 # English); set e.g. "th" to force Thai.
-TRANSCRIBE_MODEL = os.getenv("TRANSCRIBE_MODEL", "whisper-1")
+TRANSCRIBE_MODEL = os.getenv("TRANSCRIBE_MODEL", "gpt-4o-transcribe")
+TRANSCRIBE_FALLBACK_MODEL = os.getenv("TRANSCRIBE_FALLBACK_MODEL", "whisper-1")
 TRANSCRIBE_LANGUAGE = os.getenv("TRANSCRIBE_LANGUAGE", "").strip()
 
 
 def transcribe_audio(file_path: str) -> str:
-    """Transcribe an audio file to text via Whisper. Returns '' on failure."""
-    try:
-        kwargs: dict = {"model": TRANSCRIBE_MODEL}
-        if TRANSCRIBE_LANGUAGE:
-            kwargs["language"] = TRANSCRIBE_LANGUAGE
-        with open(file_path, "rb") as f:
-            res = _get_client().audio.transcriptions.create(file=f, **kwargs)
-        return (getattr(res, "text", "") or "").strip()
-    except Exception:
-        return ""
+    """Transcribe an audio file to text. Tries the primary model then the
+    fallback; returns '' only if both fail."""
+    models = [TRANSCRIBE_MODEL]
+    if TRANSCRIBE_FALLBACK_MODEL and TRANSCRIBE_FALLBACK_MODEL != TRANSCRIBE_MODEL:
+        models.append(TRANSCRIBE_FALLBACK_MODEL)
+
+    for model in models:
+        try:
+            kwargs: dict = {"model": model}
+            if TRANSCRIBE_LANGUAGE:
+                kwargs["language"] = TRANSCRIBE_LANGUAGE
+            with open(file_path, "rb") as f:
+                res = _get_client().audio.transcriptions.create(file=f, **kwargs)
+            text = (getattr(res, "text", "") or "").strip()
+            if text:
+                return text
+        except Exception:
+            continue
+    return ""
 
 
 _IMAGE_ENHANCE_SYSTEM = (
