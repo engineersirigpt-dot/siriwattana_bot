@@ -1,4 +1,5 @@
 import base64
+import json
 import os
 import re
 from typing import Any
@@ -47,6 +48,11 @@ IMAGE_GEN_COST_USD = float(os.getenv("IMAGE_GEN_COST_USD", "0.12"))
 # to get polished results. Set IMAGE_PROMPT_ENHANCE=0 to send prompts raw.
 IMAGE_PROMPT_ENHANCE = os.getenv("IMAGE_PROMPT_ENHANCE", "1").strip().lower() not in {"0", "false", "no"}
 IMAGE_PROMPT_MODEL = os.getenv("IMAGE_PROMPT_MODEL", "gpt-4.1")
+
+# For posters/cards/flyers: generate a TEXT-FREE background, then draw the Thai
+# headings ourselves with a real font (see image_compose) — perfect Thai text
+# that the image model can't produce. Set IMAGE_TEXT_OVERLAY=0 to disable.
+IMAGE_TEXT_OVERLAY = os.getenv("IMAGE_TEXT_OVERLAY", "1").strip().lower() not in {"0", "false", "no"}
 
 # Poster/flyer/vertical requests → force a portrait canvas so headings +
 # subtitles have vertical room and don't get clipped at the bottom edge.
@@ -149,46 +155,103 @@ def _enhance_image_prompt(prompt: str) -> str:
         return prompt
 
 
-def generate_image(prompt: str) -> tuple[bytes, dict]:
-    """Generate one image from a text prompt via gpt-image-1.
-
-    The prompt is first enhanced (see _enhance_image_prompt) for polished results.
-    Returns (png_bytes, usage_row). usage_row is shaped like accumulate_usage's
-    output so it can be persisted straight to chat_history:
-        {"model_used", "prompt_tokens", "completion_tokens", "cost_usd"}
-    Raises on API error — callers should catch and surface a friendly message.
-    """
-    client = _get_client()
-
-    # Aspect ratio is chosen from the ORIGINAL request (keeps the Thai poster
-    # keywords), but the image is generated from the enhanced English prompt.
-    size = _pick_image_size(prompt)
-    final_prompt = _enhance_image_prompt(prompt)
-    kwargs: dict = {"model": IMAGE_MODEL, "prompt": final_prompt, "size": size, "n": 1}
+def _render_image(prompt: str, size: str) -> bytes:
+    """Raw call to the image model → PNG bytes."""
+    kwargs: dict = {"model": IMAGE_MODEL, "prompt": prompt, "size": size, "n": 1}
     if IMAGE_MODEL.startswith("gpt-image"):
-        # gpt-image-1 always returns b64 and rejects response_format.
-        kwargs["quality"] = IMAGE_QUALITY
+        kwargs["quality"] = IMAGE_QUALITY  # gpt-image-1 always returns b64
     else:
-        # dall-e-* return a URL by default — ask for b64 so we handle it uniformly.
-        kwargs["response_format"] = "b64_json"
+        kwargs["response_format"] = "b64_json"  # dall-e-* default to a URL
 
-    resp = client.images.generate(**kwargs)
+    resp = _get_client().images.generate(**kwargs)
     item = resp.data[0]
     b64 = getattr(item, "b64_json", None)
     if b64:
-        data = base64.b64decode(b64)
-    else:
-        # Fallback: model returned a URL instead of inline b64 — fetch it.
-        import urllib.request
+        return base64.b64decode(b64)
+    import urllib.request
 
-        with urllib.request.urlopen(item.url) as r:  # noqa: S310 (trusted OpenAI URL)
-            data = r.read()
+    with urllib.request.urlopen(item.url) as r:  # noqa: S310 (trusted OpenAI URL)
+        return r.read()
+
+
+_POSTER_PLAN_SYSTEM = (
+    "You plan a poster/card/flyer from a user's short request (often Thai). "
+    "Return STRICT JSON with these keys:\n"
+    "- background_prompt: a detailed ENGLISH prompt for a beautiful background / "
+    "illustration with ABSOLUTELY NO text, letters, numbers or typography. Keep "
+    "the area named by text_area soft and uncluttered so text can be added on top.\n"
+    "- title: the main heading to overlay (keep the user's script & numerals; if "
+    "they asked for Thai numerals use exact Thai digits ๐-๙). Short.\n"
+    "- subtitle: a secondary line or date, else \"\".\n"
+    "- footer: a small tagline, else \"\".\n"
+    "- text_area: one of top | center | bottom — where the text block sits.\n"
+    "- text_color: a hex colour (e.g. #1a3d7c) that will read well on the background.\n"
+    "Stay faithful to the request; keep text short and correct. Output ONLY the JSON."
+)
+
+
+def plan_poster(prompt: str) -> dict | None:
+    """Ask the LLM for {background_prompt, title, subtitle, footer, text_area,
+    text_color}. Returns None on failure or if there's no title to render."""
+    try:
+        res = _get_client().chat.completions.create(
+            model=IMAGE_PROMPT_MODEL,
+            messages=[
+                {"role": "system", "content": _POSTER_PLAN_SYSTEM},
+                {"role": "user", "content": prompt},
+            ],
+            response_format={"type": "json_object"},
+            **_model_kwargs(IMAGE_PROMPT_MODEL, 700),
+        )
+        data = json.loads(res.choices[0].message.content or "{}")
+        if isinstance(data, dict) and (data.get("title") or "").strip():
+            return data
+    except Exception:
+        pass
+    return None
+
+
+def generate_image(prompt: str) -> tuple[bytes, dict]:
+    """Generate one image for a text prompt.
+
+    Posters/cards (see _pick_image_size / _PORTRAIT_IMAGE_RE) go through a
+    text-overlay path: a text-free background is generated, then the Thai
+    headings are drawn with a real font for perfect text. Everything else is
+    enhanced (ChatGPT-style) and generated directly.
+
+    Returns (png_bytes, usage_row). Raises on API error.
+    """
+    size = _pick_image_size(prompt)
     usage = {
         "model_used": IMAGE_MODEL,
         "prompt_tokens": 0,
         "completion_tokens": 0,
         "cost_usd": IMAGE_GEN_COST_USD,
     }
+
+    # Poster path: real-font Thai text on a generated background.
+    is_poster = bool(prompt) and _PORTRAIT_IMAGE_RE.search(prompt) is not None
+    if IMAGE_TEXT_OVERLAY and is_poster:
+        plan = plan_poster(prompt)
+        if plan:
+            try:
+                bg = _render_image(plan.get("background_prompt") or prompt, size)
+                from image_compose import compose_text_on_image
+
+                composed = compose_text_on_image(
+                    bg,
+                    title=plan.get("title", ""),
+                    subtitle=plan.get("subtitle", ""),
+                    footer=plan.get("footer", ""),
+                    text_area=plan.get("text_area", "top"),
+                    text_color=plan.get("text_color", "#1a3d7c"),
+                )
+                return composed, usage
+            except Exception:
+                pass  # fall through to the normal path
+
+    # Normal path: enhance the prompt, generate directly.
+    data = _render_image(_enhance_image_prompt(prompt), size)
     return data, usage
 
 
