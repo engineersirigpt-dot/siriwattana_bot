@@ -1,0 +1,30 @@
+# Caddy reverse proxy for the production stack on 192.168.5.31.
+#
+# Terminates HTTPS in front of the two containers (they keep serving plain HTTP
+# internally on the docker network). Certs are issued by Caddy's OWN internal CA
+# (`tls internal`) — no public domain, no ACME, no internet required; everything
+# stays on the LAN. Browsers show a one-time "not secure" warning until the
+# Caddy root CA is trusted (optional — IT can install it on client machines):
+#   docker compose -f docker-compose.prod.yml exec caddy \
+#     cat /data/caddy/pki/authorities/local/root.crt
+#
+# Two HTTPS listeners mirror the existing two-origin layout (frontend :3031,
+# backend :8010) so nothing about the app's routing has to change:
+#   https://192.168.5.31        -> frontend
+#   https://192.168.5.31:8443   -> backend  (NEXT_PUBLIC_API_BASE points here)
+
+{
+	# We only serve the explicit HTTPS sites below; no HTTP->HTTPS redirect vhost
+	# (keeps Caddy off port 80, which another app on this server already uses).
+	auto_https disable_redirects
+}
+
+https://192.168.5.31 {
+	tls internal
+	reverse_proxy frontend:3000
+}
+
+https://192.168.5.31:8443 {
+	tls internal
+	reverse_proxy backend:8000
+}
