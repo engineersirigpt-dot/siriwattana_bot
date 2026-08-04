@@ -666,6 +666,28 @@ def _is_image_edit_request(text: str) -> bool:
     return _IMAGE_EDIT_RE.search(text.strip()) is not None
 
 
+# When an image is ATTACHED, these verbs mean "make a new image FROM it"
+# (reference-image generation) rather than "describe it". Broader than the
+# create/edit sets because an attached image already supplies the subject
+# (e.g. "สร้างรถจากโลโก้นี้" has no image-noun). Gated by "an image is attached"
+# so it never fires on document questions ("สรุปไฟล์นี้" has no create verb).
+_IMAGE_FROM_REF_RE = re.compile(
+    r"สร้าง|ทำ(?!ไม)|วาด|ออกแบบ|เจน|แก้|เปลี่ยน|ใส่|เพิ่ม|ลบ|เอา\S*ออก|ปรับ|ทำให้|"
+    r"ใช้รูป|จากรูป|จากภาพนี้|โลโก้นี้|"
+    r"\bgenerate\b|\bcreate\b|\bmake\b|\bdraw\b|\bdesign\b|\bedit\b|\bchange\b|"
+    r"\badd\b|\bremove\b|\buse this\b|\bfrom this\b|\bbased on\b",
+    re.IGNORECASE,
+)
+
+
+def _wants_image_from_reference(text: str) -> bool:
+    """True when (an image is attached and) the user wants a new/edited image
+    made from it, not a description."""
+    if not text:
+        return False
+    return _IMAGE_FROM_REF_RE.search(text.strip()) is not None
+
+
 def _handle_image_edit(
     user: dict, question: str, session_id: int | None, mode: str, last_img: dict
 ) -> dict:
@@ -1346,6 +1368,29 @@ async def chat(
             )
 
             if saved_files:
+                # Reference-image generation: an image is attached AND the user
+                # wants a new/edited image FROM it ("สร้างรถจากโลโก้นี้",
+                # "เพิ่มแมวอีกตัวในรูป") → run the image edit on the uploaded
+                # image instead of just describing it. Pure "อธิบาย/สรุปรูปนี้"
+                # (no create verb) still goes to the vision path below.
+                _ref_images = [sf for sf in saved_files if att.is_image(sf["content_type"])]
+                if _ref_images and _wants_image_from_reference(question):
+                    res = _handle_image_edit(
+                        user, question, sid, mode,
+                        {"file_path": _ref_images[0]["file_path"]},
+                    )
+                    return ChatResponse(
+                        answer=res["answer"],
+                        source=res["source"],
+                        similarity=None,
+                        session_id=res["session_id"],
+                        session_title=res["session_title"],
+                        message_id=res["message_id"],
+                        attachments=[res["attachment"]] if res["attachment"] else [],
+                        turn_count=_count_session_turns(res["session_id"]),
+                        turn_limit=MAX_TURNS_PER_SESSION,
+                    )
+
                 image_urls: list[str] = []
                 text_attachments: list[tuple[str, str]] = []
                 truncation_notes: list[str] = []
