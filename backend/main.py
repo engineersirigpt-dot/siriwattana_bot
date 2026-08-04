@@ -700,7 +700,11 @@ def _handle_image_edit(
     try:
         src_path = att.validate_upload_path(last_img["file_path"])
         data, usage = edit_image(str(src_path), question)
-    except Exception:
+    except Exception as e:
+        import traceback
+
+        print("IMAGE_EDIT_ERROR:", type(e).__name__, repr(e), flush=True)
+        traceback.print_exc()
         text = "ขออภัยค่ะ แก้ไขรูปไม่สำเร็จ ลองพิมพ์คำสั่งใหม่ หรือสร้างรูปใหม่ก็ได้ค่ะ"
         mid = save_chat_message_pg(
             user_id=user["id"], session_id=sid, question=question,
