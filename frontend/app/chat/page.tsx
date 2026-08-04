@@ -452,7 +452,7 @@ export default function ChatPage() {
       // Attachments live on the chat_history row (which holds both Q and A).
       // For AI-generated images the attachment is the bot's OUTPUT, so it
       // belongs on the bot bubble; everything else is a user upload.
-      const isBotImage = m.source === "image_gen";
+      const isBotImage = m.source === "image_gen" || m.source === "image_edit";
       result.push({
         role: "user",
         text: m.question,
@@ -1805,7 +1805,7 @@ export default function ChatPage() {
                       <AttachmentList
                         attachments={m.attachments}
                         onUserBubble={false}
-                        large={m.source === "image_gen"}
+                        large={m.source === "image_gen" || m.source === "image_edit"}
                       />
                     )}
                     {isStreaming && m.generatingImage ? (

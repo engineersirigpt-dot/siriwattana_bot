@@ -49,6 +49,7 @@ from llm import (
     answer_with_files,
     answer_with_web_search,
     classify_query,
+    edit_image,
     generate_image,
     stream_freely,
     stream_from_context,
@@ -646,6 +647,87 @@ def _is_image_request(text: str) -> bool:
     return _IMAGE_INTENT_RE.search(text.strip()) is not None
 
 
+# Edit-intent: a modification instruction. Only acted on when the session
+# already has an image to edit (see routing), so these common verbs don't
+# misfire on ordinary chat.
+_IMAGE_EDIT_RE = re.compile(
+    r"เปลี่ยน(?:สี|พื้นหลัง|ฉาก|ให้)?|แก้(?:รูป|ภาพ|ไข)?|เพิ่ม|ใส่(?:ให้)?|ลบ|เอา\S*ออก|"
+    r"ตัด\S*ออก|ปรับ|ทำให้|เปลี่ยนเป็น|สลับ|ย้าย|ขยาย|ย่อ|เบลอ|เปลี่ยนข้อความ|"
+    r"\bedit\b|\bchange\b|\breplace\b|\bremove\b|\badd\b|\bmake it\b|\bturn it\b|"
+    r"\brecolor\b|\brecolour\b|\bswap\b|\bblur\b",
+    re.IGNORECASE,
+)
+
+
+def _is_image_edit_request(text: str) -> bool:
+    """True when the message looks like an instruction to edit an image."""
+    if not text:
+        return False
+    return _IMAGE_EDIT_RE.search(text.strip()) is not None
+
+
+def _handle_image_edit(
+    user: dict, question: str, session_id: int | None, mode: str, last_img: dict
+) -> dict:
+    """Edit the session's most recent image per `question`. Shares the daily
+    image quota. Returns the same dict shape as _handle_image_generation."""
+    import attachments as att
+    from chat_pg import (
+        count_images_today_pg,
+        ensure_session_pg,
+        record_image_generation_pg,
+        save_attachment_pg,
+        save_chat_message_pg,
+    )
+
+    sid, stitle = ensure_session_pg(
+        user_id=user["id"], session_id=session_id, first_question=question, mode=mode,
+    )
+
+    used = count_images_today_pg(user["id"])
+    if used >= IMAGE_GEN_DAILY_LIMIT:
+        text = (
+            f"ขออภัยค่ะ วันนี้สร้าง/แก้รูปครบ {IMAGE_GEN_DAILY_LIMIT} รูปแล้ว "
+            "กรุณาลองใหม่พรุ่งนี้ค่ะ 🙏"
+        )
+        mid = save_chat_message_pg(
+            user_id=user["id"], session_id=sid, question=question,
+            answer=text, source="image_limit", knowledge_id=None, mode=mode,
+        )
+        return {"answer": text, "source": "image_limit", "session_id": sid,
+                "session_title": stitle, "message_id": mid, "attachment": None}
+
+    try:
+        src_path = att.validate_upload_path(last_img["file_path"])
+        data, usage = edit_image(str(src_path), question)
+    except Exception:
+        text = "ขออภัยค่ะ แก้ไขรูปไม่สำเร็จ ลองพิมพ์คำสั่งใหม่ หรือสร้างรูปใหม่ก็ได้ค่ะ"
+        mid = save_chat_message_pg(
+            user_id=user["id"], session_id=sid, question=question,
+            answer=text, source="image_error", knowledge_id=None, mode=mode,
+        )
+        return {"answer": text, "source": "image_error", "session_id": sid,
+                "session_title": stitle, "message_id": mid, "attachment": None}
+
+    display, ctype, size, path = att.save_generated_image(data, "ai-image-edited.png")
+    remaining = IMAGE_GEN_DAILY_LIMIT - used - 1
+    caption = (
+        "นี่คือรูปที่แก้ไขตามคำขอของคุณค่ะ 🎨\n\n"
+        f"_(วันนี้สร้าง/แก้ได้อีก {remaining} รูป)_"
+    )
+    mid = save_chat_message_pg(
+        user_id=user["id"], session_id=sid, question=question,
+        answer=caption, source="image_edit", knowledge_id=None, mode=mode, usage=usage,
+    )
+    arow = save_attachment_pg(
+        message_id=mid, user_id=user["id"], filename=display,
+        content_type=ctype, size_bytes=size, file_path=path,
+    )
+    record_image_generation_pg(user["id"], "[edit] " + question, usage["cost_usd"])
+    return {"answer": caption, "source": "image_edit", "session_id": sid,
+            "session_title": stitle, "message_id": mid, "attachment": arow}
+
+
 def _handle_image_generation(
     user: dict, question: str, session_id: int | None, mode: str
 ) -> dict:
@@ -1148,6 +1230,28 @@ async def chat(
             session_title=stitle,
             attachments=[],
         )
+
+    # Image EDIT intent (postgres only — mirrors /chat/stream).
+    if (
+        question and not files and use_postgres_auth() and session_id
+        and _is_image_edit_request(question) and not _is_image_request(question)
+    ):
+        from chat_pg import get_last_image_attachment_pg
+
+        last_img = get_last_image_attachment_pg(session_id)
+        if last_img:
+            res = _handle_image_edit(user, question, session_id, mode, last_img)
+            return ChatResponse(
+                answer=res["answer"],
+                source=res["source"],
+                similarity=None,
+                session_id=res["session_id"],
+                session_title=res["session_title"],
+                message_id=res["message_id"],
+                attachments=[res["attachment"]] if res["attachment"] else [],
+                turn_count=_count_session_turns(res["session_id"]),
+                turn_limit=MAX_TURNS_PER_SESSION,
+            )
 
     # Image generation intent (postgres only — mirrors /chat/stream). Handled
     # here too so the streaming client's non-stream fallback still works.
@@ -1744,6 +1848,31 @@ async def chat_stream(
             #      image model (slow, no token stream), saves the PNG as an
             #      attachment on the answer row, and hands the frontend the
             #      attachment via the 'done' event so it renders inline.
+            # Image EDIT — a modification instruction ("เปลี่ยนพื้นหลังเป็นชมพู")
+            # when the session already has an image. Checked before generation;
+            # a fresh "สร้างรูป..." always generates instead.
+            if _is_image_edit_request(question) and not _is_image_request(question) and session_id:
+                from chat_pg import get_last_image_attachment_pg
+
+                last_img = get_last_image_attachment_pg(session_id)
+                if last_img:
+                    yield ev({"type": "status", "state": "generating_image"})
+                    res = _handle_image_edit(user, question, session_id, mode, last_img)
+                    yield ev({"type": "delta", "v": res["answer"]})
+                    done_evt = {
+                        "type": "done", "source": res["source"],
+                        "session_id": res["session_id"],
+                        "session_title": res["session_title"],
+                        "message_id": res["message_id"],
+                        "turn_count": _count_session_turns(res["session_id"]),
+                        "turn_limit": MAX_TURNS_PER_SESSION,
+                    }
+                    if res["attachment"]:
+                        done_evt["attachments"] = [res["attachment"]]
+                    yield ev(done_evt)
+                    return
+                # no image to edit → fall through to the normal pipeline
+
             if _is_image_request(question):
                 audit_log(
                     "image_generation_requested",

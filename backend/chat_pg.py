@@ -794,6 +794,29 @@ def save_attachment_pg(
     }
 
 
+def get_last_image_attachment_pg(session_id: int) -> dict | None:
+    """Most recent image attachment in a session (generated or uploaded) — the
+    one an "edit this image" follow-up should operate on. Returns
+    {file_path, content_type, filename} or None."""
+    with get_pg_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT a.file_path, a.content_type, a.filename
+                FROM attachments a
+                JOIN chat_history h ON h.id = a.message_id
+                WHERE h.session_id = %s AND a.content_type LIKE 'image/%%'
+                ORDER BY a.id DESC
+                LIMIT 1
+                """,
+                (session_id,),
+            )
+            row = cur.fetchone()
+    if not row:
+        return None
+    return {"file_path": row[0], "content_type": row[1], "filename": row[2]}
+
+
 def count_images_today_pg(user_id: int) -> int:
     """How many images this user has generated today (Asia/Bangkok calendar day).
 

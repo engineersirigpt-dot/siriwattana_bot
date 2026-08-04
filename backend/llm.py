@@ -241,6 +241,51 @@ def plan_poster(prompt: str) -> dict | None:
     return None
 
 
+def edit_image(image_path: str, instruction: str) -> tuple[bytes, dict]:
+    """Edit an existing image per a text instruction (gpt-image-1 image edit).
+
+    Keeps the image's orientation (portrait/landscape/square). Returns
+    (png_bytes, usage_row). Raises on API error — caller surfaces a friendly msg.
+    """
+    # Preserve orientation so an edit doesn't turn a poster into a square.
+    try:
+        from PIL import Image
+
+        with Image.open(image_path) as im:
+            w, h = im.size
+        size = "1536x1024" if w > h * 1.15 else "1024x1536" if h > w * 1.15 else "1024x1024"
+    except Exception:
+        size = "auto"
+
+    prompt = (
+        "Apply this change to the image and keep everything else the same: "
+        + instruction.strip()
+    )
+
+    with open(image_path, "rb") as f:
+        kwargs: dict = {"model": IMAGE_MODEL, "image": f, "prompt": prompt, "size": size}
+        if IMAGE_MODEL.startswith("gpt-image"):
+            kwargs["quality"] = IMAGE_QUALITY
+        resp = _get_client().images.edit(**kwargs)
+
+    item = resp.data[0]
+    b64 = getattr(item, "b64_json", None)
+    if b64:
+        data = base64.b64decode(b64)
+    else:
+        import urllib.request
+
+        with urllib.request.urlopen(item.url) as r:  # noqa: S310
+            data = r.read()
+    usage = {
+        "model_used": IMAGE_MODEL,
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "cost_usd": IMAGE_GEN_COST_USD,
+    }
+    return data, usage
+
+
 def generate_image(prompt: str) -> tuple[bytes, dict]:
     """Generate one image for a text prompt.
 
