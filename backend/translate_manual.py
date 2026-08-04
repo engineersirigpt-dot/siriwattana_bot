@@ -64,22 +64,39 @@ def _find_soffice() -> str | None:
 
 # ---------------------------------------------------------------- glossary
 
-# ศัพท์เทคนิคล็อกให้แปลเหมือนกันทั้งเล่ม (gpt อ้างอิงตอนแปล)
-GLOSSARY = """\
-plate cylinder = โมแม่พิมพ์ (plate cylinder)
-blanket cylinder = โมผ้ายาง (blanket cylinder)
-impression cylinder = ลูกโมพิมพ์ (impression cylinder)
-dampening / fountain roller = ลูกกลิ้งน้ำยา (dampening fountain roller)
-ink fountain = รางหมึก (ink fountain)
-inking section = ส่วนหมึก (inking section)
-feeder = ชุดป้อนกระดาษ (feeder)
-delivery = ชุดส่งกระดาษ (delivery)
-inching = เดินเครื่องทีละน้อย (inching)
-safety bar = แถบนิรภัย (safety bar)
-safety cover = ฝาครอบนิรภัย (safety cover)
-emergency stop = หยุดฉุกเฉิน (emergency stop)
-register unit = ชุดเรจิสเตอร์ (register unit)
-"""
+# ศัพท์เทคนิคล็อกให้แปลเหมือนกันทั้งเล่ม (gpt อ้างอิงตอนแปล).
+# โหลดจากไฟล์ translation_glossary.txt (แก้ไขได้ไม่ต้องแตะโค้ด) + ไฟล์ override
+# ที่ตั้งผ่าน env GLOSSARY_FILE (เผื่ออยากแก้บน server โดยไม่โดน git pull ทับ).
+
+_MINIMAL_GLOSSARY = (
+    "plate cylinder = โมแม่พิมพ์ (plate cylinder)\n"
+    "blanket cylinder = โมผ้ายาง (blanket cylinder)\n"
+    "emergency stop = หยุดฉุกเฉิน (emergency stop)\n"
+)
+
+
+def _load_glossary() -> str:
+    """Read the glossary file(s), stripping comments/blank lines. Falls back to
+    a minimal built-in set if nothing is found."""
+    paths = [HERE / "translation_glossary.txt"]
+    override = os.getenv("GLOSSARY_FILE", "").strip()
+    if override:
+        paths.append(Path(override))
+
+    lines: list[str] = []
+    for p in paths:
+        try:
+            for raw in p.read_text(encoding="utf-8").splitlines():
+                s = raw.strip()
+                if s and not s.startswith("#") and "=" in s:
+                    lines.append(s)
+        except OSError:
+            continue
+
+    return "\n".join(lines) if lines else _MINIMAL_GLOSSARY.strip()
+
+
+GLOSSARY = _load_glossary()
 
 SYSTEM_PROMPT = "คุณเป็นนักแปลคู่มือเครื่องจักรการพิมพ์ Komori มืออาชีพ แปลอังกฤษเป็นไทยอย่างถูกต้องและครบถ้วน"
 

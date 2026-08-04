@@ -1,0 +1,63 @@
+# Translation glossary — locks technical terms to one Thai translation across a
+# whole document so terminology stays consistent.
+#
+# Format (one per line):   english term = คำแปลไทย (english)
+# Lines starting with # and blank lines are ignored. Edit freely and add your
+# own company/product terms; changes take effect on the next translation run
+# (rebuild backend after editing, or point GLOSSARY_FILE at an override file
+# on the server that survives git pulls).
+
+# --- Offset press parts (Komori & general) ---
+plate cylinder = โมแม่พิมพ์ (plate cylinder)
+blanket cylinder = โมผ้ายาง (blanket cylinder)
+impression cylinder = ลูกโมพิมพ์ (impression cylinder)
+dampening / fountain roller = ลูกกลิ้งน้ำยา (dampening fountain roller)
+ink fountain = รางหมึก (ink fountain)
+inking section = ส่วนหมึก (inking section)
+feeder = ชุดป้อนกระดาษ (feeder)
+delivery = ชุดส่งกระดาษ (delivery)
+gripper = ตัวจับกระดาษ (gripper)
+inching = เดินเครื่องทีละน้อย (inching)
+register unit = ชุดเรจิสเตอร์ (register unit)
+registration = การเข้าเรจิสเตอร์ (registration)
+makeready = การตั้งเครื่องเตรียมพิมพ์ (makeready)
+
+# --- Safety ---
+safety bar = แถบนิรภัย (safety bar)
+safety cover = ฝาครอบนิรภัย (safety cover)
+emergency stop = หยุดฉุกเฉิน (emergency stop)
+interlock = ระบบล็อกนิรภัย (interlock)
+
+# --- Printing processes ---
+offset printing = การพิมพ์ออฟเซ็ต (offset printing)
+flexography / flexo = การพิมพ์เฟล็กโซ (flexography)
+gravure = การพิมพ์กราเวียร์ (gravure)
+digital printing = การพิมพ์ดิจิทัล (digital printing)
+sheet-fed = ป้อนแผ่น (sheet-fed)
+web-fed = ป้อนม้วน (web-fed)
+anilox roller = ลูกกลิ้งอนิล็อกซ์ (anilox roller)
+doctor blade = ใบปาดหมึก (doctor blade)
+
+# --- Prepress / color ---
+prepress = งานก่อนพิมพ์ (prepress)
+spot color = สีพิเศษ (spot color)
+bleed = ระยะตัดตก (bleed)
+trim = ระยะตัด (trim)
+crease / score = เส้นพับ (crease/score)
+substrate = วัสดุพิมพ์ (substrate)
+gsm = แกรม (gsm)
+
+# --- Post-press / packaging ---
+die-cut = ไดคัท (die-cut)
+die-cut template = แบบไดคัท (die-cut template)
+lamination = การเคลือบผิว (lamination)
+UV coating = การเคลือบยูวี (UV coating)
+embossing = การปั๊มนูน (embossing)
+foil stamping = การปั๊มฟอยล์ (foil stamping)
+folding = การพับ (folding)
+binding = การเข้าเล่ม (binding)
+saddle stitch = การเย็บมุงหลังคา (saddle stitch)
+perfect binding = การไสกาว (perfect binding)
+PUR glue = กาว PUR (PUR glue)
+guillotine = เครื่องตัดกระดาษ (guillotine cutter)
+corrugated = กระดาษลูกฟูก (corrugated)
