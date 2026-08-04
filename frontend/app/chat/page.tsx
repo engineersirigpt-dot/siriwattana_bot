@@ -979,7 +979,17 @@ export default function ChatPage() {
       setMessages((m) => {
         const copy = [...m];
         const lastUserIdx = copy.length - 1;
-        if (filesToSend.length > 0 && copy[lastUserIdx]?.role === "user") {
+        // For an image RESULT (generate/edit from an attached reference), the
+        // returned attachment is the produced image → it belongs on the bot
+        // bubble. Keep the user's optimistic upload on their own bubble.
+        // Otherwise (normal file upload) echo the persisted attachments there.
+        const isImageResult =
+          res.source === "image_edit" || res.source === "image_gen";
+        if (
+          filesToSend.length > 0 &&
+          copy[lastUserIdx]?.role === "user" &&
+          !isImageResult
+        ) {
           copy[lastUserIdx] = { ...copy[lastUserIdx], attachments: res.attachments };
         }
         copy.push({
@@ -991,6 +1001,7 @@ export default function ChatPage() {
           question: text,
           id: res.message_id ?? undefined,
           myVote: null,
+          attachments: isImageResult ? res.attachments : undefined,
         });
         newBotIdx = copy.length - 1;
         return copy;
