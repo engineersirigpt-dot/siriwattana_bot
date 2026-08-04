@@ -262,11 +262,12 @@ def edit_image(image_path: str, instruction: str) -> tuple[bytes, dict]:
         + instruction.strip()
     )
 
+    # NOTE: images.edit() does not accept `quality` (unlike images.generate) —
+    # passing it raises TypeError on this SDK.
     with open(image_path, "rb") as f:
-        kwargs: dict = {"model": IMAGE_MODEL, "image": f, "prompt": prompt, "size": size}
-        if IMAGE_MODEL.startswith("gpt-image"):
-            kwargs["quality"] = IMAGE_QUALITY
-        resp = _get_client().images.edit(**kwargs)
+        resp = _get_client().images.edit(
+            model=IMAGE_MODEL, image=f, prompt=prompt, size=size,
+        )
 
     item = resp.data[0]
     b64 = getattr(item, "b64_json", None)
