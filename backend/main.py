@@ -790,12 +790,27 @@ def _count_session_turns(session_id: int) -> int:
 # the fast, cheap pipeline. Over-triggering is low-risk (capped per day), so we
 # lean slightly inclusive on the obvious "live info" signals.
 _WEB_SEARCH_INTENT_RE = re.compile(
-    r"ล่าสุด|ตอนนี้|ขณะนี้|วันนี้|เมื่อวาน|สัปดาห์นี้|เดือนนี้|ปีนี้|ปัจจุบัน|"
-    r"อัปเดต|อัพเดท|ข่าว|พยากรณ์อากาศ|อากาศ|ค้นเว็บ|ค้นในเน็ต|หาในเน็ต|"
-    r"ราคาทอง|ค่าเงิน|อัตราแลกเปลี่ยน|หุ้น|"
+    # time / freshness signals
+    r"ล่าสุด|ตอนนี้|ขณะนี้|วันนี้|เมื่อวาน|เมื่อวานนี้|คืนนี้|สัปดาห์นี้|เดือนนี้|ปีนี้|"
+    r"ปัจจุบัน|เดี๋ยวนี้|ทุกวันนี้|ช่วงนี้|อัปเดต|อัพเดท|เปิดตัว|เพิ่งออก|ออกใหม่|รุ่นใหม่|"
+    r"เวอร์ชันล่าสุด|เวอร์ชั่นล่าสุด|กี่โมงแล้ว|เวลาตอนนี้|"
+    # news / events / weather / traffic
+    r"ข่าว|พยากรณ์อากาศ|อากาศ|ฝนตก|รถติด|สภาพจราจร|สถานการณ์|"
+    r"ผลบอล|ผลการแข่งขัน|ผลแข่ง|ตารางแข่ง|ผลสลาก|ผลหวย|หวยออก|ตรวจหวย|"
+    # explicit web-search asks
+    r"ค้นเว็บ|ค้นในเน็ต|หาในเน็ต|เสิร์ช|เสิร์ชหา|"
+    # live financial / prices
+    r"ราคาทอง|ราคาน้ำมัน|ราคาหุ้น|ราคาบิทคอยน์|บิทคอยน์|บิตคอยน์|คริปโต|"
+    r"ค่าเงิน|อัตราแลกเปลี่ยน|เรทเงิน|หุ้น|ดอกเบี้ยนโยบาย|เงินเฟ้อ|"
+    # explicit years
     r"25[67]\d|20[23]\d|"
-    r"\blatest\b|\btoday\b|\bright now\b|\bcurrent(?:ly)?\b|\bnews\b|"
-    r"\bthis (?:year|week|month)\b|\bas of\b|\bsearch (?:the )?web\b|\bgoogle\b",
+    # english
+    r"\blatest\b|\btoday\b|\btonight\b|\byesterday\b|\bright now\b|\bcurrent(?:ly)?\b|"
+    r"\bnews\b|\bweather\b|\bforecast\b|\bscore\b|\bresult(?:s)?\b|\bstanding(?:s)?\b|"
+    r"\bstock price\b|\bexchange rate\b|\bbitcoin\b|\bcrypto\b|\breleased?\b|\bnew version\b|"
+    r"\bthis (?:year|week|month|season)\b|\bas of\b|\bnowadays\b|\bup[- ]?to[- ]?date\b|"
+    r"\bwho is the current\b|\bprime minister\b|\bpresident\b|"
+    r"\bsearch (?:the )?(?:web|internet)\b|\bgoogle\b",
     re.IGNORECASE,
 )
 
