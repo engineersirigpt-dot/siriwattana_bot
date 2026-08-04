@@ -64,10 +64,40 @@ _PORTRAIT_IMAGE_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Explicit size/format requests. gpt-image-1 supports 3 canvases; we map common
+# formats to the nearest one. Checked before the generic poster→portrait rule so
+# "โปสเตอร์แนวนอน" comes out landscape, etc.
+_LANDSCAPE_RE = re.compile(
+    r"แนวนอน|ผืนผ้า|ป้ายแนวนอน|แบนเนอร์แนวนอน|แบนเนอร์|ปกเฟซ|ปกเฟส|ปกเฟซบุ๊ก|"
+    r"landscape|wide|banner|16[:x]9|fb ?cover|facebook cover|cover photo|ปกยูทูป|youtube",
+    re.IGNORECASE,
+)
+_SQUARE_RE = re.compile(
+    r"จตุรัส|สี่เหลี่ยมจัตุรัส|สี่เหลี่ยมจัสตุรัส|โพสต์ ?(?:ig|instagram|ไอจี|เฟซ|เฟส)|"
+    r"square|1[:x]1|instagram post|ig post|โปรไฟล์|โปรไฟล|profile( ?(?:pic|picture|photo))?|avatar",
+    re.IGNORECASE,
+)
+_A4_STORY_RE = re.compile(
+    r"\ba4\b|เอ ?4|เอสี่|กระดาษ ?a4|story|สตอรี่|สตอรี|ไอจีสตอรี่|ig story|instagram story|9[:x]16",
+    re.IGNORECASE,
+)
+
 
 def _pick_image_size(prompt: str) -> str:
-    """Portrait canvas for poster-like requests, else 'auto' (model decides)."""
-    if prompt and _PORTRAIT_IMAGE_RE.search(prompt):
+    """Map the request to one of gpt-image-1's canvases.
+
+    Explicit format keywords win (banner→landscape, IG post→square, A4/story→
+    portrait); then poster-like requests default to portrait; else 'auto' so the
+    model fits the ratio to the content.
+    """
+    p = prompt or ""
+    if not p:
+        return IMAGE_SIZE
+    if _LANDSCAPE_RE.search(p):
+        return "1536x1024"
+    if _SQUARE_RE.search(p):
+        return "1024x1024"
+    if _A4_STORY_RE.search(p) or _PORTRAIT_IMAGE_RE.search(p):
         return IMAGE_SIZE_PORTRAIT
     return IMAGE_SIZE
 
