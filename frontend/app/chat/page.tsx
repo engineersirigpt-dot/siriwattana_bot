@@ -69,6 +69,9 @@ type Attachment = {
   filename: string;
   content_type: string;
   size_bytes: number;
+  // Local blob URL for an optimistic (not-yet-persisted) upload, so it previews
+  // immediately without fetching from the server.
+  previewUrl?: string;
 };
 
 type Msg = {
@@ -928,6 +931,9 @@ export default function ChatPage() {
       filename: f.name,
       content_type: f.type,
       size_bytes: f.size,
+      previewUrl: f.type.startsWith("image/")
+        ? URL.createObjectURL(f)
+        : undefined,
     }));
     setMessages((m) => [
       ...m,
@@ -2686,10 +2692,15 @@ function AttachmentImage({
   onUserBubble: boolean;
   large?: boolean;
 }) {
-  const [url, setUrl] = useState<string | null>(null);
+  const [url, setUrl] = useState<string | null>(attachment.previewUrl ?? null);
   const [zoomed, setZoomed] = useState(false);
 
   useEffect(() => {
+    // Optimistic upload: render the local blob preview, nothing to fetch.
+    if (attachment.previewUrl) {
+      setUrl(attachment.previewUrl);
+      return;
+    }
     if (attachment.id < 0) return; // optimistic, no URL yet
     let cancelled = false;
     fetchAttachmentBlobUrl(attachment.id).then((u) => {
@@ -2700,7 +2711,7 @@ function AttachmentImage({
       if (url) URL.revokeObjectURL(url);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [attachment.id]);
+  }, [attachment.id, attachment.previewUrl]);
 
   // While the lightbox is open: close on ESC and lock background scroll.
   useEffect(() => {
