@@ -112,39 +112,53 @@ def _get_client() -> OpenAI:
 
 
 # Speech-to-text. Powers voice input ("พูดถาม") and audio-file summaries.
-# gpt-4o-transcribe transcribes Thai noticeably better than whisper-1; if it's
-# unavailable or errors, we fall back to whisper-1 so transcription never
-# silently dies. TRANSCRIBE_LANGUAGE="" lets the model auto-detect (Thai +
-# English); set e.g. "th" to force Thai.
-TRANSCRIBE_MODEL = os.getenv("TRANSCRIBE_MODEL", "gpt-4o-transcribe")
-TRANSCRIBE_FALLBACK_MODEL = os.getenv("TRANSCRIBE_FALLBACK_MODEL", "whisper-1")
+# whisper-1 is the primary: it reliably transcribes the WHOLE clip. gpt-4o-
+# transcribe is a touch sharper on Thai but tends to cut long-ish recordings off
+# after the first sentence, so it's only the fallback. To pick the best result
+# rather than just the first, we run BOTH and keep the longest transcript (a
+# truncated one is shorter) — voice clips are short, so the extra call is cheap.
+# TRANSCRIBE_LANGUAGE="" lets the model auto-detect; "th" forces Thai.
+TRANSCRIBE_MODEL = os.getenv("TRANSCRIBE_MODEL", "whisper-1")
+TRANSCRIBE_FALLBACK_MODEL = os.getenv("TRANSCRIBE_FALLBACK_MODEL", "gpt-4o-transcribe")
 # Default to Thai so short/ambiguous clips aren't mis-detected as another
 # language (e.g. "ฮัลโหล" coming back as Chinese 哈喽). This is an internal Thai
 # company; set TRANSCRIBE_LANGUAGE="" to re-enable auto-detect, or another
 # ISO-639-1 code to force a different language.
 TRANSCRIBE_LANGUAGE = os.getenv("TRANSCRIBE_LANGUAGE", "th").strip()
+# A vocabulary/style hint biases the transcriber toward the right words —
+# especially proper nouns it otherwise mangles (the company name; "พนักงาน"
+# was coming back as "พันธมิตร"). Override/extend via TRANSCRIBE_PROMPT.
+TRANSCRIBE_PROMPT = os.getenv(
+    "TRANSCRIBE_PROMPT",
+    "การถอดเสียงภาษาไทยของพนักงานบริษัทศิริวัฒนาอินเตอร์พริ้นท์ จำกัด (มหาชน) "
+    "เกี่ยวกับงานพิมพ์ บรรจุภัณฑ์ ออฟเซ็ต ไดคัท และเรื่องภายในบริษัท",
+).strip()
 
 
 def transcribe_audio(file_path: str) -> str:
-    """Transcribe an audio file to text. Tries the primary model then the
-    fallback; returns '' only if both fail."""
+    """Transcribe an audio file to text. Runs the primary + fallback models and
+    returns the LONGEST transcript (guards against a model truncating the clip);
+    returns '' only if all fail."""
     models = [TRANSCRIBE_MODEL]
     if TRANSCRIBE_FALLBACK_MODEL and TRANSCRIBE_FALLBACK_MODEL != TRANSCRIBE_MODEL:
         models.append(TRANSCRIBE_FALLBACK_MODEL)
 
+    best = ""
     for model in models:
         try:
             kwargs: dict = {"model": model}
             if TRANSCRIBE_LANGUAGE:
                 kwargs["language"] = TRANSCRIBE_LANGUAGE
+            if TRANSCRIBE_PROMPT:
+                kwargs["prompt"] = TRANSCRIBE_PROMPT
             with open(file_path, "rb") as f:
                 res = _get_client().audio.transcriptions.create(file=f, **kwargs)
             text = (getattr(res, "text", "") or "").strip()
-            if text:
-                return text
+            if len(text) > len(best):
+                best = text
         except Exception:
             continue
-    return ""
+    return best
 
 
 _IMAGE_ENHANCE_SYSTEM = (
