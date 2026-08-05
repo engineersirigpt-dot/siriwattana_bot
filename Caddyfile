@@ -1,0 +1,47 @@
+# Caddy reverse proxy for the production stack on 192.168.5.31.
+#
+# Serves the WHOLE app over HTTPS from a SINGLE origin (https://192.168.5.31):
+#   /api/*  -> backend   (the /api prefix is stripped, so the backend still
+#                         sees /chat, /auth/..., /attachments/... unchanged)
+#   /*      -> frontend  (Next.js)
+#
+# Why one origin (not a separate https://...:8443 for the backend): with a
+# self-signed cert the browser silently BLOCKS fetch() to a second, untrusted
+# origin — the user never gets a chance to click through it, so every API call
+# fails. One origin = one certificate: click through the warning once (or trust
+# the root CA) and BOTH the page and its API calls work.
+#
+# HTTPS is required so the browser treats the page as a "secure context", which
+# is what unlocks the microphone (voice input) and clipboard. It also encrypts
+# MI passwords + session tokens on the LAN.
+#
+# Certs come from Caddy's OWN internal CA (`tls internal`): no public domain, no
+# ACME, no internet. Everything stays on the LAN — this does NOT expose the app
+# outside the network (that is firewall/routing, and is unchanged).
+#
+# To REMOVE the one-time browser warning, install the Caddy root CA on client
+# machines (optional; IT can push it):
+#   docker compose -f docker-compose.prod.yml exec caddy \
+#     cat /data/caddy/pki/authorities/local/root.crt
+
+{
+	# No HTTP->HTTPS redirect vhost — keeps Caddy off port 80, which another
+	# app on this server already uses.
+	auto_https disable_redirects
+}
+
+https://192.168.5.31 {
+	tls internal
+
+	# API calls. handle_path strips the leading /api before proxying, so the
+	# backend routes stay exactly as they are. flush_interval -1 disables
+	# response buffering so token streaming (/api/chat/stream) arrives live.
+	handle_path /api/* {
+		reverse_proxy backend:8000 {
+			flush_interval -1
+		}
+	}
+
+	# Everything else -> the Next.js frontend.
+	reverse_proxy frontend:3000
+}

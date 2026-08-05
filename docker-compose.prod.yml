@@ -54,8 +54,10 @@ services:
       context: ./frontend
       args:
         # Baked into the JS bundle at build time. Team's browser hits this URL.
-        # Production server = 192.168.5.31.
-        NEXT_PUBLIC_API_BASE: http://192.168.5.31:8010
+        # Behind Caddy TLS the app is one origin: the API lives under /api on
+        # the same https host (https://192.168.5.31/api), so the page and its
+        # API calls share one certificate. Production server = 192.168.5.31.
+        NEXT_PUBLIC_API_BASE: https://192.168.5.31/api
     container_name: siriwattana-frontend-prod
     ports:
       - "3031:3000"
@@ -63,6 +65,29 @@ services:
       - backend
     restart: unless-stopped
 
+  # HTTPS reverse proxy (internal cert). The team reaches the whole app at
+  # https://192.168.5.31 — frontend at /, backend at /api. Serving over HTTPS
+  # gives a secure context (unlocks mic + clipboard) and encrypts MI passwords
+  # and session tokens on the LAN. LAN-only; does not expose the app publicly.
+  # See Caddyfile.
+  caddy:
+    image: caddy:2
+    container_name: siriwattana-caddy-prod
+    restart: unless-stopped
+    ports:
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - frontend
+      - backend
+
 volumes:
   siriwattana_pg_prod_data:
     name: siriwattana_pg_prod_data
+  caddy_data:
+    name: siriwattana_caddy_data
+  caddy_config:
+    name: siriwattana_caddy_config
