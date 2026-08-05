@@ -118,7 +118,11 @@ def _get_client() -> OpenAI:
 # English); set e.g. "th" to force Thai.
 TRANSCRIBE_MODEL = os.getenv("TRANSCRIBE_MODEL", "gpt-4o-transcribe")
 TRANSCRIBE_FALLBACK_MODEL = os.getenv("TRANSCRIBE_FALLBACK_MODEL", "whisper-1")
-TRANSCRIBE_LANGUAGE = os.getenv("TRANSCRIBE_LANGUAGE", "").strip()
+# Default to Thai so short/ambiguous clips aren't mis-detected as another
+# language (e.g. "ฮัลโหล" coming back as Chinese 哈喽). This is an internal Thai
+# company; set TRANSCRIBE_LANGUAGE="" to re-enable auto-detect, or another
+# ISO-639-1 code to force a different language.
+TRANSCRIBE_LANGUAGE = os.getenv("TRANSCRIBE_LANGUAGE", "th").strip()
 
 
 def transcribe_audio(file_path: str) -> str:
