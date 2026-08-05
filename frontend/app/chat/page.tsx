@@ -200,6 +200,13 @@ type ChatMode = "normal" | "company";
 // mode button + banner back; all the underlying code stays intact.
 const COMPANY_MODE_ENABLED = false;
 
+// Voice input (mic) is hidden for now. It requires HTTPS (a secure context) to
+// access the microphone, and management is deciding whether to run the app over
+// HTTPS (which brings a cert-trust step). Flip to `true` — together with an
+// HTTPS deployment — to bring the mic button back; all the recording/transcribe
+// code stays intact.
+const MIC_ENABLED = false;
+
 // Which export format the user's request asked for (drives the download button
 // under the matching answer). Mirrors the backend keyword set. Returns null
 // when no format was requested — so nothing shows unless the user asked.
@@ -2035,7 +2042,7 @@ export default function ChatPage() {
               >
                 <Paperclip size={20} />
               </button>
-              {micSupported && (
+              {MIC_ENABLED && micSupported && (
                 <button
                   type="button"
                   onClick={toggleRecording}
