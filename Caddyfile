@@ -28,6 +28,12 @@
 	# No HTTP->HTTPS redirect vhost — keeps Caddy off port 80, which another
 	# app on this server already uses.
 	auto_https disable_redirects
+
+	# The site is reached by IP (192.168.5.31), and TLS clients do NOT send SNI
+	# for a bare IP literal. Without this, Caddy can't pick a cert for the
+	# incoming handshake and aborts with "tls internal error". default_sni tells
+	# it to assume this server name when SNI is absent, so it serves the IP cert.
+	default_sni 192.168.5.31
 }
 
 https://192.168.5.31 {
