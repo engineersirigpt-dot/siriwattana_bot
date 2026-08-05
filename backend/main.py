@@ -1022,6 +1022,111 @@ def _try_web_search_answer(
     }
 
 
+def _try_url_answer(
+    user: dict, question: str, session_id: int | None, mode: str, request: Request
+) -> dict | None:
+    """Read the web page(s) the user pasted a link to and answer about them.
+
+    Different from web *search*: here the user gave the exact URL, so we fetch
+    that page, extract its text, and answer with it as context. Returns None
+    when there is no URL in the question (→ normal pipeline). If a URL IS present
+    but none could be read, returns a polite explanation instead of silently
+    hallucinating an answer about a page we never saw.
+    """
+    from url_reader import extract_urls, fetch_url_text
+
+    urls = extract_urls(question)
+    if not urls:
+        return None
+
+    from chat_pg import (
+        ensure_session_pg,
+        get_session_history_pg,
+        save_chat_message_pg,
+    )
+
+    pages: list[tuple[str, str]] = []
+    failed: list[str] = []
+    for u in urls:
+        got = fetch_url_text(u)
+        if got:
+            pages.append(got)
+        else:
+            failed.append(u)
+
+    sid, stitle = ensure_session_pg(
+        user_id=user["id"], session_id=session_id,
+        first_question=question, mode=mode,
+    )
+
+    if not pages:
+        text = (
+            "ขออภัยค่ะ อ่านเนื้อหาจากลิงก์ที่ส่งมาไม่สำเร็จ 🙏 "
+            "(อาจเป็นหน้าที่ต้องล็อกอิน เว็บบล็อกบอท หรือเป็นไฟล์/รูปที่ไม่ใช่ข้อความ) "
+            "ถ้าเป็นไฟล์ ลองแนบไฟล์เข้ามาโดยตรงได้เลยค่ะ"
+        )
+        mid = save_chat_message_pg(
+            user_id=user["id"], session_id=sid, question=question,
+            answer=text, source="url_error", knowledge_id=None, mode=mode,
+        )
+        audit_log(
+            "url_read_failed",
+            user=user,
+            detail={"session_id": sid, "urls": urls},
+            request=request,
+        )
+        return {
+            "answer": text, "source": "url_error", "session_id": sid,
+            "session_title": stitle, "message_id": mid,
+        }
+
+    history = get_session_history_pg(
+        session_id=session_id, user_id=user["id"], limit=HISTORY_TURNS,
+    )
+    prompt_question = (
+        question
+        or "ช่วยสรุปเนื้อหาจากลิงก์ที่แนบ และให้ข้อมูลที่เกี่ยวข้อง"
+    )
+    try:
+        answer, files_usage = answer_with_files(
+            prompt_question, [], pages, history=history,
+        )
+    except Exception as e:
+        audit_log(
+            "url_read_failed",
+            user=user,
+            detail={"session_id": sid, "urls": urls, "error": str(e)[:300]},
+            request=request,
+        )
+        return None  # fall through to the normal pipeline
+
+    if failed:
+        answer += (
+            "\n\n_หมายเหตุ: อ่านบางลิงก์ไม่สำเร็จ ("
+            + ", ".join(failed)
+            + ")_"
+        )
+    usage_row = accumulate_usage(files_usage)
+    mid = save_chat_message_pg(
+        user_id=user["id"], session_id=sid, question=question,
+        answer=answer, source="url", knowledge_id=None, mode=mode,
+        usage=usage_row,
+    )
+    audit_log(
+        "url_read",
+        user=user,
+        detail={
+            "session_id": sid, "message_id": mid,
+            "n_pages": len(pages), "n_failed": len(failed), "urls": urls,
+        },
+        request=request,
+    )
+    return {
+        "answer": answer, "source": "url", "session_id": sid,
+        "session_title": stitle, "message_id": mid,
+    }
+
+
 def _get_session_history(conn, session_id: int | None, user_id: int) -> list[dict]:
     if not session_id:
         return []
@@ -1296,6 +1401,23 @@ async def chat(
             turn_count=_count_session_turns(res["session_id"]),
             turn_limit=MAX_TURNS_PER_SESSION,
         )
+
+    # URL reading — the user pasted a link; fetch that page and answer about it.
+    # Runs BEFORE web search so an explicit link is read directly rather than
+    # re-searched. Returns None (no URL) to fall through.
+    if question and not files and use_postgres_auth():
+        ur = _try_url_answer(user, question, session_id, mode, request)
+        if ur is not None:
+            return ChatResponse(
+                answer=ur["answer"],
+                source=ur["source"],
+                similarity=None,
+                session_id=ur["session_id"],
+                session_title=ur["session_title"],
+                message_id=ur["message_id"],
+                turn_count=_count_session_turns(ur["session_id"]),
+                turn_limit=MAX_TURNS_PER_SESSION,
+            )
 
     # Live web search intent (postgres only — mirrors /chat/stream). Returns
     # None to fall through to the normal pipeline on non-match / failure.
@@ -1941,6 +2063,22 @@ async def chat_stream(
                 if res["attachment"]:
                     done_evt["attachments"] = [res["attachment"]]
                 yield ev(done_evt)
+                return
+
+            # 3.55) URL reading — the user pasted a link. Fetch that page and
+            #       answer about it (before web search, so an explicit link is
+            #       read directly). Non-streaming — emitted as one delta.
+            ur = _try_url_answer(user, question, session_id, mode, request)
+            if ur is not None:
+                yield ev({"type": "delta", "v": ur["answer"]})
+                yield ev({
+                    "type": "done", "source": ur["source"],
+                    "session_id": ur["session_id"],
+                    "session_title": ur["session_title"],
+                    "message_id": ur["message_id"],
+                    "turn_count": _count_session_turns(ur["session_id"]),
+                    "turn_limit": MAX_TURNS_PER_SESSION,
+                })
                 return
 
             # 3.6) Live web search — questions wanting fresh info ("ข่าวล่าสุด",
