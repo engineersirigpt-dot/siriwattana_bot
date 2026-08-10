@@ -42,6 +42,11 @@ IMAGE_SIZE = os.getenv("IMAGE_SIZE", "auto")
 IMAGE_SIZE_PORTRAIT = os.getenv("IMAGE_SIZE_PORTRAIT", "1024x1536")  # posters
 IMAGE_QUALITY = os.getenv("IMAGE_QUALITY", "high")           # crisper text
 IMAGE_GEN_COST_USD = float(os.getenv("IMAGE_GEN_COST_USD", "0.12"))
+# How faithfully an EDIT preserves the uploaded reference. "high" keeps faces,
+# logos, product shapes and pose intact while changing only what's asked (great
+# for "make this cat orange" / "put this logo on a car"); "low" is looser. Only
+# supported by gpt-image-1. Set IMAGE_INPUT_FIDELITY=low to loosen.
+IMAGE_INPUT_FIDELITY = os.getenv("IMAGE_INPUT_FIDELITY", "high")
 
 # Prompt enhancement: rewrite the user's short (often Thai) request into a rich
 # English image prompt before hitting gpt-image-1 — the same trick ChatGPT uses
@@ -162,21 +167,30 @@ def transcribe_audio(file_path: str) -> str:
 
 
 _IMAGE_ENHANCE_SYSTEM = (
-    "You rewrite a user's short image request (often in Thai) into ONE detailed "
-    "English prompt for an image generator (gpt-image-1). Describe the subject, "
-    "composition/layout, art style, colour palette, lighting, mood and background "
-    "so the result looks polished and professional.\n"
+    "You are an expert art director. Rewrite a user's short image request (often "
+    "in Thai) into ONE vivid, detailed English prompt for a top image generator "
+    "(gpt-image-1) that yields a polished, professional result.\n"
+    "Enrich it with concrete art direction:\n"
+    "- Subject & scene: describe the main subject and setting precisely.\n"
+    "- Composition: focal point, framing, rule of thirds, foreground/background "
+    "layers, depth and sense of scale.\n"
+    "- Lighting: quality and direction (e.g. soft golden-hour, studio softbox, "
+    "dramatic rim light) and the mood it creates.\n"
+    "- Colour: a harmonious palette / colour grading that suits the mood.\n"
+    "- Style & medium: choose what best fits — photoreal (then name camera, lens "
+    "and depth of field), illustration, 3D render, or clean flat vector — and add "
+    "quality cues (sharp focus, fine detail, high dynamic range, crisp rendering).\n"
     "Rules:\n"
-    "- Stay faithful to what the user asked; don't invent unrelated elements, and "
-    "keep any text minimal.\n"
-    "- If the image should contain text (poster/flyer/card), specify each text "
-    "element and the EXACT characters to render, wrapped in double quotes. Keep "
-    "the user's script and numerals — Thai text stays Thai; if they asked for Thai "
-    "numerals (เลขไทย) write the exact Thai digits.\n"
+    "- Stay faithful to what the user asked; don't invent unrelated elements or "
+    "change the subject.\n"
+    "- Keep any text minimal. If the image must contain text (poster/flyer/card), "
+    "specify each text element and the EXACT characters to render, wrapped in "
+    "double quotes. Keep the user's script and numerals — Thai text stays Thai; if "
+    "they asked for Thai numerals (เลขไทย) write the exact Thai digits ๐-๙.\n"
     "- For posters, lay out a clear title and, if given, a date/subtitle; leave "
-    "margins so nothing is clipped.\n"
-    "Output ONLY the final image prompt as one paragraph — no preamble, no quotes "
-    "around the whole thing, no explanation."
+    "generous margins so nothing is clipped.\n"
+    "Output ONLY the final image prompt as one flowing paragraph — no preamble, no "
+    "surrounding quotes, no explanation."
 )
 
 
@@ -223,17 +237,22 @@ def _render_image(prompt: str, size: str) -> bytes:
 
 
 _POSTER_PLAN_SYSTEM = (
-    "You plan a poster/card/flyer from a user's short request (often Thai). "
-    "Return STRICT JSON with these keys:\n"
-    "- background_prompt: a detailed ENGLISH prompt for a beautiful background / "
-    "illustration with ABSOLUTELY NO text, letters, numbers or typography. Keep "
-    "the area named by text_area soft and uncluttered so text can be added on top.\n"
+    "You are a senior graphic designer planning a poster/card/flyer from a user's "
+    "short request (often Thai). Return STRICT JSON with these keys:\n"
+    "- background_prompt: a detailed ENGLISH prompt for a BEAUTIFUL, professionally "
+    "designed background/illustration with ABSOLUTELY NO text, letters, numbers or "
+    "typography. Give it a clear focal theme, a harmonious colour palette, tasteful "
+    "lighting and depth, and a modern, elegant, print-ready look. IMPORTANT: keep "
+    "the region named by text_area soft, clean and uncluttered (gentle gradient or "
+    "negative space) so overlaid text stays perfectly readable.\n"
     "- title: the main heading to overlay (keep the user's script & numerals; if "
-    "they asked for Thai numerals use exact Thai digits ๐-๙). Short.\n"
+    "they asked for Thai numerals use exact Thai digits ๐-๙). Short and punchy.\n"
     "- subtitle: a secondary line or date, else \"\".\n"
     "- footer: a small tagline, else \"\".\n"
-    "- text_area: one of top | center | bottom — where the text block sits.\n"
-    "- text_color: a hex colour (e.g. #1a3d7c) that will read well on the background.\n"
+    "- text_area: one of top | center | bottom — put the text where the background "
+    "is calmest.\n"
+    "- text_color: a hex colour with STRONG contrast against that area so text pops "
+    "(e.g. #1a3d7c on a light area, #ffffff or #ffd700 on a dark area).\n"
     "Stay faithful to the request; keep text short and correct. Output ONLY the JSON."
 )
 
@@ -321,12 +340,15 @@ def edit_image(image_path: str, instruction: str) -> tuple[bytes, dict]:
         + instruction.strip()
     )
 
-    # NOTE: images.edit() does not accept `quality` (unlike images.generate) —
-    # passing it raises TypeError on this SDK.
+    edit_kwargs: dict = {"model": IMAGE_MODEL, "image": None, "prompt": prompt, "size": size}
+    if IMAGE_MODEL.startswith("gpt-image"):
+        # input_fidelity=high keeps the reference (face/logo/product/pose) intact
+        # and only changes what's asked; quality=high renders crisper.
+        edit_kwargs["input_fidelity"] = IMAGE_INPUT_FIDELITY
+        edit_kwargs["quality"] = IMAGE_QUALITY
     with open(image_path, "rb") as f:
-        resp = _get_client().images.edit(
-            model=IMAGE_MODEL, image=f, prompt=prompt, size=size,
-        )
+        edit_kwargs["image"] = f
+        resp = _get_client().images.edit(**edit_kwargs)
 
     item = resp.data[0]
     b64 = getattr(item, "b64_json", None)
