@@ -154,21 +154,21 @@ export default function TranslatePage() {
   const pct = job && job.total ? Math.round((job.done / job.total) * 100) : 0;
 
   return (
-    <div className="min-h-screen bg-gradient-to-b from-slate-50 to-slate-100 p-6">
+    <div className="min-h-screen bg-gradient-to-b from-surface2 to-surface3 p-6">
       <div className="mx-auto max-w-2xl">
         <button
           onClick={() => router.push("/chat")}
-          className="mb-4 flex items-center gap-1 text-sm text-slate-500 hover:text-slate-700"
+          className="mb-4 flex items-center gap-1 text-sm text-muted hover:text-content2"
         >
           <ArrowLeft size={16} /> กลับไปแชท
         </button>
 
-        <div className="rounded-2xl bg-white p-8 shadow-sm">
+        <div className="rounded-2xl bg-surface p-8 shadow-sm">
           <div className="mb-2 flex items-center gap-2">
             <FileText className="text-violet-600" />
-            <h1 className="text-xl font-bold text-slate-800">แปลเอกสาร (คู่มือ / สเปก)</h1>
+            <h1 className="text-xl font-bold text-content">แปลเอกสาร (คู่มือ / สเปก)</h1>
           </div>
-          <p className="mb-6 text-sm text-slate-500">
+          <p className="mb-6 text-sm text-muted">
             อัปโหลดไฟล์ PDF ภาษาอังกฤษ → ระบบแปลเป็นไทยทั้งเล่ม คงรูปภาพ/ตารางจากต้นฉบับ
             พร้อมรอบตรวจทาน → ดาวน์โหลดเป็น Word
           </p>
@@ -177,7 +177,7 @@ export default function TranslatePage() {
             <button
               onClick={() => fileRef.current?.click()}
               disabled={busy}
-              className="flex w-full flex-col items-center gap-2 rounded-xl border-2 border-dashed border-slate-300 p-10 text-slate-500 hover:border-violet-400 hover:text-violet-600 disabled:opacity-50"
+              className="flex w-full flex-col items-center gap-2 rounded-xl border-2 border-dashed border-line p-10 text-muted hover:border-violet-400 hover:text-violet-600 disabled:opacity-50"
             >
               {busy ? <Loader2 className="animate-spin" /> : <Upload />}
               <span className="text-sm">{busy ? "กำลังอัปโหลด..." : "คลิกเพื่อเลือกไฟล์ PDF"}</span>
@@ -198,8 +198,8 @@ export default function TranslatePage() {
           {job && (
             <div className="mt-2">
               <div className="mb-1 flex items-center justify-between text-sm">
-                <span className="truncate font-medium text-slate-700">{job.filename}</span>
-                <span className="shrink-0 text-slate-400">{job.total} หน้า</span>
+                <span className="truncate font-medium text-content2">{job.filename}</span>
+                <span className="shrink-0 text-faint">{job.total} หน้า</span>
               </div>
 
               {job.exceeds_cap && (
@@ -214,13 +214,13 @@ export default function TranslatePage() {
 
               {(job.status === "queued" || job.status === "running") && (
                 <div>
-                  <div className="h-2 w-full overflow-hidden rounded-full bg-slate-100">
+                  <div className="h-2 w-full overflow-hidden rounded-full bg-surface3">
                     <div
                       className="h-full bg-violet-500 transition-all"
                       style={{ width: `${pct}%` }}
                     />
                   </div>
-                  <div className="mt-2 flex items-center gap-2 text-sm text-slate-500">
+                  <div className="mt-2 flex items-center gap-2 text-sm text-muted">
                     <Loader2 size={14} className="animate-spin" />
                     {job.status === "queued"
                       ? "อยู่ในคิว..."
@@ -236,7 +236,7 @@ export default function TranslatePage() {
                     <span className="font-medium">แปลเสร็จแล้ว — {job.done} หน้า</span>
                   </div>
                   {job.cost_usd > 0 && (
-                    <p className="mb-3 text-xs text-slate-400">
+                    <p className="mb-3 text-xs text-faint">
                       ต้นทุน ~฿{(job.cost_usd * 36).toFixed(2)}
                     </p>
                   )}
@@ -250,15 +250,15 @@ export default function TranslatePage() {
                     </button>
                   )}
                   {showReview && review && (
-                    <div className="mb-3 max-h-64 overflow-y-auto rounded-lg border border-amber-200 bg-white p-3 text-xs">
+                    <div className="mb-3 max-h-64 overflow-y-auto rounded-lg border border-amber-200 bg-surface p-3 text-xs">
                       {review.pages.length === 0 ? (
-                        <p className="text-slate-500">ไม่มีรายละเอียด</p>
+                        <p className="text-muted">ไม่มีรายละเอียด</p>
                       ) : (
                         <ul className="space-y-2">
                           {review.pages.map((pg) => (
                             <li key={pg.page}>
-                              <span className="font-semibold text-slate-700">หน้า {pg.page}</span>
-                              <ul className="ml-3 mt-1 list-disc space-y-0.5 text-slate-500">
+                              <span className="font-semibold text-content2">หน้า {pg.page}</span>
+                              <ul className="ml-3 mt-1 list-disc space-y-0.5 text-muted">
                                 {pg.issues.map((it, i) => (
                                   <li key={i}>{it}</li>
                                 ))}
@@ -279,7 +279,7 @@ export default function TranslatePage() {
                     {job.pdf && (
                       <button
                         onClick={() => onDownload("pdf")}
-                        className="flex items-center gap-1 rounded-lg border border-slate-300 px-4 py-2 text-sm text-slate-600 hover:bg-slate-50"
+                        className="flex items-center gap-1 rounded-lg border border-line px-4 py-2 text-sm text-content2 hover:bg-surface2"
                       >
                         <Download size={16} /> PDF
                       </button>
@@ -310,11 +310,11 @@ export default function TranslatePage() {
         </div>
 
         {history.filter((h) => h.id !== job?.id).length > 0 && (
-          <div className="mt-6 rounded-2xl bg-white p-6 shadow-sm">
-            <h2 className="mb-3 text-sm font-semibold text-slate-700">
+          <div className="mt-6 rounded-2xl bg-surface p-6 shadow-sm">
+            <h2 className="mb-3 text-sm font-semibold text-content2">
               งานแปลที่ผ่านมา
             </h2>
-            <ul className="divide-y divide-slate-100">
+            <ul className="divide-y divide-line">
               {history
                 .filter((h) => h.id !== job?.id)
                 .map((h) => (
@@ -323,8 +323,8 @@ export default function TranslatePage() {
                     className="flex items-center justify-between gap-3 py-2.5"
                   >
                     <div className="min-w-0">
-                      <p className="truncate text-sm text-slate-700">{h.filename}</p>
-                      <p className="text-xs text-slate-400">
+                      <p className="truncate text-sm text-content2">{h.filename}</p>
+                      <p className="text-xs text-faint">
                         {STATUS_LABEL[h.status] ?? h.status}
                         {h.status === "done" ? ` · ${h.done} หน้า` : ""}
                         {h.status === "error" && h.error ? ` · ${h.error}` : ""}
@@ -335,14 +335,14 @@ export default function TranslatePage() {
                         <>
                           <button
                             onClick={() => downloadHist(h, "docx")}
-                            className="rounded-md border border-slate-200 px-2 py-1 text-xs text-violet-600 hover:bg-violet-50"
+                            className="rounded-md border border-line px-2 py-1 text-xs text-violet-600 hover:bg-violet-50"
                           >
                             Word
                           </button>
                           {h.pdf && (
                             <button
                               onClick={() => downloadHist(h, "pdf")}
-                              className="rounded-md border border-slate-200 px-2 py-1 text-xs text-slate-500 hover:bg-slate-50"
+                              className="rounded-md border border-line px-2 py-1 text-xs text-muted hover:bg-surface2"
                             >
                               PDF
                             </button>
@@ -358,7 +358,7 @@ export default function TranslatePage() {
                         <button
                           onClick={() => deleteHist(h)}
                           title="ลบงานแปลนี้"
-                          className="rounded-md p-1.5 text-slate-300 hover:bg-rose-50 hover:text-rose-500"
+                          className="rounded-md p-1.5 text-faint hover:bg-rose-50 hover:text-rose-500"
                         >
                           <Trash2 size={14} />
                         </button>

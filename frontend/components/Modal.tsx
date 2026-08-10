@@ -30,12 +30,12 @@ export function Modal({
       onClick={onClose}
     >
       <div
-        className="relative bg-white rounded-2xl shadow-2xl w-full max-w-md overflow-hidden animate-in zoom-in-95 duration-150"
+        className="relative bg-surface rounded-2xl shadow-2xl w-full max-w-md overflow-hidden animate-in zoom-in-95 duration-150"
         onClick={(e) => e.stopPropagation()}
       >
         <button
           onClick={onClose}
-          className="absolute top-3 right-3 text-gray-400 hover:text-gray-600 transition-colors p-1 rounded-full hover:bg-gray-100"
+          className="absolute top-3 right-3 text-faint hover:text-muted transition-colors p-1 rounded-full hover:bg-surface3"
           aria-label="ปิด"
         >
           <X size={18} />
@@ -77,9 +77,9 @@ export function ConfirmModal({
             {danger ? <AlertTriangle size={24} /> : <CheckCircle2 size={24} />}
           </div>
           <div className="flex-1 pt-1">
-            <h2 className="text-lg font-medium text-gray-900">{title}</h2>
+            <h2 className="text-lg font-medium text-content">{title}</h2>
             {description && (
-              <p className="mt-1.5 text-sm text-gray-600 leading-relaxed">
+              <p className="mt-1.5 text-sm text-muted leading-relaxed">
                 {description}
               </p>
             )}
@@ -89,7 +89,7 @@ export function ConfirmModal({
         <div className="mt-6 flex gap-2 justify-end">
           <button
             onClick={onClose}
-            className="px-4 py-2 bg-white border border-gray-200 rounded-xl hover:bg-gray-50 transition-all text-sm text-gray-700"
+            className="px-4 py-2 bg-surface border border-line rounded-xl hover:bg-surface2 transition-all text-sm text-content2"
           >
             {cancelLabel}
           </button>
@@ -148,8 +148,8 @@ export function PromptModal({
   return (
     <Modal open={open} onClose={onClose}>
       <form onSubmit={submit} className="p-6">
-        <h2 className="text-lg font-medium text-gray-900 mb-1">{title}</h2>
-        {description && <p className="text-sm text-gray-600 mb-4">{description}</p>}
+        <h2 className="text-lg font-medium text-content mb-1">{title}</h2>
+        {description && <p className="text-sm text-muted mb-4">{description}</p>}
 
         <input
           type="text"
@@ -157,14 +157,14 @@ export function PromptModal({
           onChange={(e) => setValue(e.target.value)}
           placeholder={placeholder}
           autoFocus
-          className="w-full px-4 py-3 bg-gray-50 border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-transparent transition-all text-sm"
+          className="w-full px-4 py-3 bg-surface2 border border-line rounded-xl focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-transparent transition-all text-sm"
         />
 
         <div className="mt-6 flex gap-2 justify-end">
           <button
             type="button"
             onClick={onClose}
-            className="px-4 py-2 bg-white border border-gray-200 rounded-xl hover:bg-gray-50 transition-all text-sm text-gray-700"
+            className="px-4 py-2 bg-surface border border-line rounded-xl hover:bg-surface2 transition-all text-sm text-content2"
           >
             {cancelLabel}
           </button>
@@ -219,9 +219,9 @@ export function AlertModal({
             {palette.icon}
           </div>
           <div className="flex-1 pt-1">
-            <h2 className="text-lg font-medium text-gray-900">{title}</h2>
+            <h2 className="text-lg font-medium text-content">{title}</h2>
             {description && (
-              <p className="mt-1.5 text-sm text-gray-600 leading-relaxed whitespace-pre-wrap">
+              <p className="mt-1.5 text-sm text-muted leading-relaxed whitespace-pre-wrap">
                 {description}
               </p>
             )}

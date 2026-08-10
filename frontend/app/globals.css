@@ -2,9 +2,40 @@
 @tailwind components;
 @tailwind utilities;
 
+/* ─── Semantic theme palette ───────────────────────────────────────────────
+   Colours are declared once here as RGB channels, then referenced by the
+   Tailwind semantic colours (bg-surface, text-content, border-line, …) defined
+   in tailwind.config.ts. Toggling the `.dark` class on <html> swaps the whole
+   app between the two palettes — no per-element dark: variants needed.
+   Brand purple and white-on-colour (text-white, bg-white/10, …) are left as
+   literal Tailwind colours so buttons/bubbles keep their look in both themes. */
+:root {
+  --c-app:      250 245 255;  /* purple-50  — page background   */
+  --c-surface:  255 255 255;  /* white      — cards / panels     */
+  --c-surface2: 249 250 251;  /* gray-50    — inputs / hover      */
+  --c-surface3: 243 244 246;  /* gray-100   — subtle fills        */
+  --c-content:   15  23  42;  /* slate-900  — primary text        */
+  --c-content2:  51  65  85;  /* slate-700  — secondary text      */
+  --c-muted:    100 116 139;  /* slate-500  — muted text          */
+  --c-faint:    148 163 184;  /* slate-400  — faint text / icons  */
+  --c-line:     226 232 240;  /* slate-200  — borders / dividers  */
+}
+
+.dark {
+  --c-app:        2   6  23;  /* slate-950 */
+  --c-surface:   30  41  59;  /* slate-800 */
+  --c-surface2:  51  65  85;  /* slate-700 */
+  --c-surface3:  51  65  85;  /* slate-700 */
+  --c-content:  241 245 249;  /* slate-100 */
+  --c-content2: 203 213 225;  /* slate-300 */
+  --c-muted:    148 163 184;  /* slate-400 */
+  --c-faint:    100 116 139;  /* slate-500 */
+  --c-line:      51  65  85;  /* slate-700 */
+}
+
 html, body { height: 100%; }
 body {
-  @apply bg-purple-50 text-slate-900;
+  @apply bg-app text-content;
   font-family: var(--font-noto-thai), "Noto Sans Thai Looped", ui-sans-serif, system-ui, sans-serif;
 }
 

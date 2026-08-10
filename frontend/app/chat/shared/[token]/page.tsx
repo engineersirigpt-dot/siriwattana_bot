@@ -75,7 +75,7 @@ export default function SharedChatPage() {
 
   if (loading) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-purple-50">
+      <div className="min-h-screen flex items-center justify-center bg-app">
         <Loader2 size={32} className="text-purple-500 animate-spin" />
       </div>
     );
@@ -83,12 +83,12 @@ export default function SharedChatPage() {
 
   if (errorMsg || !session) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-white via-purple-50 to-purple-100 p-6">
-        <div className="max-w-md w-full bg-white rounded-2xl shadow-lg border border-gray-100 p-8 text-center">
-          <h1 className="text-xl font-semibold text-gray-800 mb-2">
+      <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-surface via-app to-purple-100 p-6">
+        <div className="max-w-md w-full bg-surface rounded-2xl shadow-lg border border-line p-8 text-center">
+          <h1 className="text-xl font-semibold text-content mb-2">
             ลิงค์ใช้งานไม่ได้
           </h1>
-          <p className="text-sm text-gray-600 mb-6">
+          <p className="text-sm text-muted mb-6">
             {errorMsg || "ลิงค์นี้อาจถูกยกเลิกการแชร์โดยเจ้าของ หรือถูกลบไปแล้ว"}
           </p>
           <button
@@ -104,27 +104,27 @@ export default function SharedChatPage() {
   }
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-white via-purple-50 to-purple-100">
+    <div className="min-h-screen bg-gradient-to-br from-surface via-app to-purple-100">
       {/* Top banner */}
-      <div className="sticky top-0 z-10 bg-white/90 backdrop-blur-sm border-b border-gray-200 shadow-sm">
+      <div className="sticky top-0 z-10 bg-white/90 backdrop-blur-sm border-b border-line shadow-sm">
         <div className="max-w-4xl mx-auto px-6 py-4 flex items-center justify-between gap-3 flex-wrap">
           <div className="flex items-center gap-3 min-w-0 flex-1">
             <button
               onClick={() => router.push("/chat")}
-              className="flex-shrink-0 p-2 rounded-lg text-gray-500 hover:bg-gray-100"
+              className="flex-shrink-0 p-2 rounded-lg text-muted hover:bg-surface3"
               title="กลับไปแชทของฉัน"
             >
               <ArrowLeft size={18} />
             </button>
             <div className="min-w-0">
-              <p className="text-xs text-gray-500 flex items-center gap-1">
+              <p className="text-xs text-muted flex items-center gap-1">
                 <Eye size={11} />
                 บทสนทนาที่แชร์โดย{" "}
                 <span className="font-medium text-purple-700">
                   {session.owner_username}
                 </span>
               </p>
-              <h1 className="text-base sm:text-lg font-medium text-gray-800 truncate">
+              <h1 className="text-base sm:text-lg font-medium text-content truncate">
                 {session.title}
               </h1>
             </div>
@@ -133,7 +133,7 @@ export default function SharedChatPage() {
           {session.is_owner ? (
             <button
               onClick={() => router.push("/chat")}
-              className="inline-flex items-center gap-2 px-4 py-2 text-sm bg-purple-50 text-purple-700 border border-purple-200 rounded-xl hover:bg-purple-100 transition-all"
+              className="inline-flex items-center gap-2 px-4 py-2 text-sm bg-app text-purple-700 border border-purple-200 rounded-xl hover:bg-purple-100 transition-all"
               title="นี่คือแชทของคุณเอง"
             >
               เปิดแชทของฉัน
@@ -163,7 +163,7 @@ export default function SharedChatPage() {
       {/* Read-only chat thread */}
       <div className="max-w-4xl mx-auto px-6 py-8 space-y-6">
         {session.messages.length === 0 && (
-          <p className="text-center text-gray-400 mt-20">
+          <p className="text-center text-faint mt-20">
             (บทสนทนานี้ยังว่างเปล่า)
           </p>
         )}
@@ -180,12 +180,12 @@ export default function SharedChatPage() {
               <img
                 src="/Logo_siri.jpg"
                 alt="Sirivatana"
-                className="w-9 h-9 rounded-full object-cover flex-shrink-0 shadow-sm border border-gray-200"
+                className="w-9 h-9 rounded-full object-cover flex-shrink-0 shadow-sm border border-line"
               />
               <div className="flex-1 min-w-0 pt-1">
                 <MarkdownMessage text={m.answer} />
                 {m.source_file && (
-                  <p className="mt-2 text-xs text-gray-500 italic">
+                  <p className="mt-2 text-xs text-muted italic">
                     📎 {m.source_file}
                   </p>
                 )}

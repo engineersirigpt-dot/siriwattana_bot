@@ -301,18 +301,18 @@ function DashboardToolbar({
   loading: boolean;
 }) {
   return (
-    <div className="flex flex-wrap items-center justify-between gap-3 bg-white/80 backdrop-blur-sm rounded-2xl border border-gray-100 px-4 py-3 shadow-sm">
+    <div className="flex flex-wrap items-center justify-between gap-3 bg-white/80 backdrop-blur-sm rounded-2xl border border-line px-4 py-3 shadow-sm">
       <div className="flex items-center gap-2">
         <CalendarDays size={16} className="text-purple-600" />
-        <div className="flex bg-gray-100 rounded-lg p-0.5">
+        <div className="flex bg-surface3 rounded-lg p-0.5">
           {(["today", "7d", "30d"] as RangeKey[]).map((r) => (
             <button
               key={r}
               onClick={() => onRangeChange(r)}
               className={`px-3 py-1.5 text-sm rounded-md transition-all ${
                 range === r
-                  ? "bg-white text-purple-700 shadow-sm font-medium"
-                  : "text-gray-600 hover:text-gray-800"
+                  ? "bg-surface text-purple-700 shadow-sm font-medium"
+                  : "text-muted hover:text-content"
               }`}
             >
               {RANGE_LABEL[r]}
@@ -323,12 +323,12 @@ function DashboardToolbar({
 
       <div className="flex items-center gap-2">
         {lastFetchedAt && (
-          <span className="text-xs text-gray-400 hidden sm:inline">
+          <span className="text-xs text-faint hidden sm:inline">
             อัพเดต {lastFetchedAt.toLocaleTimeString("th-TH")}
           </span>
         )}
 
-        <label className="flex items-center gap-1.5 text-xs text-gray-600 cursor-pointer select-none">
+        <label className="flex items-center gap-1.5 text-xs text-muted cursor-pointer select-none">
           <input
             type="checkbox"
             checked={autoRefresh}
@@ -341,7 +341,7 @@ function DashboardToolbar({
         <button
           onClick={onRefresh}
           disabled={loading}
-          className="p-2 text-gray-500 hover:text-purple-600 hover:bg-purple-50 rounded-lg transition-all disabled:opacity-50"
+          className="p-2 text-muted hover:text-purple-600 hover:bg-app rounded-lg transition-all disabled:opacity-50"
           title="โหลดใหม่"
         >
           <RefreshCw size={15} className={loading ? "animate-spin" : ""} />
@@ -407,16 +407,16 @@ function ExecutiveSummary({ data }: { data: Overview }) {
   }
 
   return (
-    <div className="bg-gradient-to-br from-purple-50 via-white to-indigo-50 border border-purple-100 rounded-2xl p-5 shadow-sm">
+    <div className="bg-gradient-to-br from-app via-white to-indigo-50 border border-purple-100 rounded-2xl p-5 shadow-sm">
       <div className="flex items-start gap-3">
         <div className="flex-shrink-0 w-10 h-10 rounded-xl bg-gradient-to-br from-purple-500 to-purple-700 flex items-center justify-center shadow-md">
           <Sparkles size={18} className="text-white" />
         </div>
         <div className="flex-1 min-w-0">
-          <h3 className="font-semibold text-gray-800">
+          <h3 className="font-semibold text-content">
             ภาพรวม{data.range.human}
           </h3>
-          <p className="text-sm text-gray-600 mt-1">
+          <p className="text-sm text-muted mt-1">
             ระบบตอบคำถาม {kpis.messages.value.toLocaleString()} ครั้ง โดย{" "}
             <span className="font-medium text-purple-700">
               {brainPct}% จาก AI Brain
@@ -424,10 +424,10 @@ function ExecutiveSummary({ data }: { data: Overview }) {
             {", "}
             <span className="font-medium text-sky-700">{ragPct}% จาก KB</span>
             {", "}
-            และ <span className="font-medium text-slate-600">{llmPct}% จาก LLM</span>
+            และ <span className="font-medium text-content2">{llmPct}% จาก LLM</span>
           </p>
           {insights.length > 0 && (
-            <ul className="mt-3 space-y-1 text-sm text-gray-700">
+            <ul className="mt-3 space-y-1 text-sm text-content2">
               {insights.map((line, i) => (
                 <li key={i} className="flex items-start gap-2">
                   <Wand2
@@ -503,7 +503,7 @@ function KpiCard({
   formatValue?: (v: number) => string;
 }) {
   const tones: Record<typeof color, string> = {
-    purple: "from-purple-50 to-purple-100 border-purple-200 text-purple-700",
+    purple: "from-app to-purple-100 border-purple-200 text-purple-700",
     indigo: "from-indigo-50 to-indigo-100 border-indigo-200 text-indigo-700",
     sky: "from-sky-50 to-sky-100 border-sky-200 text-sky-700",
     emerald: "from-emerald-50 to-emerald-100 border-emerald-200 text-emerald-700",
@@ -512,7 +512,7 @@ function KpiCard({
   // Trend health: by default up = good (green), down = bad (red). For cost we
   // invert so that "↓3%" reads as green.
   let trendBadge: React.ReactNode = (
-    <span className="text-gray-400 text-xs">—</span>
+    <span className="text-faint text-xs">—</span>
   );
   if (delta !== null) {
     const isUp = delta > 0;
@@ -543,7 +543,7 @@ function KpiCard({
         </div>
         {trendBadge}
       </div>
-      <p className="text-3xl font-bold mt-2 text-gray-900">
+      <p className="text-3xl font-bold mt-2 text-content">
         {formatValue ? formatValue(value) : value.toLocaleString("th-TH")}
       </p>
     </div>
@@ -571,9 +571,9 @@ function UsageTrendChart({ trend }: { trend: Overview["usage_trend"] }) {
   );
 
   return (
-    <div className="lg:col-span-2 bg-white rounded-2xl border border-gray-100 p-5 shadow-sm">
+    <div className="lg:col-span-2 bg-surface rounded-2xl border border-line p-5 shadow-sm">
       <div className="flex items-center justify-between mb-3">
-        <h3 className="font-semibold text-gray-800 flex items-center gap-2">
+        <h3 className="font-semibold text-content flex items-center gap-2">
           <TrendingUp size={16} className="text-purple-600" />
           การใช้งาน 7 วันล่าสุด
         </h3>
@@ -647,13 +647,13 @@ function SourceDistributionChart({
   );
 
   return (
-    <div className="bg-white rounded-2xl border border-gray-100 p-5 shadow-sm">
-      <h3 className="font-semibold text-gray-800 flex items-center gap-2 mb-3">
+    <div className="bg-surface rounded-2xl border border-line p-5 shadow-sm">
+      <h3 className="font-semibold text-content flex items-center gap-2 mb-3">
         <Brain size={16} className="text-purple-600" />
         คำตอบมาจากไหน
       </h3>
       {data.length === 0 ? (
-        <p className="text-sm text-gray-400 text-center py-8">ยังไม่มีข้อมูล</p>
+        <p className="text-sm text-faint text-center py-8">ยังไม่มีข้อมูล</p>
       ) : (
         <div className="h-64">
           <ResponsiveContainer width="100%" height="100%">
@@ -693,13 +693,13 @@ function SourceDistributionChart({
 
 function TopQuestionsCard({ items }: { items: Overview["top_questions"] }) {
   return (
-    <div className="bg-white rounded-2xl border border-gray-100 p-5 shadow-sm">
-      <h3 className="font-semibold text-gray-800 flex items-center gap-2 mb-3">
+    <div className="bg-surface rounded-2xl border border-line p-5 shadow-sm">
+      <h3 className="font-semibold text-content flex items-center gap-2 mb-3">
         <MessageSquare size={16} className="text-purple-600" />
         คำถามยอดนิยม
       </h3>
       {items.length === 0 ? (
-        <p className="text-sm text-gray-400 text-center py-6">ยังไม่มีข้อมูล</p>
+        <p className="text-sm text-faint text-center py-6">ยังไม่มีข้อมูล</p>
       ) : (
         <ol className="space-y-2">
           {items.map((q, i) => (
@@ -711,10 +711,10 @@ function TopQuestionsCard({ items }: { items: Overview["top_questions"] }) {
               <span className="flex-shrink-0 w-6 h-6 rounded-full bg-purple-100 text-purple-700 text-xs font-medium flex items-center justify-center">
                 {i + 1}
               </span>
-              <span className="flex-1 text-gray-700 truncate">
+              <span className="flex-1 text-content2 truncate">
                 {q.question}
               </span>
-              <span className="flex-shrink-0 text-xs text-gray-400 font-medium">
+              <span className="flex-shrink-0 text-xs text-faint font-medium">
                 {q.count} ครั้ง
               </span>
             </li>
@@ -729,13 +729,13 @@ function TopUsersCard({ items }: { items: Overview["top_users"] }) {
   const maxMessages = items.reduce((m, u) => Math.max(m, u.messages), 0) || 1;
 
   return (
-    <div className="bg-white rounded-2xl border border-gray-100 p-5 shadow-sm">
-      <h3 className="font-semibold text-gray-800 flex items-center gap-2 mb-3">
+    <div className="bg-surface rounded-2xl border border-line p-5 shadow-sm">
+      <h3 className="font-semibold text-content flex items-center gap-2 mb-3">
         <Users size={16} className="text-purple-600" />
         ผู้ใช้ Active สูงสุด
       </h3>
       {items.length === 0 ? (
-        <p className="text-sm text-gray-400 text-center py-6">ยังไม่มีข้อมูล</p>
+        <p className="text-sm text-faint text-center py-6">ยังไม่มีข้อมูล</p>
       ) : (
         <ul className="space-y-2.5">
           {items.map((u, i) => {
@@ -743,12 +743,12 @@ function TopUsersCard({ items }: { items: Overview["top_users"] }) {
             return (
               <li key={i}>
                 <div className="flex justify-between text-sm mb-1">
-                  <span className="font-medium text-gray-700">{u.username}</span>
-                  <span className="text-xs text-gray-500">
+                  <span className="font-medium text-content2">{u.username}</span>
+                  <span className="text-xs text-muted">
                     {u.messages} ข้อความ / {u.sessions} แชท
                   </span>
                 </div>
-                <div className="h-1.5 bg-gray-100 rounded-full overflow-hidden">
+                <div className="h-1.5 bg-surface3 rounded-full overflow-hidden">
                   <div
                     className="h-full bg-gradient-to-r from-purple-500 to-purple-600 rounded-full"
                     style={{ width: `${pct}%` }}
@@ -785,13 +785,13 @@ function TotalCostCard({
 }) {
   const total = chatThb + translationThb;
   return (
-    <div className="bg-gradient-to-br from-violet-50 to-white rounded-2xl border border-violet-100 p-5 shadow-sm">
-      <h3 className="font-semibold text-gray-800 flex items-center gap-2 mb-1">
+    <div className="bg-gradient-to-br from-violet-50 to-surface rounded-2xl border border-violet-100 p-5 shadow-sm">
+      <h3 className="font-semibold text-content flex items-center gap-2 mb-1">
         <DollarSign size={16} className="text-violet-600" />
         ค่าใช้จ่าย AI รวม (ในช่วงที่เลือก)
       </h3>
       <p className="text-3xl font-bold text-violet-700">฿{total.toFixed(2)}</p>
-      <p className="text-xs text-gray-500 mt-1">
+      <p className="text-xs text-muted mt-1">
         แชท ฿{chatThb.toFixed(2)} · แปลเอกสาร ฿{translationThb.toFixed(2)}
       </p>
     </div>
@@ -802,23 +802,23 @@ function TotalCostCard({
 function TranslationCostCard({ t }: { t?: Overview["translation"] }) {
   if (!t) return null;
   return (
-    <div className="bg-white rounded-2xl border border-gray-100 p-5 shadow-sm">
-      <h3 className="font-semibold text-gray-800 flex items-center gap-2 mb-3">
+    <div className="bg-surface rounded-2xl border border-line p-5 shadow-sm">
+      <h3 className="font-semibold text-content flex items-center gap-2 mb-3">
         <DollarSign size={16} className="text-violet-600" />
         ค่าใช้จ่ายการแปลเอกสาร
       </h3>
       <div className="grid grid-cols-2 gap-4">
         <div className="rounded-xl bg-violet-50 p-4">
-          <p className="text-xs text-gray-500">ในช่วงที่เลือก</p>
+          <p className="text-xs text-muted">ในช่วงที่เลือก</p>
           <p className="text-2xl font-bold text-violet-700">฿{t.cost_thb.toFixed(2)}</p>
-          <p className="text-xs text-gray-400">
+          <p className="text-xs text-faint">
             {t.jobs} งาน · {t.pages} หน้า
           </p>
         </div>
-        <div className="rounded-xl bg-gray-50 p-4">
-          <p className="text-xs text-gray-500">รวมทั้งหมด</p>
-          <p className="text-2xl font-bold text-gray-700">฿{t.cost_thb_all.toFixed(2)}</p>
-          <p className="text-xs text-gray-400">
+        <div className="rounded-xl bg-surface2 p-4">
+          <p className="text-xs text-muted">รวมทั้งหมด</p>
+          <p className="text-2xl font-bold text-content2">฿{t.cost_thb_all.toFixed(2)}</p>
+          <p className="text-xs text-faint">
             {t.jobs_all} งาน · {t.pages_all} หน้า
           </p>
         </div>
@@ -853,9 +853,9 @@ function CostBreakdownCard({ cost }: { cost: Overview["cost"] }) {
   }, [cost]);
 
   return (
-    <div className="bg-white rounded-2xl border border-gray-100 p-5 shadow-sm">
+    <div className="bg-surface rounded-2xl border border-line p-5 shadow-sm">
       <div className="flex items-center justify-between mb-3">
-        <h3 className="font-semibold text-gray-800 flex items-center gap-2">
+        <h3 className="font-semibold text-content flex items-center gap-2">
           <DollarSign size={16} className="text-emerald-600" />
           ค่าใช้จ่ายตามโมเดล
         </h3>
@@ -868,7 +868,7 @@ function CostBreakdownCard({ cost }: { cost: Overview["cost"] }) {
       </div>
 
       {pieData.length === 0 ? (
-        <p className="text-sm text-gray-400 text-center py-8 italic">
+        <p className="text-sm text-faint text-center py-8 italic">
           ยังไม่มีคำถามในช่วงนี้
         </p>
       ) : (
@@ -917,7 +917,7 @@ function CostBreakdownCard({ cost }: { cost: Overview["cost"] }) {
                   ${cost.total_usd.toFixed(4)}
                 </p>
               </div>
-              <div className="bg-purple-50 border border-purple-200 rounded-xl p-3">
+              <div className="bg-app border border-purple-200 rounded-xl p-3">
                 <p className="text-[11px] text-purple-700 font-medium uppercase tracking-wide">
                   ค่าจริงจาก tokens
                 </p>
@@ -935,7 +935,7 @@ function CostBreakdownCard({ cost }: { cost: Overview["cost"] }) {
                 {cost.by_model.map((m, i) => (
                   <li
                     key={m.model}
-                    className="flex items-center justify-between text-sm py-1 border-b border-gray-50 last:border-0"
+                    className="flex items-center justify-between text-sm py-1 border-b border-line last:border-0"
                   >
                     <span className="inline-flex items-center gap-2">
                       <span
@@ -945,27 +945,27 @@ function CostBreakdownCard({ cost }: { cost: Overview["cost"] }) {
                             MODEL_COLORS[i % MODEL_COLORS.length],
                         }}
                       />
-                      <span className="font-medium text-gray-700">
+                      <span className="font-medium text-content2">
                         {m.model}
                       </span>
-                      <span className="text-xs text-gray-400">
+                      <span className="text-xs text-faint">
                         ({m.rows} ครั้ง)
                       </span>
                     </span>
-                    <span className="font-mono text-gray-700">
+                    <span className="font-mono text-content2">
                       ฿{m.cost_thb.toFixed(4)}
                     </span>
                   </li>
                 ))}
                 {hasLegacy && (
-                  <li className="flex items-center justify-between text-sm py-1 italic text-gray-500">
+                  <li className="flex items-center justify-between text-sm py-1 italic text-muted">
                     <span className="inline-flex items-center gap-2">
                       <span
                         className="inline-block w-2.5 h-2.5 rounded-sm"
                         style={{ background: "#cbd5e1" }}
                       />
                       <span>ค่าประมาณ (flat-rate)</span>
-                      <span className="text-xs text-gray-400">
+                      <span className="text-xs text-faint">
                         ({cost.rows_estimated} ครั้ง)
                       </span>
                     </span>
@@ -994,7 +994,7 @@ function SatisfactionCard({ feedback }: { feedback: Overview["feedback"] }) {
 
   // Visual tone tracks the satisfaction band. >=80% green, 60-79 amber, <60 red,
   // unrated grey. Keeps it readable at-a-glance for execs scanning the page.
-  let tone = "from-gray-50 to-gray-100 border-gray-200 text-gray-700";
+  let tone = "from-gray-50 to-surface3 border-line text-content2";
   if (satisfaction_pct !== null) {
     if (satisfaction_pct >= 80) {
       tone = "from-green-50 to-emerald-100 border-emerald-200 text-emerald-700";
@@ -1050,17 +1050,17 @@ function RecentDownvotesCard({
 }) {
   return (
     <div
-      className={`bg-white rounded-2xl border border-gray-100 p-5 shadow-sm ${className}`}
+      className={`bg-surface rounded-2xl border border-line p-5 shadow-sm ${className}`}
     >
-      <h3 className="font-semibold text-gray-800 flex items-center gap-2 mb-3">
+      <h3 className="font-semibold text-content flex items-center gap-2 mb-3">
         <ThumbsDown size={16} className="text-rose-500" />
         คำตอบที่โดน 👎 ล่าสุด
-        <span className="text-xs font-normal text-gray-400 ml-1">
+        <span className="text-xs font-normal text-faint ml-1">
           (admin ควรปรับ)
         </span>
       </h3>
       {items.length === 0 ? (
-        <p className="text-sm text-gray-400 text-center py-6 italic">
+        <p className="text-sm text-faint text-center py-6 italic">
           ✓ ยังไม่มีคำตอบที่ถูก downvote
         </p>
       ) : (
@@ -1071,7 +1071,7 @@ function RecentDownvotesCard({
               className="border-l-2 border-rose-300 pl-3 py-1"
             >
               <p
-                className="text-sm font-medium text-gray-800 line-clamp-1"
+                className="text-sm font-medium text-content line-clamp-1"
                 title={d.question}
               >
                 {d.question}
@@ -1081,7 +1081,7 @@ function RecentDownvotesCard({
                   เหตุผล: {d.reason}
                 </p>
               )}
-              <p className="text-[11px] text-gray-400 mt-0.5">
+              <p className="text-[11px] text-faint mt-0.5">
                 โดย {d.username}
                 {d.created_at && (
                   <>
@@ -1116,8 +1116,8 @@ function SafetyCard({
 
   return (
     <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-      <div className="bg-white rounded-2xl border border-gray-100 p-5 shadow-sm">
-        <h3 className="font-semibold text-gray-800 flex items-center gap-2 mb-3">
+      <div className="bg-surface rounded-2xl border border-line p-5 shadow-sm">
+        <h3 className="font-semibold text-content flex items-center gap-2 mb-3">
           <Shield size={16} className="text-red-500" />
           Safety
         </h3>
@@ -1140,7 +1140,7 @@ function SafetyCard({
         </div>
         {categories.length > 0 && (
           <div className="mt-4">
-            <p className="text-xs text-gray-500 mb-2 font-medium">
+            <p className="text-xs text-muted mb-2 font-medium">
               ประเภทที่ blocked มากสุด
             </p>
             <div className="flex flex-wrap gap-1.5">
@@ -1158,24 +1158,24 @@ function SafetyCard({
         )}
       </div>
 
-      <div className="bg-white rounded-2xl border border-gray-100 p-5 shadow-sm">
-        <h3 className="font-semibold text-gray-800 flex items-center gap-2 mb-3">
+      <div className="bg-surface rounded-2xl border border-line p-5 shadow-sm">
+        <h3 className="font-semibold text-content flex items-center gap-2 mb-3">
           <AlertTriangle size={16} className="text-amber-500" />
           ที่ต้องปรับปรุง
         </h3>
         <div className="space-y-3">
           <div className="flex items-center justify-between">
             <div>
-              <p className="text-sm font-medium text-gray-700">
+              <p className="text-sm font-medium text-content2">
                 คำถามที่ตอบไม่ได้ (Pending)
               </p>
-              <p className="text-xs text-gray-500">
+              <p className="text-xs text-muted">
                 Admin ควรเพิ่มคำตอบใน Knowledge Base
               </p>
             </div>
             <span
               className={`text-2xl font-bold ${
-                pendingCount > 5 ? "text-amber-600" : "text-gray-700"
+                pendingCount > 5 ? "text-amber-600" : "text-content2"
               }`}
             >
               {pendingCount}
@@ -1204,7 +1204,7 @@ function SafetyStat({
   const tones: Record<typeof color, string> = {
     red: "bg-red-50 text-red-700 border-red-200",
     amber: "bg-amber-50 text-amber-700 border-amber-200",
-    gray: "bg-gray-50 text-gray-700 border-gray-200",
+    gray: "bg-surface2 text-content2 border-line",
   };
   return (
     <div className={`${tones[color]} border rounded-xl p-2.5 text-center`}>

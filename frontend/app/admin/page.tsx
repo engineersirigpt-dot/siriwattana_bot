@@ -289,7 +289,7 @@ export default function AdminPage() {
   }
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-white via-purple-50 to-purple-100">
+    <div className="min-h-screen bg-gradient-to-br from-surface via-app to-purple-100">
       {/* Background decoration */}
       <div className="fixed inset-0 overflow-hidden pointer-events-none">
         <div className="absolute -top-40 -right-40 w-96 h-96 bg-purple-300 rounded-full opacity-20 blur-3xl"></div>
@@ -303,11 +303,11 @@ export default function AdminPage() {
             <h1 className="text-3xl font-medium bg-gradient-to-r from-purple-600 to-purple-800 bg-clip-text text-transparent">
               Admin Dashboard
             </h1>
-            <p className="text-gray-600 mt-1 text-sm">จัดการคำถาม ฐานความรู้ และประวัติการแชท</p>
+            <p className="text-muted mt-1 text-sm">จัดการคำถาม ฐานความรู้ และประวัติการแชท</p>
           </div>
           <button
             onClick={() => router.push("/chat")}
-            className="flex items-center gap-2 px-4 py-2 bg-white/80 backdrop-blur-sm border border-gray-200 rounded-xl hover:bg-white hover:shadow-md transition-all text-sm text-gray-700"
+            className="flex items-center gap-2 px-4 py-2 bg-white/80 backdrop-blur-sm border border-line rounded-xl hover:bg-surface hover:shadow-md transition-all text-sm text-content2"
           >
             <ArrowLeft size={18} />
             กลับไปแชท
@@ -368,17 +368,17 @@ export default function AdminPage() {
             {pending.map((p) => (
               <div
                 key={p.id}
-                className="bg-white rounded-2xl shadow-md border border-gray-100 p-6 hover:shadow-lg transition-all"
+                className="bg-surface rounded-2xl shadow-md border border-line p-6 hover:shadow-lg transition-all"
               >
-                <div className="flex justify-between text-xs text-gray-500 mb-3">
+                <div className="flex justify-between text-xs text-muted mb-3">
                   <span className="inline-flex items-center gap-1 bg-purple-100 text-purple-700 px-2.5 py-1 rounded-full">
                     ถูกถาม {p.ask_count} ครั้ง
                   </span>
                   <span>ล่าสุด: {new Date(p.last_asked_at + "Z").toLocaleString("th-TH")}</span>
                 </div>
-                <p className="text-gray-900 font-medium text-lg mb-3">{p.question}</p>
+                <p className="text-content font-medium text-lg mb-3">{p.question}</p>
                 <textarea
-                  className="w-full px-4 py-3 bg-gray-50 border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-transparent transition-all text-sm"
+                  className="w-full px-4 py-3 bg-surface2 border border-line rounded-xl focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-transparent transition-all text-sm"
                   rows={3}
                   placeholder="พิมพ์คำตอบที่ถูกต้องของบริษัท..."
                   value={answers[p.id] ?? ""}
@@ -396,7 +396,7 @@ export default function AdminPage() {
                   </button>
                   <button
                     onClick={() => ignorePending(p.id)}
-                    className="px-4 py-2 bg-white border border-gray-200 rounded-xl hover:bg-gray-50 transition-all text-sm text-gray-600"
+                    className="px-4 py-2 bg-surface border border-line rounded-xl hover:bg-surface2 transition-all text-sm text-muted"
                   >
                     ข้าม
                   </button>
@@ -411,20 +411,20 @@ export default function AdminPage() {
           <div className="space-y-4">
             <form
               onSubmit={addKnowledge}
-              className="bg-white rounded-2xl shadow-md border border-gray-100 p-6"
+              className="bg-surface rounded-2xl shadow-md border border-line p-6"
             >
-              <h2 className="font-medium text-gray-800 mb-4 flex items-center gap-2">
+              <h2 className="font-medium text-content mb-4 flex items-center gap-2">
                 <Plus size={20} className="text-purple-600" />
                 เพิ่ม Q&A เอง
               </h2>
               <input
-                className="w-full mb-3 px-4 py-3 bg-gray-50 border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-transparent transition-all text-sm"
+                className="w-full mb-3 px-4 py-3 bg-surface2 border border-line rounded-xl focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-transparent transition-all text-sm"
                 placeholder="คำถาม"
                 value={newQ}
                 onChange={(e) => setNewQ(e.target.value)}
               />
               <textarea
-                className="w-full mb-3 px-4 py-3 bg-gray-50 border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-transparent transition-all text-sm"
+                className="w-full mb-3 px-4 py-3 bg-surface2 border border-line rounded-xl focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-transparent transition-all text-sm"
                 rows={3}
                 placeholder="คำตอบ"
                 value={newA}
@@ -446,10 +446,10 @@ export default function AdminPage() {
             {knowledge.map((k) => (
               <div
                 key={k.id}
-                className={`bg-white rounded-2xl shadow-md p-6 transition-all hover:shadow-lg ${
+                className={`bg-surface rounded-2xl shadow-md p-6 transition-all hover:shadow-lg ${
                   k.source === "llm"
                     ? "border-2 border-amber-200"
-                    : "border border-gray-100"
+                    : "border border-line"
                 }`}
               >
                 <div className="flex justify-between items-center mb-3">
@@ -463,7 +463,7 @@ export default function AdminPage() {
                         <CheckCircle2 size={12} /> Admin verified
                       </span>
                     )}
-                    <span className="text-xs text-gray-500">
+                    <span className="text-xs text-muted">
                       ถูกใช้ตอบ {k.hit_count} ครั้ง
                     </span>
                   </div>
@@ -486,8 +486,8 @@ export default function AdminPage() {
                     </button>
                   </div>
                 </div>
-                <p className="font-medium text-gray-900 mb-2">{k.question}</p>
-                <p className="text-sm text-gray-700 whitespace-pre-wrap leading-relaxed">
+                <p className="font-medium text-content mb-2">{k.question}</p>
+                <p className="text-sm text-content2 whitespace-pre-wrap leading-relaxed">
                   {k.answer}
                 </p>
               </div>
@@ -499,7 +499,7 @@ export default function AdminPage() {
         {tab === "history" && (
           <div>
             <div className="flex justify-between items-center mb-4">
-              <p className="text-sm text-gray-500">
+              <p className="text-sm text-muted">
                 แสดงล่าสุด {adminSessions.length} บทสนทนา
               </p>
               <button
@@ -524,38 +524,38 @@ export default function AdminPage() {
                     <div
                       key={s.id}
                       onClick={() => viewSession(s.id)}
-                      className={`bg-white rounded-xl border p-4 cursor-pointer transition-all hover:shadow-md ${
+                      className={`bg-surface rounded-xl border p-4 cursor-pointer transition-all hover:shadow-md ${
                         selectedSession?.id === s.id
                           ? "border-purple-400 ring-2 ring-purple-200 shadow-md"
-                          : "border-gray-100"
+                          : "border-line"
                       }`}
                     >
-                      <div className="flex justify-between text-xs text-gray-500 mb-1">
-                        <span className="inline-flex items-center gap-1 bg-purple-50 text-purple-700 px-2 py-0.5 rounded-full">
+                      <div className="flex justify-between text-xs text-muted mb-1">
+                        <span className="inline-flex items-center gap-1 bg-app text-purple-700 px-2 py-0.5 rounded-full">
                           {s.username}
                         </span>
                         <span>
                           {new Date(s.updated_at + "Z").toLocaleString("th-TH")}
                         </span>
                       </div>
-                      <p className="font-medium text-gray-900 truncate">{s.title}</p>
-                      <p className="text-xs text-gray-500 mt-1">
+                      <p className="font-medium text-content truncate">{s.title}</p>
+                      <p className="text-xs text-muted mt-1">
                         {s.message_count} ข้อความ
                       </p>
                     </div>
                   ))}
                 </div>
 
-                <div className="bg-white rounded-2xl border border-gray-100 p-6 shadow-md max-h-[70vh] overflow-y-auto">
+                <div className="bg-surface rounded-2xl border border-line p-6 shadow-md max-h-[70vh] overflow-y-auto">
                   {selectedSession ? (
                     <>
-                      <div className="border-b border-gray-100 pb-3 mb-4">
+                      <div className="border-b border-line pb-3 mb-4">
                         <div className="flex justify-between items-start">
                           <div>
-                            <p className="font-medium text-gray-900">
+                            <p className="font-medium text-content">
                               {selectedSession.title}
                             </p>
-                            <p className="text-xs text-gray-500 mt-1">
+                            <p className="text-xs text-muted mt-1">
                               โดย {selectedSession.username} —{" "}
                               {new Date(selectedSession.created_at + "Z").toLocaleString(
                                 "th-TH",
@@ -564,7 +564,7 @@ export default function AdminPage() {
                           </div>
                           <button
                             onClick={() => setSelectedSession(null)}
-                            className="text-gray-400 hover:text-gray-600"
+                            className="text-faint hover:text-muted"
                           >
                             <X size={18} />
                           </button>
@@ -573,14 +573,14 @@ export default function AdminPage() {
                       <div className="space-y-3">
                         {selectedSession.messages.map((m) => (
                           <div key={m.id} className="space-y-1.5">
-                            <div className="bg-gradient-to-r from-purple-50 to-purple-100 rounded-xl px-4 py-2.5 text-sm text-gray-800">
+                            <div className="bg-gradient-to-r from-app to-purple-100 rounded-xl px-4 py-2.5 text-sm text-content">
                               <span className="text-xs text-purple-600 font-medium block mb-0.5">
                                 user
                               </span>
                               {m.question}
                             </div>
-                            <div className="bg-gray-50 rounded-xl px-4 py-2.5 text-sm text-gray-800 whitespace-pre-wrap">
-                              <span className="text-xs text-gray-500 font-medium block mb-0.5">
+                            <div className="bg-surface2 rounded-xl px-4 py-2.5 text-sm text-content whitespace-pre-wrap">
+                              <span className="text-xs text-muted font-medium block mb-0.5">
                                 bot ({m.source})
                               </span>
                               {m.answer}
@@ -590,7 +590,7 @@ export default function AdminPage() {
                       </div>
                     </>
                   ) : (
-                    <p className="text-gray-400 text-center mt-20">
+                    <p className="text-faint text-center mt-20">
                       คลิกบทสนทนาด้านซ้ายเพื่อดูเนื้อหา
                     </p>
                   )}
@@ -653,7 +653,7 @@ function TabButton({
       className={`flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium transition-all ${
         active
           ? "bg-gradient-to-r from-purple-600 to-purple-700 text-white shadow-md"
-          : "text-gray-600 hover:bg-white hover:text-gray-800"
+          : "text-muted hover:bg-surface hover:text-content"
       }`}
     >
       {icon}
@@ -661,7 +661,7 @@ function TabButton({
       {count !== undefined && (
         <span
           className={`px-2 py-0.5 rounded-full text-xs ${
-            active ? "bg-white/20 text-white" : "bg-gray-100 text-gray-600"
+            active ? "bg-white/20 text-white" : "bg-surface3 text-muted"
           }`}
         >
           {count}
@@ -683,8 +683,8 @@ function EmptyState({
   return (
     <div className="bg-white/60 backdrop-blur-sm rounded-2xl border border-white/40 p-12 text-center">
       <div className="flex justify-center mb-4">{icon}</div>
-      <h3 className="text-gray-800 font-medium mb-1">{title}</h3>
-      <p className="text-sm text-gray-500">{description}</p>
+      <h3 className="text-content font-medium mb-1">{title}</h3>
+      <p className="text-sm text-muted">{description}</p>
     </div>
   );
 }
@@ -742,10 +742,10 @@ function UsersPanel({
       </div>
 
       {/* Table */}
-      <div className="bg-white rounded-2xl border border-gray-100 shadow-sm overflow-hidden">
+      <div className="bg-surface rounded-2xl border border-line shadow-sm overflow-hidden">
         <div className="overflow-x-auto">
           <table className="min-w-full text-sm">
-            <thead className="bg-purple-50 text-purple-900">
+            <thead className="bg-app text-purple-900">
               <tr>
                 <th className="px-4 py-3 text-left font-semibold">Username</th>
                 <th className="px-4 py-3 text-left font-semibold">Role</th>
@@ -755,12 +755,12 @@ function UsersPanel({
                 <th className="px-4 py-3 text-right font-semibold">Actions</th>
               </tr>
             </thead>
-            <tbody className="divide-y divide-gray-100">
+            <tbody className="divide-y divide-line">
               {users.map((u) => {
                 const isSelf = u.id === currentUserId;
                 return (
-                  <tr key={u.id} className="hover:bg-gray-50/60">
-                    <td className="px-4 py-3 font-medium text-gray-800">
+                  <tr key={u.id} className="hover:bg-surface2/60">
+                    <td className="px-4 py-3 font-medium text-content">
                       {u.username}
                       {isSelf && (
                         <span className="ml-2 text-[10px] bg-blue-100 text-blue-700 px-1.5 py-0.5 rounded">
@@ -775,7 +775,7 @@ function UsersPanel({
                           admin
                         </span>
                       ) : (
-                        <span className="text-gray-600 text-xs">user</span>
+                        <span className="text-muted text-xs">user</span>
                       )}
                     </td>
                     <td className="px-4 py-3">
@@ -791,10 +791,10 @@ function UsersPanel({
                         </span>
                       )}
                     </td>
-                    <td className="px-4 py-3 text-gray-500 text-xs">
+                    <td className="px-4 py-3 text-muted text-xs">
                       {formatLastActive(u.last_active)}
                     </td>
-                    <td className="px-4 py-3 text-right text-gray-600">
+                    <td className="px-4 py-3 text-right text-muted">
                       {u.chat_count}
                     </td>
                     <td className="px-4 py-3">
@@ -849,7 +849,7 @@ function UsersPanel({
         </div>
       </div>
 
-      <p className="text-xs text-gray-400 px-2">
+      <p className="text-xs text-faint px-2">
         💡 MI users ไม่สามารถ reset password จากที่นี่ได้ — ระงับการใช้งานแทนหากต้องการบล็อก
       </p>
     </div>
@@ -866,7 +866,7 @@ function StatCard({
   color: "purple" | "indigo" | "green" | "red";
 }) {
   const colors: Record<typeof color, string> = {
-    purple: "from-purple-50 to-purple-100 text-purple-800 border-purple-200",
+    purple: "from-app to-purple-100 text-purple-800 border-purple-200",
     indigo: "from-indigo-50 to-indigo-100 text-indigo-800 border-indigo-200",
     green: "from-green-50 to-green-100 text-green-800 border-green-200",
     red: "from-red-50 to-red-100 text-red-800 border-red-200",
@@ -896,7 +896,7 @@ function IconAction({
 }) {
   const colors: Record<typeof color, string> = {
     indigo: "text-indigo-600 hover:bg-indigo-50",
-    gray: "text-gray-500 hover:bg-gray-100",
+    gray: "text-muted hover:bg-surface3",
     green: "text-green-600 hover:bg-green-50",
     red: "text-red-600 hover:bg-red-50",
   };
@@ -908,7 +908,7 @@ function IconAction({
       onClick={onClick}
       className={`p-1.5 rounded-md transition-all ${
         disabled
-          ? "text-gray-300 cursor-not-allowed"
+          ? "text-faint cursor-not-allowed"
           : colors[color]
       }`}
     >
@@ -937,13 +937,13 @@ function MetricCard({
   icon: React.ReactNode;
 }) {
   return (
-    <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-4 flex items-center gap-3">
+    <div className="bg-surface rounded-2xl shadow-sm border border-line p-4 flex items-center gap-3">
       <div className={`p-2.5 rounded-xl ${accent}`}>{icon}</div>
       <div className="min-w-0">
-        <div className="text-2xl font-semibold text-gray-800 leading-tight">
+        <div className="text-2xl font-semibold text-content leading-tight">
           {value}
         </div>
-        <div className="text-xs text-gray-500 truncate">{label}</div>
+        <div className="text-xs text-muted truncate">{label}</div>
       </div>
     </div>
   );
@@ -965,18 +965,18 @@ function BarRow({
   const pct = max > 0 ? Math.max(4, Math.round((count / max) * 100)) : 0;
   return (
     <div className="flex items-center gap-3 text-sm">
-      <div className="w-32 shrink-0 truncate text-gray-600" title={label}>
+      <div className="w-32 shrink-0 truncate text-muted" title={label}>
         {label}
       </div>
-      <div className="flex-1 bg-gray-100 rounded-full h-5 overflow-hidden">
+      <div className="flex-1 bg-surface3 rounded-full h-5 overflow-hidden">
         <div
           className={`h-full ${color} rounded-full transition-all`}
           style={{ width: `${pct}%` }}
         />
       </div>
-      <div className="w-16 shrink-0 text-right text-gray-700 tabular-nums">
+      <div className="w-16 shrink-0 text-right text-content2 tabular-nums">
         {count}
-        {sub && <span className="text-gray-400 text-xs ml-1">{sub}</span>}
+        {sub && <span className="text-faint text-xs ml-1">{sub}</span>}
       </div>
     </div>
   );
@@ -1045,12 +1045,12 @@ function AnalyticsView({ data }: { data: Analytics | null }) {
 
       <div className="grid lg:grid-cols-2 gap-6">
         {/* Daily volume */}
-        <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-5">
-          <h3 className="font-medium text-gray-800 mb-4">
+        <div className="bg-surface rounded-2xl shadow-sm border border-line p-5">
+          <h3 className="font-medium text-content mb-4">
             ปริมาณข้อความ (14 วันล่าสุด)
           </h3>
           {data.daily_volume.length === 0 ? (
-            <p className="text-sm text-gray-400">ยังไม่มีข้อมูล</p>
+            <p className="text-sm text-faint">ยังไม่มีข้อมูล</p>
           ) : (
             <div className="flex items-end gap-1 h-40">
               {data.daily_volume.map((d) => (
@@ -1059,7 +1059,7 @@ function AnalyticsView({ data }: { data: Analytics | null }) {
                   className="flex-1 flex flex-col items-center justify-end gap-1 group"
                   title={`${d.day}: ${d.count}`}
                 >
-                  <span className="text-[10px] text-gray-400 opacity-0 group-hover:opacity-100">
+                  <span className="text-[10px] text-faint opacity-0 group-hover:opacity-100">
                     {d.count}
                   </span>
                   <div
@@ -1068,7 +1068,7 @@ function AnalyticsView({ data }: { data: Analytics | null }) {
                       height: `${Math.max(4, (d.count / maxDaily) * 100)}%`,
                     }}
                   />
-                  <span className="text-[9px] text-gray-400">
+                  <span className="text-[9px] text-faint">
                     {d.day.slice(5)}
                   </span>
                 </div>
@@ -1078,10 +1078,10 @@ function AnalyticsView({ data }: { data: Analytics | null }) {
         </div>
 
         {/* Source breakdown */}
-        <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-5">
-          <h3 className="font-medium text-gray-800 mb-4">ที่มาของคำตอบ</h3>
+        <div className="bg-surface rounded-2xl shadow-sm border border-line p-5">
+          <h3 className="font-medium text-content mb-4">ที่มาของคำตอบ</h3>
           {data.source_breakdown.length === 0 ? (
-            <p className="text-sm text-gray-400">ยังไม่มีข้อมูล</p>
+            <p className="text-sm text-faint">ยังไม่มีข้อมูล</p>
           ) : (
             <div className="space-y-2.5">
               {data.source_breakdown.map((s) => (
@@ -1105,23 +1105,23 @@ function AnalyticsView({ data }: { data: Analytics | null }) {
       </div>
 
       {/* Top unanswered = KB gaps */}
-      <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-5">
-        <h3 className="font-medium text-gray-800 mb-1">
+      <div className="bg-surface rounded-2xl shadow-sm border border-line p-5">
+        <h3 className="font-medium text-content mb-1">
           คำถามที่ตอบไม่ได้บ่อย (ช่องว่างความรู้)
         </h3>
-        <p className="text-xs text-gray-500 mb-4">
+        <p className="text-xs text-muted mb-4">
           ควรเพิ่มคำตอบเหล่านี้เข้าฐานความรู้ — ดูที่แท็บ “คำถามรอตอบ”
         </p>
         {data.top_unanswered.length === 0 ? (
-          <p className="text-sm text-gray-400">ไม่มี — เยี่ยมมาก! 🎉</p>
+          <p className="text-sm text-faint">ไม่มี — เยี่ยมมาก! 🎉</p>
         ) : (
           <div className="space-y-2">
             {data.top_unanswered.map((q, i) => (
               <div
                 key={i}
-                className="flex items-center justify-between gap-3 text-sm border-b border-gray-50 pb-2 last:border-0"
+                className="flex items-center justify-between gap-3 text-sm border-b border-line pb-2 last:border-0"
               >
-                <span className="text-gray-700 truncate">{q.question}</span>
+                <span className="text-content2 truncate">{q.question}</span>
                 <span className="shrink-0 bg-amber-100 text-amber-700 px-2 py-0.5 rounded-full text-xs">
                   ถูกถาม {q.ask_count} ครั้ง
                 </span>
@@ -1132,22 +1132,22 @@ function AnalyticsView({ data }: { data: Analytics | null }) {
       </div>
 
       {/* Recent downvotes */}
-      <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-5">
-        <h3 className="font-medium text-gray-800 mb-4 flex items-center gap-2">
+      <div className="bg-surface rounded-2xl shadow-sm border border-line p-5">
+        <h3 className="font-medium text-content mb-4 flex items-center gap-2">
           <ThumbsDown size={16} className="text-red-500" />
           คำตอบที่โดน 👎 ล่าสุด
         </h3>
         {data.recent_downvotes.length === 0 ? (
-          <p className="text-sm text-gray-400">ยังไม่มี</p>
+          <p className="text-sm text-faint">ยังไม่มี</p>
         ) : (
           <div className="space-y-3">
             {data.recent_downvotes.map((d, i) => (
-              <div key={i} className="border-b border-gray-50 pb-3 last:border-0">
-                <p className="text-sm text-gray-800 font-medium">{d.question}</p>
+              <div key={i} className="border-b border-line pb-3 last:border-0">
+                <p className="text-sm text-content font-medium">{d.question}</p>
                 {d.reason && (
                   <p className="text-sm text-red-600 mt-0.5">เหตุผล: {d.reason}</p>
                 )}
-                <p className="text-xs text-gray-400 mt-0.5">
+                <p className="text-xs text-faint mt-0.5">
                   โดย {d.username}
                   {d.created_at &&
                     " · " +
@@ -1164,10 +1164,10 @@ function AnalyticsView({ data }: { data: Analytics | null }) {
       </div>
 
       {/* Top users */}
-      <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-5">
-        <h3 className="font-medium text-gray-800 mb-4">ผู้ใช้ที่ถามมากที่สุด</h3>
+      <div className="bg-surface rounded-2xl shadow-sm border border-line p-5">
+        <h3 className="font-medium text-content mb-4">ผู้ใช้ที่ถามมากที่สุด</h3>
         {data.top_users.length === 0 ? (
-          <p className="text-sm text-gray-400">ยังไม่มีข้อมูล</p>
+          <p className="text-sm text-faint">ยังไม่มีข้อมูล</p>
         ) : (
           <div className="space-y-2.5">
             {data.top_users.map((u) => (

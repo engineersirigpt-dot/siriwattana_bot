@@ -18,23 +18,23 @@ export function MarkdownMessage({ text }: Props) {
       style={{ fontSize: "15px" }}
       className="
         prose prose-sm max-w-none
-        text-gray-800 leading-relaxed
-        prose-headings:font-semibold prose-headings:text-gray-900
+        text-content leading-relaxed
+        prose-headings:font-semibold prose-headings:text-content
         prose-h1:text-xl prose-h1:mt-4 prose-h1:mb-2
         prose-h2:text-lg prose-h2:mt-4 prose-h2:mb-2
         prose-h3:text-base prose-h3:mt-3 prose-h3:mb-1.5
         prose-h4:text-base prose-h4:mt-3 prose-h4:mb-1.5
         prose-p:my-2 prose-p:leading-relaxed
-        prose-strong:text-gray-900 prose-strong:font-semibold
-        prose-em:text-gray-800
+        prose-strong:text-content prose-strong:font-semibold
+        prose-em:text-content
         prose-a:text-purple-600 prose-a:no-underline hover:prose-a:underline
         prose-ul:my-2 prose-ol:my-2
         prose-li:my-0.5 prose-li:marker:text-purple-500
         prose-blockquote:border-l-4 prose-blockquote:border-purple-300
         prose-blockquote:bg-purple-50/50 prose-blockquote:py-1 prose-blockquote:px-3
         prose-blockquote:rounded-r prose-blockquote:not-italic
-        prose-blockquote:text-gray-700
-        prose-hr:my-4 prose-hr:border-gray-200
+        prose-blockquote:text-content2
+        prose-hr:my-4 prose-hr:border-line
         prose-img:rounded-lg prose-img:my-2
       "
     >
@@ -43,7 +43,7 @@ export function MarkdownMessage({ text }: Props) {
         rehypePlugins={[rehypeHighlight]}
         components={{
           table: ({ children }) => (
-            <div className="my-3 overflow-x-auto rounded-lg border border-gray-200 shadow-sm">
+            <div className="my-3 overflow-x-auto rounded-lg border border-line shadow-sm">
               <table className="min-w-full border-collapse text-sm">{children}</table>
             </div>
           ),
@@ -51,24 +51,24 @@ export function MarkdownMessage({ text }: Props) {
             <thead className="bg-purple-50">{children}</thead>
           ),
           th: ({ children }) => (
-            <th className="border-b border-gray-200 px-4 py-2.5 text-left font-semibold text-purple-900">
+            <th className="border-b border-line px-4 py-2.5 text-left font-semibold text-purple-900">
               {children}
             </th>
           ),
           tr: ({ children }) => (
-            <tr className="border-b border-gray-100 last:border-0 hover:bg-gray-50/60">
+            <tr className="border-b border-line last:border-0 hover:bg-surface2/60">
               {children}
             </tr>
           ),
           td: ({ children }) => (
-            <td className="px-4 py-2.5 align-top text-gray-700">{children}</td>
+            <td className="px-4 py-2.5 align-top text-content2">{children}</td>
           ),
           code: ({ className, children, ...rest }) => {
             const isInline = !className;
             if (isInline) {
               return (
                 <code
-                  className="bg-gray-100 text-purple-700 px-1.5 py-0.5 rounded text-[0.875em] font-mono"
+                  className="bg-surface3 text-purple-700 px-1.5 py-0.5 rounded text-[0.875em] font-mono"
                   {...rest}
                 >
                   {children}

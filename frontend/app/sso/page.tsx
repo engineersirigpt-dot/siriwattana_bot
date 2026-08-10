@@ -42,8 +42,8 @@ export default function SsoPage() {
   }, [router]);
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-gradient-to-b from-purple-50 to-white px-4">
-      <div className="max-w-sm w-full bg-white rounded-2xl shadow-lg border border-gray-100 p-8 text-center">
+    <div className="min-h-screen flex items-center justify-center bg-gradient-to-b from-app to-surface px-4">
+      <div className="max-w-sm w-full bg-surface rounded-2xl shadow-lg border border-line p-8 text-center">
         <img
           src="/Logo_siri.jpg"
           alt="Sirivatana"
@@ -52,7 +52,7 @@ export default function SsoPage() {
         {error ? (
           <>
             <p className="text-red-600 font-medium mb-1">เข้าสู่ระบบไม่สำเร็จ</p>
-            <p className="text-sm text-gray-500 mb-5">{error}</p>
+            <p className="text-sm text-muted mb-5">{error}</p>
             <a
               href="/login"
               className="inline-block px-5 py-2.5 bg-purple-600 hover:bg-purple-700 text-white rounded-xl text-sm font-medium transition-all"
@@ -67,8 +67,8 @@ export default function SsoPage() {
               <span className="w-2.5 h-2.5 bg-purple-400 rounded-full animate-bounce" style={{ animationDelay: "150ms" }} />
               <span className="w-2.5 h-2.5 bg-purple-400 rounded-full animate-bounce" style={{ animationDelay: "300ms" }} />
             </div>
-            <p className="text-gray-700 font-medium">กำลังเข้าสู่ระบบผ่าน MI…</p>
-            <p className="text-sm text-gray-400 mt-1">SiriGPT</p>
+            <p className="text-content2 font-medium">กำลังเข้าสู่ระบบผ่าน MI…</p>
+            <p className="text-sm text-faint mt-1">SiriGPT</p>
           </>
         )}
       </div>

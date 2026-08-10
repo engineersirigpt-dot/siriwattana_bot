@@ -63,6 +63,7 @@ import {
 } from "@/lib/api";
 import { AlertModal, ConfirmModal, PromptModal } from "@/components/Modal";
 import { MarkdownMessage } from "@/components/MarkdownMessage";
+import ThemeToggle from "@/components/ThemeToggle";
 
 type Attachment = {
   id: number;
@@ -1261,7 +1262,7 @@ export default function ChatPage() {
 
   return (
     <div
-      className="relative flex h-screen w-full bg-gray-50"
+      className="relative flex h-screen w-full bg-surface2"
       onDragOver={handleDragOver}
       onDragLeave={handleDragLeave}
       onDrop={handleDrop}
@@ -1273,7 +1274,7 @@ export default function ChatPage() {
             <p className="text-lg font-semibold text-purple-700">
               วางไฟล์ที่นี่เพื่อแนบในแชท
             </p>
-            <p className="mt-1 text-sm text-gray-500">
+            <p className="mt-1 text-sm text-muted">
               รองรับรูปภาพ, PDF, Word, Excel, PowerPoint และไฟล์ข้อความ สูงสุด 5 ไฟล์
             </p>
           </div>
@@ -1640,7 +1641,7 @@ export default function ChatPage() {
         {/* Profile + actions */}
         <div className="p-4 border-t border-white/20 space-y-2">
           <div className="flex items-center gap-3 px-2 py-2 rounded-xl bg-white/5 border border-white/10">
-            <div className="w-10 h-10 rounded-xl bg-white flex items-center justify-center shadow-md flex-shrink-0 overflow-hidden p-0.5">
+            <div className="w-10 h-10 rounded-xl bg-surface flex items-center justify-center shadow-md flex-shrink-0 overflow-hidden p-0.5">
               <img
                 src="/Logo_siri.jpg"
                 alt="Sirivatana"
@@ -1672,6 +1673,10 @@ export default function ChatPage() {
             <FileText size={16} />
             <span>แปลเอกสาร</span>
           </button>
+          <ThemeToggle
+            showLabel
+            className="w-full flex items-center gap-2 text-white hover:text-white hover:bg-white/10 py-2 px-3 rounded-lg transition-all text-sm"
+          />
           <button
             onClick={logout}
             className="w-full flex items-center gap-2 text-white hover:text-white hover:bg-white/10 py-2 px-3 rounded-lg transition-all text-sm"
@@ -1684,8 +1689,8 @@ export default function ChatPage() {
 
       {/* Main */}
       <main className="flex-1 flex flex-col">
-        <header className="bg-white border-b border-gray-200 px-8 py-4 shadow-sm flex items-center justify-between gap-4">
-          <h2 className="text-gray-800 font-medium truncate flex-1">{currentTitle}</h2>
+        <header className="bg-surface border-b border-line px-8 py-4 shadow-sm flex items-center justify-between gap-4">
+          <h2 className="text-content font-medium truncate flex-1">{currentTitle}</h2>
           <div className="flex items-center gap-3">
             {!readOnlyOwner && currentSid !== null && (
               <TurnCounter count={turnCount} limit={turnLimit} onNewChat={() => newChat(chatMode)} />
@@ -1696,7 +1701,7 @@ export default function ChatPage() {
                 className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm transition-all border ${
                   sharedToken
                     ? "bg-green-50 text-green-700 border-green-300 hover:bg-green-100"
-                    : "bg-white text-gray-700 border-gray-200 hover:bg-gray-50 hover:border-gray-300"
+                    : "bg-surface text-content2 border-line hover:bg-surface2 hover:border-line"
                 }`}
                 title={sharedToken ? "แชทนี้ถูกแชร์อยู่ — กดเพื่อจัดการผู้รับ" : "แชร์แชทนี้ให้เพื่อน"}
               >
@@ -1714,7 +1719,7 @@ export default function ChatPage() {
               </button>
             )}
             <div className="flex items-center gap-2.5 pl-2 pr-4 py-1.5 bg-purple-500 rounded-xl">
-              <div className="bg-white rounded-lg p-0.5">
+              <div className="bg-surface rounded-lg p-0.5">
                 <img
                   src="/Logo_siri.jpg"
                   alt="Sirivatana"
@@ -1763,7 +1768,7 @@ export default function ChatPage() {
             </span>
             <button
               onClick={() => setChatMode("normal")}
-              className="flex-shrink-0 inline-flex items-center gap-1 px-3 py-1 bg-white/70 hover:bg-white text-amber-800 rounded-lg text-xs font-medium border border-amber-300 transition-all"
+              className="flex-shrink-0 inline-flex items-center gap-1 px-3 py-1 bg-white/70 hover:bg-surface text-amber-800 rounded-lg text-xs font-medium border border-amber-300 transition-all"
               title="ปิดโหมดคู่มือบริษัท (ยังอยู่ในแชทเดิม)"
             >
               <X size={13} />
@@ -1774,11 +1779,11 @@ export default function ChatPage() {
 
         <div
           ref={scrollRef}
-          className="flex-1 overflow-y-auto bg-gradient-to-b from-purple-50/30 to-white"
+          className="flex-1 overflow-y-auto bg-gradient-to-b from-app/30 to-surface"
         >
           <div className="max-w-4xl mx-auto px-8 py-8 space-y-6">
             {messages.length === 0 && (
-              <div className="text-center text-gray-400 mt-20">
+              <div className="text-center text-faint mt-20">
                 <img
                   src="/Logo_siri.jpg"
                   alt="Sirivatana"
@@ -1789,7 +1794,7 @@ export default function ChatPage() {
                     <p className="text-base font-semibold text-amber-700">
                       ผู้เชี่ยวชาญเฉพาะเรื่องบริษัท
                     </p>
-                    <p className="text-sm text-gray-400 mt-1">
+                    <p className="text-sm text-faint mt-1">
                       ใช้ถามเรื่องที่ลงลึกเกี่ยวกับบริษัทโดยเฉพาะ — ระเบียบ นโยบาย คู่มือ และข้อมูลภายใน
                     </p>
                   </>
@@ -1822,7 +1827,7 @@ export default function ChatPage() {
                   <img
                     src="/Logo_siri.jpg"
                     alt="Sirivatana"
-                    className="w-9 h-9 rounded-full object-cover flex-shrink-0 shadow-sm border border-gray-200"
+                    className="w-9 h-9 rounded-full object-cover flex-shrink-0 shadow-sm border border-line"
                   />
                   <div className="flex-1 min-w-0 pt-1">
                     {m.attachments && m.attachments.length > 0 && (
@@ -1836,12 +1841,12 @@ export default function ChatPage() {
                       // Image generation is running (10-20s) — ChatGPT-style
                       // "creating image" placeholder with a shimmering canvas.
                       <div className="w-72 sm:w-80">
-                        <div className="relative w-full aspect-square rounded-xl bg-gradient-to-br from-purple-50 to-gray-100 border border-gray-200 overflow-hidden">
+                        <div className="relative w-full aspect-square rounded-xl bg-gradient-to-br from-app to-surface3 border border-line overflow-hidden">
                           <div className="absolute inset-0 -translate-x-full animate-[shimmer_1.6s_infinite] bg-gradient-to-r from-transparent via-white/60 to-transparent" />
                           <div className="absolute inset-0 flex flex-col items-center justify-center gap-2">
                             <ImageIcon size={30} className="text-purple-300" />
-                            <span className="text-sm text-gray-500">🎨 กำลังสร้างรูป…</span>
-                            <span className="text-xs text-gray-400">อาจใช้เวลาสักครู่</span>
+                            <span className="text-sm text-muted">🎨 กำลังสร้างรูป…</span>
+                            <span className="text-xs text-faint">อาจใช้เวลาสักครู่</span>
                           </div>
                         </div>
                       </div>
@@ -1861,13 +1866,13 @@ export default function ChatPage() {
                           className="w-2 h-2 bg-purple-400 rounded-full animate-bounce"
                           style={{ animationDelay: "300ms" }}
                         />
-                        <span className="ml-2 text-sm text-gray-500">กำลังคิด…</span>
+                        <span className="ml-2 text-sm text-muted">กำลังคิด…</span>
                       </div>
                     ) : isTyping ? (
                       // Fake char-by-char typing (used by the file/non-stream
                       // path): render plain since slicing markdown mid-token
                       // would look broken.
-                      <p className="leading-relaxed text-gray-800 whitespace-pre-wrap text-[15px]">
+                      <p className="leading-relaxed text-content whitespace-pre-wrap text-[15px]">
                         {shownText}
                         <span className="inline-block w-0.5 h-4 bg-purple-500 ml-0.5 align-middle animate-pulse" />
                       </p>
@@ -1899,7 +1904,7 @@ export default function ChatPage() {
                         <div className="mt-2 flex items-center gap-1">
                           <button
                             onClick={() => copyAnswer(i, m.text)}
-                            className="flex items-center gap-1 px-2 py-1 rounded-md text-xs text-gray-400 hover:text-gray-700 hover:bg-gray-100 transition-all"
+                            className="flex items-center gap-1 px-2 py-1 rounded-md text-xs text-faint hover:text-content2 hover:bg-surface3 transition-all"
                             title="คัดลอกคำตอบ"
                           >
                             {copiedMsgIdx === i ? (
@@ -1948,13 +1953,13 @@ export default function ChatPage() {
                           )}
                           {m.id && !readOnlyOwner && (
                             <>
-                              <span className="w-px h-3.5 bg-gray-200 mx-0.5" />
+                              <span className="w-px h-3.5 bg-line mx-0.5" />
                               <button
                                 onClick={() => onThumb(i, m.id!, "up")}
                                 className={`p-1 rounded-md transition-all ${
                                   m.myVote === "up"
                                     ? "text-green-600 bg-green-50"
-                                    : "text-gray-400 hover:text-gray-700 hover:bg-gray-100"
+                                    : "text-faint hover:text-content2 hover:bg-surface3"
                                 }`}
                                 title="คำตอบนี้มีประโยชน์"
                               >
@@ -1965,7 +1970,7 @@ export default function ChatPage() {
                                 className={`p-1 rounded-md transition-all ${
                                   m.myVote === "down"
                                     ? "text-red-600 bg-red-50"
-                                    : "text-gray-400 hover:text-gray-700 hover:bg-gray-100"
+                                    : "text-faint hover:text-content2 hover:bg-surface3"
                                 }`}
                                 title="คำตอบนี้ยังไม่ดี — ส่งให้แอดมินปรับปรุง"
                               >
@@ -1984,7 +1989,7 @@ export default function ChatPage() {
                 <img
                   src="/Logo_siri.jpg"
                   alt="Sirivatana"
-                  className="w-9 h-9 rounded-full object-cover flex-shrink-0 shadow-sm border border-gray-200"
+                  className="w-9 h-9 rounded-full object-cover flex-shrink-0 shadow-sm border border-line"
                 />
                 <div className="flex items-center gap-1.5 pt-3">
                   <span
@@ -1999,14 +2004,14 @@ export default function ChatPage() {
                     className="w-2 h-2 bg-purple-400 rounded-full animate-bounce"
                     style={{ animationDelay: "300ms" }}
                   />
-                  <span className="ml-2 text-sm text-gray-500">กำลังคิด…</span>
+                  <span className="ml-2 text-sm text-muted">กำลังคิด…</span>
                 </div>
               </div>
             )}
           </div>
         </div>
 
-        <div className="bg-white border-t border-gray-200 px-8 py-6 shadow-lg">
+        <div className="bg-surface border-t border-line px-8 py-6 shadow-lg">
           <form onSubmit={send} className="max-w-4xl mx-auto">
             {pendingFiles.length > 0 && (
               <div className="flex flex-wrap gap-2 mb-3">
@@ -2037,7 +2042,7 @@ export default function ChatPage() {
                   pendingFiles.length >= 5 ||
                   turnCount >= turnLimit
                 }
-                className="flex-shrink-0 p-3 bg-gray-50 border border-gray-200 rounded-2xl hover:bg-gray-100 transition-all text-gray-600 disabled:opacity-50 disabled:cursor-not-allowed"
+                className="flex-shrink-0 p-3 bg-surface2 border border-line rounded-2xl hover:bg-surface3 transition-all text-muted disabled:opacity-50 disabled:cursor-not-allowed"
                 title="แนบไฟล์ (รูป, PDF, Word, Excel, PowerPoint, ไฟล์เสียง, Text/Code — สูงสุด 5 ไฟล์)"
               >
                 <Paperclip size={20} />
@@ -2050,7 +2055,7 @@ export default function ChatPage() {
                   className={`flex-shrink-0 p-3 rounded-2xl border transition-all disabled:opacity-50 disabled:cursor-not-allowed ${
                     isRecording
                       ? "bg-red-500 border-red-500 text-white animate-pulse"
-                      : "bg-gray-50 border-gray-200 hover:bg-gray-100 text-gray-600"
+                      : "bg-surface2 border-line hover:bg-surface3 text-muted"
                   }`}
                   title={isRecording ? "กำลังอัด — กดเพื่อหยุดและถอดเสียง" : "พูดถาม (อัดเสียง)"}
                 >
@@ -2084,7 +2089,7 @@ export default function ChatPage() {
                 // their next question while the bot is still answering —
                 // ChatGPT-style. Submit handler guards against double-send.
                 disabled={!!readOnlyOwner || turnCount >= turnLimit}
-                className="flex-1 px-6 py-4 bg-gray-50 border border-gray-200 rounded-2xl focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-transparent transition-all disabled:opacity-60 disabled:cursor-not-allowed resize-none overflow-y-auto leading-6"
+                className="flex-1 px-6 py-4 bg-surface2 border border-line rounded-2xl focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-transparent transition-all disabled:opacity-60 disabled:cursor-not-allowed resize-none overflow-y-auto leading-6"
               />
               {sending ? (
                 <button
@@ -2111,13 +2116,13 @@ export default function ChatPage() {
                 </button>
               )}
             </div>
-            <p className="mt-2 text-xs text-gray-400 text-center">
+            <p className="mt-2 text-xs text-faint text-center">
               กด{" "}
-              <kbd className="px-1.5 py-0.5 bg-gray-100 rounded text-gray-600 font-mono text-[10px]">
+              <kbd className="px-1.5 py-0.5 bg-surface3 rounded text-muted font-mono text-[10px]">
                 Enter
               </kbd>{" "}
               ส่ง • กด{" "}
-              <kbd className="px-1.5 py-0.5 bg-gray-100 rounded text-gray-600 font-mono text-[10px]">
+              <kbd className="px-1.5 py-0.5 bg-surface3 rounded text-muted font-mono text-[10px]">
                 Shift+Enter
               </kbd>{" "}
               ขึ้นบรรทัดใหม่
@@ -2282,10 +2287,10 @@ function ShareModal({
   );
 
   const linkBlock = sharedToken ? (
-    <div className="mt-4 pt-4 border-t border-gray-100">
-      <p className="text-xs font-medium text-gray-600 mb-2">
+    <div className="mt-4 pt-4 border-t border-line">
+      <p className="text-xs font-medium text-muted mb-2">
         🔗 ลิงก์สำหรับส่งให้ผู้รับ
-        <span className="font-normal text-gray-400">
+        <span className="font-normal text-faint">
           {isAdmin && selected.size > 0
             ? " — เฉพาะคนที่เลือกไว้เท่านั้นที่เปิดได้"
             : " — ใครมีลิงก์นี้ + login ก็เปิดได้"}
@@ -2298,7 +2303,7 @@ function ShareModal({
           readOnly
           value={url}
           onFocus={(e) => e.target.select()}
-          className="flex-1 px-3 py-2 text-xs border border-gray-200 rounded-lg bg-gray-50 text-gray-600"
+          className="flex-1 px-3 py-2 text-xs border border-line rounded-lg bg-surface2 text-muted"
         />
         <button
           onClick={copyUrl}
@@ -2329,17 +2334,17 @@ function ShareModal({
       onClick={onClose}
     >
       <div
-        className="w-full max-w-md bg-white rounded-2xl shadow-2xl border border-gray-100 p-6"
+        className="w-full max-w-md bg-surface rounded-2xl shadow-2xl border border-line p-6"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between mb-1">
-          <h3 className="text-lg font-semibold text-gray-800 flex items-center gap-2">
+          <h3 className="text-lg font-semibold text-content flex items-center gap-2">
             <Share2 size={18} className="text-purple-600" />
             แชร์แชทให้เพื่อนร่วมทีม
           </h3>
           <button
             onClick={onClose}
-            className="text-gray-400 hover:text-gray-600"
+            className="text-faint hover:text-muted"
             aria-label="close"
           >
             <X size={20} />
@@ -2348,7 +2353,7 @@ function ShareModal({
 
         {isAdmin ? (
           <>
-            <p className="text-sm text-gray-500 mb-3">
+            <p className="text-sm text-muted mb-3">
               เลือกคนที่จะให้เห็นแชทนี้ — เฉพาะคนที่เลือกเท่านั้นที่เห็นในกล่อง
               &quot;แชร์ร่วมกันในทีม&quot;. ถ้าไม่เลือกใคร = ลิงก์เปิดได้ทุกคนที่ login
             </p>
@@ -2356,20 +2361,20 @@ function ShareModal({
               value={q}
               onChange={(e) => setQ(e.target.value)}
               placeholder="ค้นหาชื่อ..."
-              className="w-full mb-3 px-3 py-2 text-sm border border-gray-200 rounded-lg focus:outline-none focus:border-purple-400"
+              className="w-full mb-3 px-3 py-2 text-sm border border-line rounded-lg focus:outline-none focus:border-purple-400"
             />
-            <div className="max-h-56 overflow-y-auto border border-gray-100 rounded-lg divide-y divide-gray-50">
+            <div className="max-h-56 overflow-y-auto border border-line rounded-lg divide-y divide-line">
               {busy && users.length === 0 ? (
-                <div className="p-4 text-center text-sm text-gray-400">
+                <div className="p-4 text-center text-sm text-faint">
                   <Loader2 className="inline animate-spin" size={16} /> กำลังโหลด...
                 </div>
               ) : filtered.length === 0 ? (
-                <div className="p-4 text-center text-sm text-gray-400">ไม่พบผู้ใช้</div>
+                <div className="p-4 text-center text-sm text-faint">ไม่พบผู้ใช้</div>
               ) : (
                 filtered.map((u) => (
                   <label
                     key={u.id}
-                    className="flex items-center gap-3 px-3 py-2 hover:bg-gray-50 cursor-pointer"
+                    className="flex items-center gap-3 px-3 py-2 hover:bg-surface2 cursor-pointer"
                   >
                     <input
                       type="checkbox"
@@ -2377,17 +2382,17 @@ function ShareModal({
                       onChange={() => onToggleUser(u.id)}
                       className="accent-purple-600"
                     />
-                    <span className="text-sm text-gray-700">{u.username}</span>
+                    <span className="text-sm text-content2">{u.username}</span>
                   </label>
                 ))
               )}
             </div>
             <div className="mt-4 flex items-center justify-between">
-              <span className="text-xs text-gray-500">เลือกแล้ว {selected.size} คน</span>
+              <span className="text-xs text-muted">เลือกแล้ว {selected.size} คน</span>
               <div className="flex gap-2">
                 <button
                   onClick={onClose}
-                  className="px-4 py-2 text-sm text-gray-600 rounded-lg hover:bg-gray-100"
+                  className="px-4 py-2 text-sm text-muted rounded-lg hover:bg-surface3"
                 >
                   ปิด
                 </button>
@@ -2405,11 +2410,11 @@ function ShareModal({
           </>
         ) : (
           <>
-            <p className="text-sm text-gray-500 mb-1">
+            <p className="text-sm text-muted mb-1">
               คัดลอกลิงก์ส่งให้เพื่อน — เปิดดูแบบอ่านอย่างเดียว และรับเป็นแชทตัวเองได้
             </p>
             {busy && !sharedToken ? (
-              <div className="py-6 text-center text-sm text-gray-400">
+              <div className="py-6 text-center text-sm text-faint">
                 <Loader2 className="inline animate-spin" size={16} /> กำลังสร้างลิงก์...
               </div>
             ) : (
@@ -2435,7 +2440,7 @@ function TurnCounter({
   const atLimit = count >= limit;
   const nearLimit = !atLimit && remaining <= 5;
 
-  let style = "bg-gray-100 text-gray-600 border-gray-200";
+  let style = "bg-surface3 text-muted border-line";
   if (atLimit) style = "bg-red-100 text-red-700 border-red-300";
   else if (nearLimit) style = "bg-amber-100 text-amber-800 border-amber-300";
 
@@ -2454,7 +2459,7 @@ function TurnCounter({
         <button
           type="button"
           onClick={onNewChat}
-          className="ml-1 px-2 py-0.5 rounded bg-white border border-red-300 text-red-700 hover:bg-red-50 transition-all font-medium"
+          className="ml-1 px-2 py-0.5 rounded bg-surface border border-red-300 text-red-700 hover:bg-red-50 transition-all font-medium"
         >
           + แชทใหม่
         </button>
@@ -2503,7 +2508,7 @@ function ExportOfferActions({
 
   if (!targetMessage) {
     return (
-      <p className="mt-2 text-xs text-gray-500 italic">
+      <p className="mt-2 text-xs text-muted italic">
         ยังไม่มีคำตอบล่าสุดให้บันทึก — ลองถามคำถามก่อน แล้วพิมพ์ "ขอ PDF" อีกครั้งค่ะ
       </p>
     );
@@ -2576,7 +2581,7 @@ function ExportOfferActions({
         type="button"
         onClick={handleExport}
         disabled={exporting}
-        className="inline-flex items-center gap-1.5 px-4 py-2 text-sm rounded-xl border border-purple-300 bg-purple-50 text-purple-700 hover:bg-purple-100 hover:border-purple-400 transition-all disabled:opacity-60 disabled:cursor-wait shadow-sm"
+        className="inline-flex items-center gap-1.5 px-4 py-2 text-sm rounded-xl border border-purple-300 bg-app text-purple-700 hover:bg-purple-100 hover:border-purple-400 transition-all disabled:opacity-60 disabled:cursor-wait shadow-sm"
         title={`บันทึกคำตอบล่าสุดเป็น ${fmtMeta.label}`}
       >
         {exporting ? (
@@ -2597,7 +2602,7 @@ function ExportOfferActions({
           type="button"
           onClick={handleDownloadSource}
           disabled={downloading}
-          className="inline-flex items-center gap-1.5 px-4 py-2 text-sm rounded-xl border border-gray-300 bg-white text-gray-700 hover:bg-gray-50 hover:border-gray-400 transition-all disabled:opacity-60 disabled:cursor-wait shadow-sm max-w-[360px]"
+          className="inline-flex items-center gap-1.5 px-4 py-2 text-sm rounded-xl border border-line bg-surface text-content2 hover:bg-surface2 hover:border-line transition-all disabled:opacity-60 disabled:cursor-wait shadow-sm max-w-[360px]"
           title={`ดาวน์โหลด: ${targetMessage.source_file}`}
         >
           {downloading ? (
@@ -2635,7 +2640,7 @@ function PendingFileChip({ file, onRemove }: { file: File; onRemove: () => void 
   }, [file, isImage]);
 
   return (
-    <div className="flex items-center gap-2 bg-purple-50 border border-purple-200 rounded-xl px-3 py-2 text-sm">
+    <div className="flex items-center gap-2 bg-app border border-purple-200 rounded-xl px-3 py-2 text-sm">
       {isImage && thumb ? (
         <img
           src={thumb}
@@ -2648,13 +2653,13 @@ function PendingFileChip({ file, onRemove }: { file: File; onRemove: () => void 
         </div>
       )}
       <div className="min-w-0">
-        <p className="text-gray-800 truncate max-w-[140px]">{file.name}</p>
-        <p className="text-xs text-gray-500">{(file.size / 1024).toFixed(0)} KB</p>
+        <p className="text-content truncate max-w-[140px]">{file.name}</p>
+        <p className="text-xs text-muted">{(file.size / 1024).toFixed(0)} KB</p>
       </div>
       <button
         type="button"
         onClick={onRemove}
-        className="text-gray-400 hover:text-red-500 ml-1"
+        className="text-faint hover:text-red-500 ml-1"
       >
         <X size={16} />
       </button>
@@ -2739,9 +2744,9 @@ function AttachmentImage({
       <div
         className={`rounded-lg flex items-center justify-center ${
           large ? "w-72 h-72 sm:w-80 sm:h-80" : "w-32 h-32"
-        } ${onUserBubble ? "bg-white/10" : "bg-gray-100"}`}
+        } ${onUserBubble ? "bg-white/10" : "bg-surface3"}`}
       >
-        <ImageIcon size={24} className={onUserBubble ? "text-white/60" : "text-gray-400"} />
+        <ImageIcon size={24} className={onUserBubble ? "text-white/60" : "text-faint"} />
       </div>
     );
   }
@@ -2762,7 +2767,7 @@ function AttachmentImage({
           alt={attachment.filename}
           className={
             large
-              ? "w-72 sm:w-80 h-auto rounded-xl object-contain border border-gray-200 shadow-sm hover:opacity-95 transition-opacity"
+              ? "w-72 sm:w-80 h-auto rounded-xl object-contain border border-line shadow-sm hover:opacity-95 transition-opacity"
               : "w-32 h-32 rounded-lg object-cover border border-white/20 hover:opacity-90 transition-opacity"
           }
         />
@@ -2827,7 +2832,7 @@ function AttachmentFile({
       className={`flex items-center gap-2 px-3 py-2 rounded-xl text-sm transition-all max-w-[260px] ${
         onUserBubble
           ? "bg-white/15 hover:bg-white/25 text-white"
-          : "bg-gray-50 hover:bg-gray-100 text-gray-700 border border-gray-200"
+          : "bg-surface2 hover:bg-surface3 text-content2 border border-line"
       }`}
     >
       <div
@@ -2839,7 +2844,7 @@ function AttachmentFile({
       </div>
       <div className="min-w-0 text-left">
         <p className="truncate">{attachment.filename}</p>
-        <p className={`text-xs ${onUserBubble ? "text-white/70" : "text-gray-500"}`}>
+        <p className={`text-xs ${onUserBubble ? "text-white/70" : "text-muted"}`}>
           {(attachment.size_bytes / 1024).toFixed(0)} KB
         </p>
       </div>

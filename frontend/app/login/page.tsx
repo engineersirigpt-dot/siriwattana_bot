@@ -4,6 +4,7 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { Lock, User } from "lucide-react";
 import { login, saveAuth } from "@/lib/api";
+import ThemeToggle from "@/components/ThemeToggle";
 
 export default function LoginPage() {
   const router = useRouter();
@@ -28,7 +29,8 @@ export default function LoginPage() {
   }
 
   return (
-    <div className="min-h-screen w-full flex items-center justify-center bg-gradient-to-br from-white via-purple-50 to-purple-100 relative overflow-hidden">
+    <div className="min-h-screen w-full flex items-center justify-center bg-gradient-to-br from-surface via-app to-purple-100 relative overflow-hidden">
+      <ThemeToggle className="absolute top-4 right-4 z-20 p-2.5 rounded-full bg-surface2 text-muted hover:text-content border border-line shadow-sm transition-colors" />
       {/* Background decoration */}
       <div className="absolute inset-0 overflow-hidden pointer-events-none">
         <div className="absolute -top-40 -right-40 w-96 h-96 bg-purple-300 rounded-full opacity-20 blur-3xl"></div>
@@ -36,7 +38,7 @@ export default function LoginPage() {
       </div>
 
       {/* Login Card */}
-      <div className="relative z-10 bg-white rounded-3xl shadow-2xl p-12 w-full max-w-md">
+      <div className="relative z-10 bg-surface rounded-3xl shadow-2xl p-12 w-full max-w-md">
         {/* Logo */}
         <div className="flex justify-center mb-8">
           <img
@@ -51,7 +53,7 @@ export default function LoginPage() {
           <h1 className="text-2xl font-medium mb-2 bg-gradient-to-r from-purple-500 to-purple-700 bg-clip-text text-transparent">
             Sirivatana AI Chatbot
           </h1>
-          <p className="text-gray-600 text-sm">
+          <p className="text-muted text-sm">
             เข้าสู่ระบบเพื่อสอบถามข้อมูลบริษัท
           </p>
         </div>
@@ -59,7 +61,7 @@ export default function LoginPage() {
         {/* Form */}
         <form onSubmit={submit} className="space-y-5">
           <div className="relative">
-            <div className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-400">
+            <div className="absolute left-4 top-1/2 -translate-y-1/2 text-faint">
               <User size={20} />
             </div>
             <input
@@ -69,12 +71,12 @@ export default function LoginPage() {
               placeholder="รหัสพนักงาน (MI)"
               required
               autoComplete="username"
-              className="w-full pl-12 pr-4 py-3.5 bg-gray-50 border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-transparent transition-all"
+              className="w-full pl-12 pr-4 py-3.5 bg-surface2 border border-line rounded-xl focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-transparent transition-all"
             />
           </div>
 
           <div className="relative">
-            <div className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-400">
+            <div className="absolute left-4 top-1/2 -translate-y-1/2 text-faint">
               <Lock size={20} />
             </div>
             <input
@@ -84,7 +86,7 @@ export default function LoginPage() {
               placeholder="รหัสผ่าน"
               required
               autoComplete="current-password"
-              className="w-full pl-12 pr-4 py-3.5 bg-gray-50 border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-transparent transition-all"
+              className="w-full pl-12 pr-4 py-3.5 bg-surface2 border border-line rounded-xl focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-transparent transition-all"
             />
           </div>
 
@@ -103,17 +105,17 @@ export default function LoginPage() {
           </button>
 
           <div className="text-center pt-1 space-y-1">
-            <p className="text-xs text-gray-600">
+            <p className="text-xs text-muted">
               เข้าสู่ระบบด้วยรหัสพนักงาน MI
             </p>
-            <p className="text-xs text-gray-500">
+            <p className="text-xs text-muted">
               ลืมรหัสผ่าน? ติดต่อฝ่าย IT
             </p>
           </div>
         </form>
 
         {/* Footer */}
-        <div className="mt-8 text-center text-gray-500 text-sm">
+        <div className="mt-8 text-center text-muted text-sm">
           บริษัท ศิริวัฒนาอินเตอร์พริ้นท์ จำกัด (มหาชน)
         </div>
       </div>
