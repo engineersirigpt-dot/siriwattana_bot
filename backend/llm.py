@@ -2,6 +2,7 @@ import base64
 import json
 import os
 import re
+from pathlib import Path
 from typing import Any
 
 from openai import OpenAI
@@ -47,6 +48,10 @@ IMAGE_GEN_COST_USD = float(os.getenv("IMAGE_GEN_COST_USD", "0.12"))
 # for "make this cat orange" / "put this logo on a car"); "low" is looser. Only
 # supported by gpt-image-1. Set IMAGE_INPUT_FIDELITY=low to loosen.
 IMAGE_INPUT_FIDELITY = os.getenv("IMAGE_INPUT_FIDELITY", "high")
+# Stamp the company logo (small brand chip, bottom-right) onto generated posters
+# so they read as official Sirivatana artwork. Set IMAGE_POSTER_BRAND=0 to turn
+# off. Optional custom path via POSTER_LOGO_PATH.
+IMAGE_POSTER_BRAND = os.getenv("IMAGE_POSTER_BRAND", "1").strip().lower() not in {"0", "false", "no"}
 
 # Prompt enhancement: rewrite the user's short (often Thai) request into a rich
 # English image prompt before hitting gpt-image-1 — the same trick ChatGPT uses
@@ -398,7 +403,14 @@ def generate_image(prompt: str) -> tuple[bytes, dict]:
             bg_prompt = (plan.get("background_prompt") or "").strip() \
                 or _fallback_poster_plan(prompt)["background_prompt"]
             bg = _render_image(bg_prompt + _NO_TEXT_SUFFIX, size)
-            from image_compose import compose_text_on_image
+            from image_compose import LOGO_PATH, compose_text_on_image
+
+            logo = None
+            if IMAGE_POSTER_BRAND:
+                custom = os.getenv("POSTER_LOGO_PATH", "").strip()
+                candidate = Path(custom) if custom else LOGO_PATH
+                if candidate.exists():
+                    logo = candidate
 
             composed = compose_text_on_image(
                 bg,
@@ -407,6 +419,7 @@ def generate_image(prompt: str) -> tuple[bytes, dict]:
                 footer=plan.get("footer", ""),
                 text_area=plan.get("text_area", "center"),
                 text_color=plan.get("text_color", "#1a3d7c"),
+                logo_path=logo,
             )
             return composed, usage
         except Exception as e:
