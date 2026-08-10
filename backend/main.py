@@ -929,6 +929,44 @@ def _is_web_search_request(text: str) -> bool:
     return _WEB_SEARCH_INTENT_RE.search(text) is not None
 
 
+# Company-specific FACTUAL questions — HR/benefits, specs, prices, policy, SOPs.
+# For these, an answer the model produced WITHOUT grounding (source llm/llm-calc)
+# gets an honesty note so general knowledge is never mistaken for official
+# company data. General questions (sport, people, news, code…) don't match, so
+# they stay clean (no disclaimer leak).
+_COMPANY_FACT_RE = re.compile(
+    r"ลาป่วย|ลากิจ|ลาพักร้อน|วันลา|ลาคลอด|วันหยุด|ลาหยุด|"
+    r"โบนัส|เงินเดือน|ค่าจ้าง|ค่าแรง|สวัสดิการ|ประกันสังคม|กองทุนสำรอง|"
+    r"เบี้ยขยัน|เบี้ยเลี้ยง|ค่าล่วงเวลา|โอที|ค่ากะ|เงินพิเศษ|"
+    r"นโยบาย|ระเบียบบริษัท|ระเบียบข้อบังคับ|ข้อบังคับ|กฎบริษัท|\bsop\b|"
+    r"ขั้นตอนการผลิต|ขั้นตอนการทำงาน|กระบวนการผลิต|"
+    r"สเปก|สเป็ก|สเปค|รุ่นเครื่อง|เครื่องจักร|เครื่องพิมพ์|กำลังการผลิต|"
+    r"ความเร็วเครื่อง|ความเร็วในการพิมพ์|หัวพิมพ์|จำนวนเครื่อง|"
+    r"ราคา|ค่าบริการ|ค่าพิมพ์|ใบเสนอราคา|ต้นทุน|ค่าใช้จ่ายในการ|"
+    r"ตำแหน่งงาน|สมัครงาน|อัตรากำลัง|จำนวนพนักงาน",
+    re.IGNORECASE,
+)
+
+_UNGROUNDED_SOURCES = {"llm", "llm-calc"}
+
+_COMPANY_FACT_NOTE = (
+    "\n\n---\n"
+    "> ℹ️ *หมายเหตุ: ข้อมูลด้านบนเป็นความรู้ทั่วไป — ระบบยังไม่มีข้อมูลเฉพาะของบริษัทในเรื่องนี้ "
+    "กรุณายืนยันกับฝ่ายที่เกี่ยวข้อง (เช่น HR / หัวหน้างาน / ฝ่ายขาย) ก่อนนำไปใช้อ้างอิงค่ะ*"
+)
+
+
+def _company_fact_note(question: str, source: str) -> str:
+    """Return an honesty note for an UNGROUNDED answer to a company-specific
+    factual question, else empty. Grounded answers (brain/rag/web/url/files) and
+    non-company questions get nothing."""
+    if source not in _UNGROUNDED_SOURCES:
+        return ""
+    if not question or not _COMPANY_FACT_RE.search(question):
+        return ""
+    return _COMPANY_FACT_NOTE
+
+
 def _format_citations(citations: list[dict]) -> str:
     """Render url citations as a Markdown source list appended to the answer."""
     if not citations:
@@ -1688,6 +1726,10 @@ async def chat(
                         classify_usage, answer_usage, primary_model=chosen_model,
                     )
 
+            # Honesty note for an ungrounded answer to a company-specific factual
+            # question (no-op otherwise).
+            answer = answer + _company_fact_note(question, source)
+
             message_id = save_chat_message_pg(
                 user_id=user["id"],
                 session_id=sid,
@@ -2207,6 +2249,13 @@ async def chat_stream(
                 parts.append(delta)
                 yield ev({"type": "delta", "v": delta})
             answer = "".join(parts).strip()
+
+            # Honesty note for an ungrounded answer to a company-specific factual
+            # question — streamed as a final delta and saved with the answer.
+            fact_note = _company_fact_note(question, source)
+            if fact_note:
+                yield ev({"type": "delta", "v": fact_note})
+                answer = answer + fact_note
 
             # `stream_usage` was populated in-place by the final chunk of
             # whichever stream we entered above. Combine with the classifier
