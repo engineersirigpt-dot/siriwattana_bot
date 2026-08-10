@@ -822,9 +822,11 @@ def answer_freely(
 
 
 # Web search — for questions needing fresh/live info (news, today's prices,
-# latest regulations). Uses OpenAI's search-enabled model so we reuse the same
-# API key; the model browses and returns url citations in message.annotations.
-WEB_SEARCH_MODEL = os.getenv("WEB_SEARCH_MODEL", "gpt-4o-search-preview")
+# latest regulations). Uses the Responses API `web_search` tool (openai>=2):
+# a normal base model (gpt-4o) is given the tool and actually browses, returning
+# the answer plus url_citation annotations. (The old gpt-4o-search-preview chat
+# model was sunset and had stopped searching — answers came from stale memory.)
+WEB_SEARCH_MODEL = os.getenv("WEB_SEARCH_MODEL", "gpt-4o")
 # Flat surcharge per search on top of token cost (OpenAI bills web-search tool
 # calls separately). ~$0.03/search is a safe estimate for the dashboard.
 WEB_SEARCH_SURCHARGE_USD = float(os.getenv("WEB_SEARCH_SURCHARGE_USD", "0.03"))
@@ -833,32 +835,26 @@ WEB_SEARCH_SURCHARGE_USD = float(os.getenv("WEB_SEARCH_SURCHARGE_USD", "0.03"))
 WEB_SEARCH_CONTEXT_SIZE = os.getenv("WEB_SEARCH_CONTEXT_SIZE", "high")
 
 
-def _extract_web_citations(msg) -> list[dict]:
-    """Pull url_citation annotations off a search-model reply.
+def _extract_web_citations(resp) -> list[dict]:
+    """Collect url_citation annotations from a Responses API reply.
 
-    Robust across SDK shapes: `msg.annotations` (typed), extra fields on
-    `msg.model_extra` (older SDKs that don't model the field), and annotations
-    that arrive as plain dicts rather than objects.
+    The response's `output` is a list of items; message items carry `content`
+    parts, each of which may have `annotations` (url_citation → url + title).
     """
-    raw = getattr(msg, "annotations", None)
-    if not raw:
-        extra = getattr(msg, "model_extra", None) or {}
-        raw = extra.get("annotations")
-
-    def _get(o, key):
-        return o.get(key) if isinstance(o, dict) else getattr(o, key, None)
-
     citations: list[dict] = []
     seen: set[str] = set()
-    for ann in (raw or []):
-        if _get(ann, "type") != "url_citation":
+    for item in (getattr(resp, "output", None) or []):
+        if getattr(item, "type", None) != "message":
             continue
-        uc = _get(ann, "url_citation")
-        url = _get(uc, "url") if uc is not None else None
-        if not url or url in seen:
-            continue
-        seen.add(url)
-        citations.append({"title": _get(uc, "title") or url, "url": url})
+        for content in (getattr(item, "content", None) or []):
+            for ann in (getattr(content, "annotations", None) or []):
+                if getattr(ann, "type", None) != "url_citation":
+                    continue
+                url = getattr(ann, "url", None)
+                if not url or url in seen:
+                    continue
+                seen.add(url)
+                citations.append({"title": getattr(ann, "title", "") or url, "url": url})
     return citations
 
 SYSTEM_PROMPT_WEB = (
@@ -883,26 +879,30 @@ def answer_with_web_search(
                already folded into cost_usd.
     Raises on API error — the caller falls back to the normal pipeline.
     """
-    messages: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT_WEB}]
+    input_msgs: list[dict] = []
     if history:
-        messages.extend(history)
-    messages.append({"role": "user", "content": question})
+        # Responses API input items are {role, content}; coerce content to text
+        # so a prior vision/file turn (list content) can't break the call.
+        for m in history:
+            c = m.get("content")
+            input_msgs.append({
+                "role": m.get("role", "user"),
+                "content": c if isinstance(c, str) else str(c),
+            })
+    input_msgs.append({"role": "user", "content": question})
 
-    # Search-preview models reject temperature/some params — keep the call minimal.
-    # web_search_options EXPLICITLY enables the web-search tool. Without it the
-    # model was answering from stale training knowledge (n_citations was always
-    # 0). Passed via extra_body so the older SDK (1.59.7, predates this param)
-    # still forwards it to the API.
-    res = _get_client().chat.completions.create(
+    # Responses API with the web_search tool: the model actually browses and
+    # returns url_citation annotations. `instructions` is the system prompt.
+    resp = _get_client().responses.create(
         model=WEB_SEARCH_MODEL,
-        messages=messages,
-        max_tokens=4000,
-        extra_body={"web_search_options": {"search_context_size": WEB_SEARCH_CONTEXT_SIZE}},
+        instructions=SYSTEM_PROMPT_WEB,
+        tools=[{"type": "web_search", "search_context_size": WEB_SEARCH_CONTEXT_SIZE}],
+        input=input_msgs,
+        max_output_tokens=4000,
     )
-    msg = res.choices[0].message
-    text = (msg.content or "").strip()
 
-    citations = _extract_web_citations(msg)
+    text = (getattr(resp, "output_text", "") or "").strip()
+    citations = _extract_web_citations(resp)
     if not citations:
         # Diagnostic: if the model still isn't searching, this shows in the logs.
         import sys
@@ -913,8 +913,15 @@ def answer_with_web_search(
             file=sys.stderr,
         )
 
-    usage = _extract_usage(res, WEB_SEARCH_MODEL)
-    usage["cost_usd"] = usage.get("cost_usd", 0.0) + WEB_SEARCH_SURCHARGE_USD
+    u = getattr(resp, "usage", None)
+    p = int(getattr(u, "input_tokens", 0) or 0)
+    c = int(getattr(u, "output_tokens", 0) or 0)
+    usage = {
+        "model": WEB_SEARCH_MODEL,
+        "prompt_tokens": p,
+        "completion_tokens": c,
+        "cost_usd": estimate_cost_usd(WEB_SEARCH_MODEL, p, c) + WEB_SEARCH_SURCHARGE_USD,
+    }
     return text, citations, usage
 
 
