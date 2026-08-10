@@ -238,6 +238,45 @@ _POSTER_PLAN_SYSTEM = (
 )
 
 
+# Repeated forcefully onto a poster BACKGROUND render. gpt-image-1 ignores a
+# single "no text" in the plan and loves stamping its own (garbled, non-Thai)
+# words like "HAPPY" onto celebration scenes — we draw the real Thai ourselves,
+# so the background must stay empty.
+_NO_TEXT_SUFFIX = (
+    ". IMPORTANT: absolutely NO text, NO letters, NO words, NO numbers, NO "
+    "typography, NO captions, NO watermark, NO signage, NO logo anywhere in the "
+    "image — a clean decorative background only, leaving calm uncluttered space "
+    "where text will be added on top later."
+)
+
+# Strip the leading create-image verbs/nouns so a fallback title keeps just the
+# subject ("สร้างรูปภาพโปสเตอร์งานเลี้ยงปีใหม่" -> "งานเลี้ยงปีใหม่").
+_IMAGE_VERB_RE = re.compile(
+    r"^(?:ช่วย)?\s*(?:สร้าง|วาด|ทำ|ออกแบบ|ขอ|generate|create|draw|make)\s*"
+    r"(?:(?:รูปภาพ|รูป|ภาพ|โปสเตอร์|โพสเตอร์|poster|image|picture)\s*)*",
+    re.IGNORECASE,
+)
+
+
+def _fallback_poster_plan(prompt: str) -> dict:
+    """A minimal poster plan for when the LLM planner is unavailable — so a
+    poster request STILL goes through the correct-Thai overlay path instead of
+    letting the image model mangle the text."""
+    title = _IMAGE_VERB_RE.sub("", prompt or "").strip() or (prompt or "").strip()
+    return {
+        "background_prompt": (
+            "an elegant, festive decorative background suitable for a poster: "
+            "harmonious colours, soft lighting, tasteful ornaments, bokeh and "
+            "gentle gradients"
+        ),
+        "title": title,
+        "subtitle": "",
+        "footer": "",
+        "text_area": "center",
+        "text_color": "#1a3d7c",
+    }
+
+
 def plan_poster(prompt: str) -> dict | None:
     """Ask the LLM for {background_prompt, title, subtitle, footer, text_area,
     text_color}. Returns None on failure or if there's no title to render."""
@@ -254,8 +293,10 @@ def plan_poster(prompt: str) -> dict | None:
         data = json.loads(res.choices[0].message.content or "{}")
         if isinstance(data, dict) and (data.get("title") or "").strip():
             return data
-    except Exception:
-        pass
+    except Exception as e:
+        import sys
+
+        print(f"PLAN_POSTER_FAILED: {e!r}", file=sys.stderr)
     return None
 
 
@@ -323,26 +364,34 @@ def generate_image(prompt: str) -> tuple[bytes, dict]:
         "cost_usd": IMAGE_GEN_COST_USD,
     }
 
-    # Poster path: real-font Thai text on a generated background.
+    # Poster path: real-font Thai text on a generated background. We ALWAYS
+    # overlay for a poster (falling back to a self-built plan if the LLM planner
+    # is down) — never let the image model render the Thai itself, since it
+    # mangles it. The background is rendered with a forceful no-text suffix so
+    # gpt-image-1 doesn't stamp its own garbled words onto it.
     is_poster = bool(prompt) and _PORTRAIT_IMAGE_RE.search(prompt) is not None
     if IMAGE_TEXT_OVERLAY and is_poster:
-        plan = plan_poster(prompt)
-        if plan:
-            try:
-                bg = _render_image(plan.get("background_prompt") or prompt, size)
-                from image_compose import compose_text_on_image
+        plan = plan_poster(prompt) or _fallback_poster_plan(prompt)
+        try:
+            bg_prompt = (plan.get("background_prompt") or "").strip() \
+                or _fallback_poster_plan(prompt)["background_prompt"]
+            bg = _render_image(bg_prompt + _NO_TEXT_SUFFIX, size)
+            from image_compose import compose_text_on_image
 
-                composed = compose_text_on_image(
-                    bg,
-                    title=plan.get("title", ""),
-                    subtitle=plan.get("subtitle", ""),
-                    footer=plan.get("footer", ""),
-                    text_area=plan.get("text_area", "top"),
-                    text_color=plan.get("text_color", "#1a3d7c"),
-                )
-                return composed, usage
-            except Exception:
-                pass  # fall through to the normal path
+            composed = compose_text_on_image(
+                bg,
+                title=plan.get("title", ""),
+                subtitle=plan.get("subtitle", ""),
+                footer=plan.get("footer", ""),
+                text_area=plan.get("text_area", "center"),
+                text_color=plan.get("text_color", "#1a3d7c"),
+            )
+            return composed, usage
+        except Exception as e:
+            import sys
+
+            print(f"POSTER_OVERLAY_FAILED: {e!r}", file=sys.stderr)
+            # fall through to the normal path as a last resort
 
     # Normal path: enhance the prompt, generate directly.
     data = _render_image(_enhance_image_prompt(prompt), size)
