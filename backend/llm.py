@@ -828,6 +828,38 @@ WEB_SEARCH_MODEL = os.getenv("WEB_SEARCH_MODEL", "gpt-4o-search-preview")
 # Flat surcharge per search on top of token cost (OpenAI bills web-search tool
 # calls separately). ~$0.03/search is a safe estimate for the dashboard.
 WEB_SEARCH_SURCHARGE_USD = float(os.getenv("WEB_SEARCH_SURCHARGE_USD", "0.03"))
+# How much web context the search tool pulls: low | medium | high. "high" gives
+# fresher, better-sourced answers (more pages read) at a bit more cost/latency.
+WEB_SEARCH_CONTEXT_SIZE = os.getenv("WEB_SEARCH_CONTEXT_SIZE", "high")
+
+
+def _extract_web_citations(msg) -> list[dict]:
+    """Pull url_citation annotations off a search-model reply.
+
+    Robust across SDK shapes: `msg.annotations` (typed), extra fields on
+    `msg.model_extra` (older SDKs that don't model the field), and annotations
+    that arrive as plain dicts rather than objects.
+    """
+    raw = getattr(msg, "annotations", None)
+    if not raw:
+        extra = getattr(msg, "model_extra", None) or {}
+        raw = extra.get("annotations")
+
+    def _get(o, key):
+        return o.get(key) if isinstance(o, dict) else getattr(o, key, None)
+
+    citations: list[dict] = []
+    seen: set[str] = set()
+    for ann in (raw or []):
+        if _get(ann, "type") != "url_citation":
+            continue
+        uc = _get(ann, "url_citation")
+        url = _get(uc, "url") if uc is not None else None
+        if not url or url in seen:
+            continue
+        seen.add(url)
+        citations.append({"title": _get(uc, "title") or url, "url": url})
+    return citations
 
 SYSTEM_PROMPT_WEB = (
     "คุณเป็นผู้ช่วยของบริษัทศิริวัฒนาอินเตอร์พริ้นท์ ที่ค้นข้อมูลสดจากเว็บมาตอบ\n"
@@ -857,25 +889,29 @@ def answer_with_web_search(
     messages.append({"role": "user", "content": question})
 
     # Search-preview models reject temperature/some params — keep the call minimal.
+    # web_search_options EXPLICITLY enables the web-search tool. Without it the
+    # model was answering from stale training knowledge (n_citations was always
+    # 0). Passed via extra_body so the older SDK (1.59.7, predates this param)
+    # still forwards it to the API.
     res = _get_client().chat.completions.create(
         model=WEB_SEARCH_MODEL,
         messages=messages,
         max_tokens=4000,
+        extra_body={"web_search_options": {"search_context_size": WEB_SEARCH_CONTEXT_SIZE}},
     )
     msg = res.choices[0].message
     text = (msg.content or "").strip()
 
-    citations: list[dict] = []
-    seen_urls: set[str] = set()
-    for ann in (getattr(msg, "annotations", None) or []):
-        if getattr(ann, "type", None) != "url_citation":
-            continue
-        uc = getattr(ann, "url_citation", None)
-        url = getattr(uc, "url", None) if uc else None
-        if not url or url in seen_urls:
-            continue
-        seen_urls.add(url)
-        citations.append({"title": getattr(uc, "title", "") or url, "url": url})
+    citations = _extract_web_citations(msg)
+    if not citations:
+        # Diagnostic: if the model still isn't searching, this shows in the logs.
+        import sys
+
+        print(
+            f"WEB_SEARCH_NO_CITATIONS model={WEB_SEARCH_MODEL} "
+            f"len_text={len(text)} q={question[:80]!r}",
+            file=sys.stderr,
+        )
 
     usage = _extract_usage(res, WEB_SEARCH_MODEL)
     usage["cost_usd"] = usage.get("cost_usd", 0.0) + WEB_SEARCH_SURCHARGE_USD
