@@ -210,6 +210,11 @@ const COMPANY_MODE_ENABLED = false;
 // code stays intact.
 const MIC_ENABLED = false;
 
+// "💡 ทำอะไรได้บ้าง" feature-discovery panel — parked for now (not felt needed
+// yet). Flip to `true` to bring back the header button + empty-state link; the
+// CapabilitiesModal and all wiring stay intact.
+const HELP_PANEL_ENABLED = false;
+
 // Which export format the user's request asked for (drives the download button
 // under the matching answer). Mirrors the backend keyword set. Returns null
 // when no format was requested — so nothing shows unless the user asked.
@@ -1695,14 +1700,16 @@ export default function ChatPage() {
         <header className="bg-surface border-b border-line px-8 py-4 shadow-sm flex items-center justify-between gap-4">
           <h2 className="text-content font-medium truncate flex-1">{currentTitle}</h2>
           <div className="flex items-center gap-3">
-            <button
-              onClick={() => setShowHelp(true)}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm border border-line bg-surface text-content2 hover:bg-surface2 transition-all"
-              title="ดูว่า SiriGPT ทำอะไรได้บ้าง"
-            >
-              <Lightbulb size={14} />
-              <span className="hidden sm:inline">ทำอะไรได้บ้าง</span>
-            </button>
+            {HELP_PANEL_ENABLED && (
+              <button
+                onClick={() => setShowHelp(true)}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm border border-line bg-surface text-content2 hover:bg-surface2 transition-all"
+                title="ดูว่า SiriGPT ทำอะไรได้บ้าง"
+              >
+                <Lightbulb size={14} />
+                <span className="hidden sm:inline">ทำอะไรได้บ้าง</span>
+              </button>
+            )}
             {!readOnlyOwner && currentSid !== null && (
               <TurnCounter count={turnCount} limit={turnLimit} onNewChat={() => newChat(chatMode)} />
             )}
@@ -1812,13 +1819,15 @@ export default function ChatPage() {
                 ) : (
                   <>
                     <p>พิมพ์คำถามเกี่ยวกับบริษัทหรือคำถามทั่วไปได้เลย</p>
-                    <button
-                      onClick={() => setShowHelp(true)}
-                      className="mt-3 inline-flex items-center gap-1.5 text-sm text-purple-600 hover:underline"
-                    >
-                      <Lightbulb size={15} />
-                      ดูว่า SiriGPT ทำอะไรได้บ้าง
-                    </button>
+                    {HELP_PANEL_ENABLED && (
+                      <button
+                        onClick={() => setShowHelp(true)}
+                        className="mt-3 inline-flex items-center gap-1.5 text-sm text-purple-600 hover:underline"
+                      >
+                        <Lightbulb size={15} />
+                        ดูว่า SiriGPT ทำอะไรได้บ้าง
+                      </button>
+                    )}
                   </>
                 )}
               </div>
