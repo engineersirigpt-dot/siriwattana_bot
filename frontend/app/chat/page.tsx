@@ -17,6 +17,7 @@ import {
   Link2,
   Link2Off,
   Loader2,
+  Lightbulb,
   Share2,
   Folder,
   FolderOpen,
@@ -64,6 +65,7 @@ import {
 import { AlertModal, ConfirmModal, PromptModal } from "@/components/Modal";
 import { MarkdownMessage } from "@/components/MarkdownMessage";
 import ThemeToggle from "@/components/ThemeToggle";
+import CapabilitiesModal from "@/components/CapabilitiesModal";
 
 type Attachment = {
   id: number;
@@ -306,6 +308,7 @@ export default function ChatPage() {
   // Share state. sharedToken is null when the chat isn't shared. shareOpen
   // controls the visibility of the Share modal.
   const [sharedToken, setSharedToken] = useState<string | null>(null);
+  const [showHelp, setShowHelp] = useState(false);
   // share dialog (targeted sharing) — เลือกผู้รับ
   const [shareOpen, setShareOpen] = useState(false);
   const [shareBusy, setShareBusy] = useState(false);
@@ -1692,6 +1695,14 @@ export default function ChatPage() {
         <header className="bg-surface border-b border-line px-8 py-4 shadow-sm flex items-center justify-between gap-4">
           <h2 className="text-content font-medium truncate flex-1">{currentTitle}</h2>
           <div className="flex items-center gap-3">
+            <button
+              onClick={() => setShowHelp(true)}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm border border-line bg-surface text-content2 hover:bg-surface2 transition-all"
+              title="ดูว่า SiriGPT ทำอะไรได้บ้าง"
+            >
+              <Lightbulb size={14} />
+              <span className="hidden sm:inline">ทำอะไรได้บ้าง</span>
+            </button>
             {!readOnlyOwner && currentSid !== null && (
               <TurnCounter count={turnCount} limit={turnLimit} onNewChat={() => newChat(chatMode)} />
             )}
@@ -1799,7 +1810,16 @@ export default function ChatPage() {
                     </p>
                   </>
                 ) : (
-                  <p>พิมพ์คำถามเกี่ยวกับบริษัทหรือคำถามทั่วไปได้เลย</p>
+                  <>
+                    <p>พิมพ์คำถามเกี่ยวกับบริษัทหรือคำถามทั่วไปได้เลย</p>
+                    <button
+                      onClick={() => setShowHelp(true)}
+                      className="mt-3 inline-flex items-center gap-1.5 text-sm text-purple-600 hover:underline"
+                    >
+                      <Lightbulb size={15} />
+                      ดูว่า SiriGPT ทำอะไรได้บ้าง
+                    </button>
+                  </>
                 )}
               </div>
             )}
@@ -2194,6 +2214,16 @@ export default function ChatPage() {
         title="เกิดข้อผิดพลาด"
         description={alertMsg ?? ""}
         variant="error"
+      />
+
+      <CapabilitiesModal
+        open={showHelp}
+        onClose={() => setShowHelp(false)}
+        onPick={(prompt) => {
+          setInput(prompt);
+          setShowHelp(false);
+          inputRef.current?.focus();
+        }}
       />
 
       <ShareModal
