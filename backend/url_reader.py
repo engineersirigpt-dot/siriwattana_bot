@@ -135,6 +135,10 @@ def _extract_jquery_values(doc) -> list[str]:
             val = _clean_js_value(m.group(3))
             if not val:
                 continue
+            # Skip values that are actually JS code (string concatenation with a
+            # variable, function bodies, selectors) rather than data.
+            if any(tok in val for tok in ("$(", "' +", "+ '", ");", "/*", "function", "nth-child")):
+                continue
             line = f"{label}: {val}" if label else val
             if line not in seen:
                 seen.add(line)
