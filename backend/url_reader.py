@@ -99,6 +99,49 @@ def _host_allowed(url: str) -> bool:
     return _is_public_host(p.hostname)
 
 
+# Pages that fill their fields with jQuery — $('#id').html("value") — serve an
+# empty skeleton and inject the data at runtime (e.g. the linsip WI page). We
+# can't run JS, but the values sit right there in the <script> as string
+# literals, so pull them out: (selector, value).
+_JQ_RE = re.compile(
+    r"""\$\(\s*['"]([^'"]+)['"]\s*\)\s*"""      # $('#selector')
+    r"""(?:\.\w+\([^)]*\)\s*)*?"""              # optional chained calls
+    r"""\.(?:html|text|val|append|prepend)\(\s*"""  # .html( / .text( / .val( …
+    r"""(['"])(.*?)(?<!\\)\2\s*\)""",           # "value" (up to matching quote)
+    re.DOTALL,
+)
+
+
+def _clean_js_value(s: str) -> str:
+    """Unescape a JS string literal and strip any HTML tags inside it."""
+    s = (
+        s.replace('\\"', '"').replace("\\'", "'").replace("\\/", "/")
+        .replace("\\n", " ").replace("\\r", " ").replace("\\t", " ")
+    )
+    s = re.sub(r"<[^>]+>", " ", s)      # drop tags if the value is HTML
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def _extract_jquery_values(doc) -> list[str]:
+    """Collect 'label: value' lines from jQuery setter calls in <script> tags."""
+    out: list[str] = []
+    seen: set[str] = set()
+    for sc in doc.xpath("//script"):
+        js = sc.text_content() or ""
+        if "$(" not in js:
+            continue
+        for m in _JQ_RE.finditer(js):
+            label = m.group(1).lstrip("#.").strip()
+            val = _clean_js_value(m.group(3))
+            if not val:
+                continue
+            line = f"{label}: {val}" if label else val
+            if line not in seen:
+                seen.add(line)
+                out.append(line)
+    return out
+
+
 def _html_to_text(raw: bytes, content_type: str) -> tuple[str, str]:
     """(title, cleaned_text) from a fetched body. Plain text passes through."""
     if "html" not in content_type and "xml" not in content_type:
@@ -113,6 +156,9 @@ def _html_to_text(raw: bytes, content_type: str) -> tuple[str, str]:
         t = doc.find(".//title")
         if t is not None and t.text:
             title = t.text.strip()
+
+        # Pull jQuery-injected values from <script> BEFORE we strip scripts.
+        jq_values = _extract_jquery_values(doc)
 
         # Strip non-content nodes so the model sees the article, not chrome.
         # NB: <form> is NOT stripped — data pages (e.g. linsip WI) render their
@@ -147,6 +193,8 @@ def _html_to_text(raw: bytes, content_type: str) -> tuple[str, str]:
         raw_text = doc.text_content()
         lines = [ln.strip() for ln in raw_text.splitlines()]
         text = "\n".join(ln for ln in lines if ln)
+        if jq_values:
+            text += "\n\n=== ข้อมูลในหน้า ===\n" + "\n".join(jq_values)
         return title, text[:MAX_TEXT_CHARS]
 
     lines = [ln.strip() for ln in text.splitlines()]
