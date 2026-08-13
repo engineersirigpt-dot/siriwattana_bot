@@ -45,10 +45,12 @@ if LINSIP_ENABLED:
 # caller knows to reuse the job number from earlier in the conversation.
 _JOB_FOLLOWUP_RE = re.compile(
     r"งานนี้|งานนี่|งานนั้น|จ๊อบนี้|job\s*นี้|"
-    r"ลูกค้า|customer|\bae\b|sale|เซล|กาว|กำหนดส่ง|\bdue\b|ส่งงาน|วันส่ง|ex.?factory|"
+    r"ลูกค้า|customer|\bae\b|sale|เซล|กาว|"
+    r"กำหนดส่ง|due|ส่งงาน|ส่งมอบ|วันส่ง|ครบกำหนด|deadline|เดดไลน์|ex.?factory|"
     r"จำนวน|ยอดงาน|\bqty\b|ขนาด|\bsize\b|สถานะ|status|เข้าเล่ม|binding|"
     r"revision|รีวิชั่น|แก้ไข|สเปก|สเปค|ประเภทงาน|reprint|กระดาษ|paper|"
-    r"เทคนิค|ไดคัท|die.?cut|เคลือบ|กี่สี|พิมพ์|ผลิตภัณฑ์|สรุปงาน",
+    r"เทคนิค|ไดคัท|die.?cut|เคลือบ|กี่สี|พิมพ์|ผลิตภัณฑ์|สรุปงาน|"
+    r"เอสติเมท|estimate|rfq|โรงพิมพ์|วันไหน|เมื่อไหร่",
     re.IGNORECASE,
 )
 
