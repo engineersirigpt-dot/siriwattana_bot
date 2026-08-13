@@ -55,6 +55,9 @@ from llm import (
     stream_from_context,
 )
 from mi_auth import mi_enabled, verify_mi_credentials
+# Imported for its import-time side effect: registers the linsip host in
+# url_reader's allowlist so pasted linsip URLs are readable too.
+import linsip  # noqa: F401
 from rag import add_knowledge, embed, log_pending_question, resolve_pending, search_knowledge
 from sensitive import BLOCKED_RESPONSE, is_sensitive
 from sensitivity_classifier import classify_sensitivity
@@ -1165,6 +1168,89 @@ def _try_url_answer(
     }
 
 
+def _try_linsip_answer(
+    user: dict, question: str, session_id: int | None, mode: str, request: Request
+) -> dict | None:
+    """Answer about a job by its number: fetch that job's linsip WI page and
+    answer from it. Returns None when linsip is off or no job number is present.
+    If a job number IS present but the WI can't be fetched, returns a clear
+    message rather than falling through to a guessed answer."""
+    from linsip import LINSIP_ENABLED, extract_job_no, fetch_job_wi
+
+    if not LINSIP_ENABLED:
+        return None
+    job = extract_job_no(question)
+    if not job:
+        return None
+
+    from chat_pg import (
+        ensure_session_pg,
+        get_session_history_pg,
+        save_chat_message_pg,
+    )
+
+    sid, stitle = ensure_session_pg(
+        user_id=user["id"], session_id=session_id,
+        first_question=question, mode=mode,
+    )
+    got = fetch_job_wi(job)
+
+    if not got:
+        text = (
+            f"ขออภัยค่ะ ดึงข้อมูลงาน {job} จากระบบ linsip ไม่สำเร็จ "
+            "(อาจไม่พบเลขงานนี้ หรือเปิดหน้าเอกสารไม่ได้ชั่วคราว) "
+            "ลองตรวจสอบเลขงานอีกครั้ง หรือเปิดดูในระบบ linsip โดยตรงค่ะ"
+        )
+        mid = save_chat_message_pg(
+            user_id=user["id"], session_id=sid, question=question,
+            answer=text, source="linsip_error", knowledge_id=None, mode=mode,
+        )
+        audit_log(
+            "linsip_lookup_failed",
+            user=user,
+            detail={"session_id": sid, "job": job},
+            request=request,
+        )
+        return {
+            "answer": text, "source": "linsip_error", "session_id": sid,
+            "session_title": stitle, "message_id": mid,
+        }
+
+    history = get_session_history_pg(
+        session_id=session_id, user_id=user["id"], limit=HISTORY_TURNS,
+    )
+    prompt_question = question or f"สรุปข้อมูลงาน {job}"
+    try:
+        answer, files_usage = answer_with_files(
+            prompt_question, [], [got], history=history,
+        )
+    except Exception as e:
+        audit_log(
+            "linsip_lookup_failed",
+            user=user,
+            detail={"session_id": sid, "job": job, "error": str(e)[:300]},
+            request=request,
+        )
+        return None  # fall through to the normal pipeline
+
+    usage_row = accumulate_usage(files_usage)
+    mid = save_chat_message_pg(
+        user_id=user["id"], session_id=sid, question=question,
+        answer=answer, source="linsip", knowledge_id=None, mode=mode,
+        usage=usage_row,
+    )
+    audit_log(
+        "linsip_lookup",
+        user=user,
+        detail={"session_id": sid, "message_id": mid, "job": job},
+        request=request,
+    )
+    return {
+        "answer": answer, "source": "linsip", "session_id": sid,
+        "session_title": stitle, "message_id": mid,
+    }
+
+
 def _get_session_history(conn, session_id: int | None, user_id: int) -> list[dict]:
     if not session_id:
         return []
@@ -1439,6 +1525,22 @@ async def chat(
             turn_count=_count_session_turns(res["session_id"]),
             turn_limit=MAX_TURNS_PER_SESSION,
         )
+
+    # linsip job lookup — the user mentioned a job number (e.g. J12600091).
+    # Fetch that job's WI page and answer from it. Runs before URL/web search.
+    if question and not files and use_postgres_auth():
+        li = _try_linsip_answer(user, question, session_id, mode, request)
+        if li is not None:
+            return ChatResponse(
+                answer=li["answer"],
+                source=li["source"],
+                similarity=None,
+                session_id=li["session_id"],
+                session_title=li["session_title"],
+                message_id=li["message_id"],
+                turn_count=_count_session_turns(li["session_id"]),
+                turn_limit=MAX_TURNS_PER_SESSION,
+            )
 
     # URL reading — the user pasted a link; fetch that page and answer about it.
     # Runs BEFORE web search so an explicit link is read directly rather than
@@ -2105,6 +2207,22 @@ async def chat_stream(
                 if res["attachment"]:
                     done_evt["attachments"] = [res["attachment"]]
                 yield ev(done_evt)
+                return
+
+            # 3.5.4) linsip job lookup — the user mentioned a job number
+            #        (e.g. J12600091). Fetch that job's WI page and answer from
+            #        it. Non-streaming — emitted as one delta.
+            li = _try_linsip_answer(user, question, session_id, mode, request)
+            if li is not None:
+                yield ev({"type": "delta", "v": li["answer"]})
+                yield ev({
+                    "type": "done", "source": li["source"],
+                    "session_id": li["session_id"],
+                    "session_title": li["session_title"],
+                    "message_id": li["message_id"],
+                    "turn_count": _count_session_turns(li["session_id"]),
+                    "turn_limit": MAX_TURNS_PER_SESSION,
+                })
                 return
 
             # 3.55) URL reading — the user pasted a link. Fetch that page and

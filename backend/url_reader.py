@@ -30,6 +30,15 @@ FETCH_TIMEOUT = float(os.getenv("URL_READ_TIMEOUT", "10"))
 MAX_BYTES = int(os.getenv("URL_READ_MAX_BYTES", str(2_500_000)))  # ~2.5 MB
 MAX_TEXT_CHARS = int(os.getenv("URL_READ_MAX_CHARS", "12000"))
 ALLOW_PRIVATE = os.getenv("URL_READ_ALLOW_PRIVATE", "0") == "1"
+# Specific internal hosts allowed to be read even though they're private — e.g.
+# the linsip intranet server. The SECURE way to reach ONE internal system (a job
+# page) without opening the SSRF guard to the whole LAN. Comma-separated;
+# linsip.py also registers its own host here. Set e.g. "192.168.5.40".
+ALLOW_HOSTS: set[str] = {
+    h.strip().lower()
+    for h in os.getenv("URL_READ_ALLOW_HOSTS", "").split(",")
+    if h.strip()
+}
 
 # A normal browser UA — some sites 403 an obviously-bot agent.
 _UA = (
@@ -83,6 +92,8 @@ def _host_allowed(url: str) -> bool:
     p = urlparse(url)
     if p.scheme not in ("http", "https") or not p.hostname:
         return False
+    if p.hostname.lower() in ALLOW_HOSTS:
+        return True  # explicitly allowlisted internal host (e.g. linsip)
     if ALLOW_PRIVATE:
         return True
     return _is_public_host(p.hostname)
