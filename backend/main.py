@@ -1168,6 +1168,20 @@ def _try_url_answer(
     }
 
 
+def _is_linsip_query(question: str) -> bool:
+    """True when the question is a job-number lookup. Such questions are answered
+    ONLY from that job's WI page (authorized operational data), so we skip the
+    sensitivity CLASSIFIER for them — otherwise legit job fields like the
+    customer or AE name get blocked. The hard keyword filter still runs."""
+    if not question:
+        return False
+    try:
+        from linsip import LINSIP_ENABLED, extract_job_no
+    except Exception:
+        return False
+    return LINSIP_ENABLED and extract_job_no(question) is not None
+
+
 def _try_linsip_answer(
     user: dict, question: str, session_id: int | None, mode: str, request: Request
 ) -> dict | None:
@@ -1374,7 +1388,7 @@ async def chat(
             attachments=[],
         )
 
-    if question:
+    if question and not _is_linsip_query(question):
         classification = classify_sensitivity(question)
         if classification is not None:
             category, reason = classification
@@ -2099,8 +2113,13 @@ async def chat_stream(
 
         try:
             # 1) Safety — keyword then classifier. Mirror /chat: blocked answers
-            #    are NOT persisted to history.
-            if is_sensitive(question) is not None or classify_sensitivity(question) is not None:
+            #    are NOT persisted to history. A job-number lookup skips the
+            #    classifier (answered from the authorized WI page) but still runs
+            #    the hard keyword filter.
+            if is_sensitive(question) is not None or (
+                not _is_linsip_query(question)
+                and classify_sensitivity(question) is not None
+            ):
                 audit_log(
                     "sensitive_blocked_stream",
                     user=user,
