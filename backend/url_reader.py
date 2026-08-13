@@ -115,13 +115,34 @@ def _html_to_text(raw: bytes, content_type: str) -> tuple[str, str]:
             title = t.text.strip()
 
         # Strip non-content nodes so the model sees the article, not chrome.
+        # NB: <form> is NOT stripped — data pages (e.g. linsip WI) render their
+        # content inside a form.
         for bad in doc.xpath(
             "//script | //style | //noscript | //nav | //footer "
-            "| //header | //form | //svg | //template | //iframe"
+            "| //header | //svg | //template | //iframe"
         ):
             parent = bad.getparent()
             if parent is not None:
                 parent.remove(bad)
+
+        # Surface form-field VALUES: data pages put their content in
+        # <input value="…">/<select>, which text_content() ignores. Copy each
+        # value into the node's tail so it shows inline right after its label.
+        for el in doc.xpath("//input"):
+            val = (el.get("value") or "").strip()
+            if val:
+                el.tail = " " + val + (el.tail or "")
+        for sel in doc.xpath("//select"):
+            opts = sel.xpath(".//option[@selected]")
+            txt = ((opts[0].text if opts and opts[0].text else "") or "").strip()
+            # Drop every <option> so text_content doesn't dump the full list;
+            # keep only the selected value (as the select's tail).
+            for o in sel.xpath(".//option"):
+                p = o.getparent()
+                if p is not None:
+                    p.remove(o)
+            if txt:
+                sel.tail = " " + txt + (sel.tail or "")
 
         raw_text = doc.text_content()
         lines = [ln.strip() for ln in raw_text.splitlines()]
