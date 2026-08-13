@@ -1168,32 +1168,77 @@ def _try_url_answer(
     }
 
 
-def _is_linsip_query(question: str) -> bool:
-    """True when the question is a job-number lookup. Such questions are answered
-    ONLY from that job's WI page (authorized operational data), so we skip the
-    sensitivity CLASSIFIER for them — otherwise legit job fields like the
-    customer or AE name get blocked. The hard keyword filter still runs."""
-    if not question:
-        return False
+def _session_job_no(session_id: int | None, user_id: int) -> str | None:
+    """Most recent job number the user mentioned in this session, else None —
+    so follow-ups ('AE คือใคร', 'ใช้กาวอะไร') can reuse it without retyping."""
+    if not session_id:
+        return None
     try:
-        from linsip import LINSIP_ENABLED, extract_job_no
+        from chat_pg import get_session_history_pg
+        from linsip import extract_job_no
+
+        hist = get_session_history_pg(
+            session_id=session_id, user_id=user_id, limit=HISTORY_TURNS,
+        )
     except Exception:
-        return False
-    return LINSIP_ENABLED and extract_job_no(question) is not None
+        return None
+    for m in reversed(hist or []):
+        if m.get("role") == "user":
+            j = extract_job_no(m.get("content") or "")
+            if j:
+                return j
+    return None
+
+
+def _resolve_linsip_job(
+    question: str, session_id: int | None, user_id: int
+) -> str | None:
+    """The job this question is about: the number in the question, or — for a
+    job follow-up with no number — the most recent one from the conversation."""
+    try:
+        from linsip import LINSIP_ENABLED, extract_job_no, looks_like_job_followup
+    except Exception:
+        return None
+    if not LINSIP_ENABLED or not question:
+        return None
+    j = extract_job_no(question)
+    if j:
+        return j
+    if looks_like_job_followup(question):
+        return _session_job_no(session_id, user_id)
+    return None
+
+
+def _is_linsip_query(
+    question: str, session_id: int | None = None, user: dict | None = None
+) -> bool:
+    """True when the question is a job lookup (direct or a follow-up). Such
+    answers come ONLY from that job's WI page (authorized operational data), so
+    we skip the sensitivity CLASSIFIER for them — otherwise legit job fields like
+    the customer or AE name get blocked. The hard keyword filter still runs."""
+    uid = user["id"] if user else None
+    if uid is None:
+        # Without a user we can't resolve session history — fall back to the
+        # question alone.
+        try:
+            from linsip import LINSIP_ENABLED, extract_job_no
+        except Exception:
+            return False
+        return bool(LINSIP_ENABLED and question and extract_job_no(question))
+    return _resolve_linsip_job(question, session_id, uid) is not None
 
 
 def _try_linsip_answer(
     user: dict, question: str, session_id: int | None, mode: str, request: Request
 ) -> dict | None:
-    """Answer about a job by its number: fetch that job's linsip WI page and
-    answer from it. Returns None when linsip is off or no job number is present.
-    If a job number IS present but the WI can't be fetched, returns a clear
-    message rather than falling through to a guessed answer."""
-    from linsip import LINSIP_ENABLED, extract_job_no, fetch_job_wi
+    """Answer about a job: fetch that job's linsip WI page and answer from it.
+    The job number comes from the question, or — for a follow-up with no number
+    ('AE คือใคร') — the most recent one in the conversation. Returns None when
+    linsip is off or no job is in scope. If a job IS in scope but the WI can't be
+    fetched, returns a clear message rather than a guessed answer."""
+    from linsip import fetch_job_wi
 
-    if not LINSIP_ENABLED:
-        return None
-    job = extract_job_no(question)
+    job = _resolve_linsip_job(question, session_id, user["id"])
     if not job:
         return None
 
@@ -1388,7 +1433,7 @@ async def chat(
             attachments=[],
         )
 
-    if question and not _is_linsip_query(question):
+    if question and not _is_linsip_query(question, session_id, user):
         classification = classify_sensitivity(question)
         if classification is not None:
             category, reason = classification
@@ -2117,7 +2162,7 @@ async def chat_stream(
             #    classifier (answered from the authorized WI page) but still runs
             #    the hard keyword filter.
             if is_sensitive(question) is not None or (
-                not _is_linsip_query(question)
+                not _is_linsip_query(question, session_id, user)
                 and classify_sensitivity(question) is not None
             ):
                 audit_log(

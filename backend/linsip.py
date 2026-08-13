@@ -41,12 +41,30 @@ if LINSIP_ENABLED:
         pass
 
 
+# A follow-up asking about "this job" without repeating the number — so the
+# caller knows to reuse the job number from earlier in the conversation.
+_JOB_FOLLOWUP_RE = re.compile(
+    r"งานนี้|งานนี่|งานนั้น|จ๊อบนี้|job\s*นี้|"
+    r"ลูกค้า|customer|\bae\b|sale|เซล|กาว|กำหนดส่ง|\bdue\b|ส่งงาน|วันส่ง|ex.?factory|"
+    r"จำนวน|ยอดงาน|\bqty\b|ขนาด|\bsize\b|สถานะ|status|เข้าเล่ม|binding|"
+    r"revision|รีวิชั่น|แก้ไข|สเปก|สเปค|ประเภทงาน|reprint|กระดาษ|paper|"
+    r"เทคนิค|ไดคัท|die.?cut|เคลือบ|กี่สี|พิมพ์|ผลิตภัณฑ์|สรุปงาน",
+    re.IGNORECASE,
+)
+
+
 def extract_job_no(text: str) -> str | None:
     """Return the first job number found (upper-cased), else None."""
     if not text:
         return None
     m = _JOB_RE.search(text)
     return m.group(0).upper() if m else None
+
+
+def looks_like_job_followup(text: str) -> bool:
+    """True when a question (with no job number) is a follow-up about the job
+    being discussed — e.g. 'AE คือใครงานนี้', 'ใช้กาวอะไร'."""
+    return bool(text) and _JOB_FOLLOWUP_RE.search(text) is not None
 
 
 def build_wi_url(job_no: str) -> str:
