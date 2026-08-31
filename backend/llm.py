@@ -739,6 +739,23 @@ SYSTEM_PROMPT_COMPANY_FREE = (
 )
 
 
+# For the linsip job lookup: the WI data is fed as context. Answer naturally and
+# DON'T cite internal field/section names (customer / ข้อมูลในหน้า) — that
+# confused users ("อ้างอิง: ช่อง customer ในข้อมูลหน้า … หน้าไหน?").
+SYSTEM_PROMPT_LINSIP = (
+    f"{COMPANY_IDENTITY}\n\n"
+    "ระบบดึงข้อมูลจากใบสั่งงาน (Work Instruction / WI) ของงานที่ผู้ใช้ถามมาให้แล้ว "
+    "ตอบคำถามจากข้อมูลนั้น\n"
+    "- ตอบเป็นภาษาไทย ตรงคำถาม กระชับแต่ได้ใจความครบ\n"
+    "- ตอบค่าที่ถามให้ชัด แล้วเสริมบริบทที่เกี่ยวข้องสั้น ๆ ถ้ามี "
+    "(เช่น ถามลูกค้า อาจบอกชื่องาน/จำนวนประกอบ)\n"
+    "- ถ้าจะอ้างที่มา ให้พูดเป็นธรรมชาติว่า 'จากใบสั่งงาน (WI) ของงาน <เลขงาน>' — "
+    "**ห้ามอ้างชื่อช่อง/ฟิลด์ภายในระบบ** (เช่น 'ช่อง customer', 'ข้อมูลในหน้า', 'field') "
+    "เพราะผู้ใช้ไม่เข้าใจ\n"
+    "- ถ้าข้อมูลที่ถามไม่มีใน WI ของงานนี้ ให้บอกตรง ๆ ว่าไม่ได้ระบุไว้ — ห้ามเดา/แต่ง"
+)
+
+
 SYSTEM_PROMPT_FILES = (
     f"{COMPANY_IDENTITY}\n\n"
     "ผู้ใช้แนบไฟล์มา — วิเคราะห์เนื้อหาในไฟล์อย่างละเอียดเพื่อตอบคำถาม\n"
@@ -1097,12 +1114,14 @@ def answer_with_files(
     image_data_urls: list[str],
     pdf_texts: list[tuple[str, str]],
     history: list[dict] | None = None,
+    system_prompt: str | None = None,
 ) -> tuple[str, dict]:
     """Answer when the user attached files. Returns (answer_text, usage).
 
     Uses vision-capable model (LLM_MODEL_FILES). Vision image tokens are
     already counted inside prompt_tokens by OpenAI, so we don't need to
     estimate them separately — `_extract_usage` picks them up automatically.
+    `system_prompt` overrides the default (used by the linsip path).
     """
     content: list[dict] = []
 
@@ -1123,7 +1142,7 @@ def answer_with_files(
     for url in image_data_urls:
         content.append({"type": "image_url", "image_url": {"url": url}})
 
-    messages: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT_FILES}]
+    messages: list[dict] = [{"role": "system", "content": system_prompt or SYSTEM_PROMPT_FILES}]
     if history:
         messages.extend(history)
     messages.append({"role": "user", "content": content})

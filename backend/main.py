@@ -1317,8 +1317,11 @@ def _try_linsip_answer(
     )
     prompt_question = question or f"สรุปข้อมูลงาน {job}"
     try:
+        from llm import SYSTEM_PROMPT_LINSIP
+
         answer, files_usage = answer_with_files(
             prompt_question, [], [got], history=history,
+            system_prompt=SYSTEM_PROMPT_LINSIP,
         )
     except Exception as e:
         audit_log(
