@@ -631,11 +631,16 @@ def _is_export_request(text: str) -> bool:
 # allows an article/pronoun). Keeps ordinary questions like "รูปแบบการทำงาน" or
 # "ขอข้อมูลรูปเครื่องจักร" from tripping it.
 _IMAGE_INTENT_RE = re.compile(
+    # create-verb + any image noun (posters/cards/banners included now)
     r"(?:สร้าง|วาด|ออกแบบ|เจน)\s*"
-    r"(?:รูปภาพ|รูป|ภาพประกอบ|ภาพ|โลโก้|อินโฟกราฟิก)"
-    r"|(?:generate|create|draw|make|gen)\s+"
+    r"(?:รูปภาพ|รูป|ภาพประกอบ|ภาพ|โลโก้|อินโฟกราฟิก|"
+    r"โปสเตอร์|โพสเตอร์|การ์ด|แบนเนอร์|ใบปลิว|แผ่นพับ|ปฏิทิน|สติกเกอร์)"
+    # "ทำ" only before unambiguous graphic nouns — so "ทำไม/ทำงาน/ทำรูปแบบ" don't trip it
+    r"|ทำ\s*(?:โปสเตอร์|โพสเตอร์|การ์ด|แบนเนอร์|ใบปลิว|แผ่นพับ|ปฏิทิน|สติกเกอร์|อินโฟกราฟิก|โลโก้)"
+    r"|(?:generate|create|draw|make|gen|design)\s+"
     r"(?:an?\s+|the\s+|me\s+(?:an?\s+)?|us\s+(?:an?\s+)?)?"
-    r"(?:image|picture|logo|illustration|drawing|photo|graphic)",
+    r"(?:image|picture|logo|illustration|drawing|photo|graphic|"
+    r"poster|banner|flyer|card|calendar|sticker)",
     re.IGNORECASE,
 )
 
