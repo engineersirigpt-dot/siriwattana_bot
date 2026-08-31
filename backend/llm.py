@@ -52,7 +52,10 @@ IMAGE_INPUT_FIDELITY = os.getenv("IMAGE_INPUT_FIDELITY", "high")
 # Stamp the company logo (small brand chip, bottom-right) onto generated posters
 # so they read as official Sirivatana artwork. Set IMAGE_POSTER_BRAND=0 to turn
 # off. Optional custom path via POSTER_LOGO_PATH.
-IMAGE_POSTER_BRAND = os.getenv("IMAGE_POSTER_BRAND", "1").strip().lower() not in {"0", "false", "no"}
+# Off by default — the low-res logo looked worse than no logo. Set
+# IMAGE_POSTER_BRAND=1 (with a hi-res transparent PNG at POSTER_LOGO_PATH) to
+# stamp the company logo on posters again.
+IMAGE_POSTER_BRAND = os.getenv("IMAGE_POSTER_BRAND", "0").strip().lower() not in {"0", "false", "no"}
 
 # Prompt enhancement: rewrite the user's short (often Thai) request into a rich
 # English image prompt before hitting gpt-image-1 — the same trick ChatGPT uses
@@ -245,12 +248,18 @@ def _render_image(prompt: str, size: str) -> bytes:
 _POSTER_PLAN_SYSTEM = (
     "You are a senior graphic designer planning a poster/card/flyer from a user's "
     "short request (often Thai). Return STRICT JSON with these keys:\n"
-    "- background_prompt: a detailed ENGLISH prompt for a BEAUTIFUL, professionally "
-    "designed background/illustration with ABSOLUTELY NO text, letters, numbers or "
-    "typography. Give it a clear focal theme, a harmonious colour palette, tasteful "
-    "lighting and depth, and a modern, elegant, print-ready look. IMPORTANT: keep "
-    "the region named by text_area soft, clean and uncluttered (gentle gradient or "
-    "negative space) so overlaid text stays perfectly readable.\n"
+    "- background_prompt: a rich, detailed ENGLISH prompt for a STUNNING, award-"
+    "winning poster background/illustration with ABSOLUTELY NO text, letters, "
+    "numbers or typography. Art-direct it like a professional designer: a strong "
+    "focal subject/hero element, deliberate composition with depth and layering "
+    "(foreground/midground/background), cinematic lighting and mood, a cohesive "
+    "curated colour palette (name 2-3 specific colours), tasteful texture and fine "
+    "detail, and a modern high-end editorial/print-ready aesthetic. Choose a fitting "
+    "style (elegant realistic, minimal, 3D render, flat vector, watercolour…) and "
+    "add quality cues (sharp, highly detailed, polished, professional). IMPORTANT: "
+    "keep the region named by text_area calm, soft and uncluttered (gentle gradient "
+    "or negative space, darker or lighter than the busy area) so overlaid text stays "
+    "perfectly readable.\n"
     "- title: the main heading to overlay (keep the user's script & numerals; if "
     "they asked for Thai numerals use exact Thai digits ๐-๙). Short and punchy.\n"
     "- subtitle: a secondary line or date, else \"\".\n"
