@@ -301,7 +301,7 @@ function DashboardToolbar({
   loading: boolean;
 }) {
   return (
-    <div className="flex flex-wrap items-center justify-between gap-3 bg-white/80 backdrop-blur-sm rounded-2xl border border-line px-4 py-3 shadow-sm">
+    <div className="flex flex-wrap items-center justify-between gap-3 bg-surface/80 backdrop-blur-sm rounded-2xl border border-line px-4 py-3 shadow-sm">
       <div className="flex items-center gap-2">
         <CalendarDays size={16} className="text-purple-600" />
         <div className="flex bg-surface3 rounded-lg p-0.5">
@@ -407,7 +407,7 @@ function ExecutiveSummary({ data }: { data: Overview }) {
   }
 
   return (
-    <div className="bg-gradient-to-br from-app via-white to-indigo-50 border border-purple-100 rounded-2xl p-5 shadow-sm">
+    <div className="bg-gradient-to-br from-app via-white to-indigo-50 dark:from-surface dark:via-surface dark:to-surface border border-purple-100 dark:border-line rounded-2xl p-5 shadow-sm">
       <div className="flex items-start gap-3">
         <div className="flex-shrink-0 w-10 h-10 rounded-xl bg-gradient-to-br from-purple-500 to-purple-700 flex items-center justify-center shadow-md">
           <Sparkles size={18} className="text-white" />
@@ -418,11 +418,11 @@ function ExecutiveSummary({ data }: { data: Overview }) {
           </h3>
           <p className="text-sm text-muted mt-1">
             ระบบตอบคำถาม {kpis.messages.value.toLocaleString()} ครั้ง โดย{" "}
-            <span className="font-medium text-purple-700">
+            <span className="font-medium text-purple-700 dark:text-purple-300">
               {brainPct}% จาก AI Brain
             </span>
             {", "}
-            <span className="font-medium text-sky-700">{ragPct}% จาก KB</span>
+            <span className="font-medium text-sky-700 dark:text-sky-300">{ragPct}% จาก KB</span>
             {", "}
             และ <span className="font-medium text-content2">{llmPct}% จาก LLM</span>
           </p>
@@ -503,10 +503,13 @@ function KpiCard({
   formatValue?: (v: number) => string;
 }) {
   const tones: Record<typeof color, string> = {
-    purple: "from-app to-purple-100 border-purple-200 text-purple-700",
-    indigo: "from-indigo-50 to-indigo-100 border-indigo-200 text-indigo-700",
-    sky: "from-sky-50 to-sky-100 border-sky-200 text-sky-700",
-    emerald: "from-emerald-50 to-emerald-100 border-emerald-200 text-emerald-700",
+    purple:
+      "from-app to-purple-100 border-purple-200 text-purple-700 dark:from-surface dark:to-surface dark:border-line dark:text-purple-300",
+    indigo:
+      "from-indigo-50 to-indigo-100 border-indigo-200 text-indigo-700 dark:from-surface dark:to-surface dark:border-line dark:text-indigo-300",
+    sky: "from-sky-50 to-sky-100 border-sky-200 text-sky-700 dark:from-surface dark:to-surface dark:border-line dark:text-sky-300",
+    emerald:
+      "from-emerald-50 to-emerald-100 border-emerald-200 text-emerald-700 dark:from-surface dark:to-surface dark:border-line dark:text-emerald-300",
   };
 
   // Trend health: by default up = good (green), down = bad (red). For cost we
@@ -906,25 +909,25 @@ function CostBreakdownCard({ cost }: { cost: Overview["cost"] }) {
 
           <div className="md:col-span-3 flex flex-col">
             <div className="grid grid-cols-2 gap-3 mb-3">
-              <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-3">
-                <p className="text-[11px] text-emerald-700 font-medium uppercase tracking-wide">
+              <div className="bg-emerald-50 dark:bg-emerald-500/10 border border-emerald-200 dark:border-emerald-500/30 rounded-xl p-3">
+                <p className="text-[11px] text-emerald-700 dark:text-emerald-300 font-medium uppercase tracking-wide">
                   รวมทั้งสิ้น
                 </p>
-                <p className="text-2xl font-bold text-emerald-900">
+                <p className="text-2xl font-bold text-emerald-900 dark:text-emerald-100">
                   ฿{cost.total_thb.toFixed(2)}
                 </p>
-                <p className="text-[11px] text-emerald-600 mt-0.5">
+                <p className="text-[11px] text-emerald-600 dark:text-emerald-400 mt-0.5">
                   ${cost.total_usd.toFixed(4)}
                 </p>
               </div>
-              <div className="bg-app border border-purple-200 rounded-xl p-3">
-                <p className="text-[11px] text-purple-700 font-medium uppercase tracking-wide">
+              <div className="bg-app dark:bg-purple-500/10 border border-purple-200 dark:border-purple-500/30 rounded-xl p-3">
+                <p className="text-[11px] text-purple-700 dark:text-purple-300 font-medium uppercase tracking-wide">
                   ค่าจริงจาก tokens
                 </p>
-                <p className="text-2xl font-bold text-purple-900">
+                <p className="text-2xl font-bold text-purple-900 dark:text-purple-100">
                   {realPct}%
                 </p>
-                <p className="text-[11px] text-purple-600 mt-0.5">
+                <p className="text-[11px] text-purple-600 dark:text-purple-400 mt-0.5">
                   {cost.rows_with_real_cost} rows
                 </p>
               </div>
@@ -994,14 +997,18 @@ function SatisfactionCard({ feedback }: { feedback: Overview["feedback"] }) {
 
   // Visual tone tracks the satisfaction band. >=80% green, 60-79 amber, <60 red,
   // unrated grey. Keeps it readable at-a-glance for execs scanning the page.
-  let tone = "from-gray-50 to-surface3 border-line text-content2";
+  let tone =
+    "from-gray-50 to-surface3 border-line text-content2 dark:from-surface dark:to-surface";
   if (satisfaction_pct !== null) {
     if (satisfaction_pct >= 80) {
-      tone = "from-green-50 to-emerald-100 border-emerald-200 text-emerald-700";
+      tone =
+        "from-green-50 to-emerald-100 border-emerald-200 text-emerald-700 dark:from-surface dark:to-surface dark:border-line dark:text-emerald-300";
     } else if (satisfaction_pct >= 60) {
-      tone = "from-amber-50 to-amber-100 border-amber-200 text-amber-700";
+      tone =
+        "from-amber-50 to-amber-100 border-amber-200 text-amber-700 dark:from-surface dark:to-surface dark:border-line dark:text-amber-300";
     } else {
-      tone = "from-rose-50 to-rose-100 border-rose-200 text-rose-700";
+      tone =
+        "from-rose-50 to-rose-100 border-rose-200 text-rose-700 dark:from-surface dark:to-surface dark:border-line dark:text-rose-300";
     }
   }
 
