@@ -909,6 +909,10 @@ _WEB_SEARCH_INTENT_RE = re.compile(
     # live financial / prices
     r"ราคาทอง|ราคาน้ำมัน|ราคาหุ้น|ราคาบิทคอยน์|บิทคอยน์|บิตคอยน์|คริปโต|"
     r"ค่าเงิน|อัตราแลกเปลี่ยน|เรทเงิน|หุ้น|ดอกเบี้ยนโยบาย|เงินเฟ้อ|"
+    # facts that drift over time (population, stats, leaders, rankings)
+    r"ประชากร|จำนวนประชากร|สถิติ|จีดีพี|\bgdp\b|ผู้นำประเทศ|นายกรัฐมนตรี|นายกฯ|"
+    r"ประธานาธิบดี|รัฐมนตรี|ผู้ว่า|อันดับโลก|ค่าครองชีพ|อัตราการว่างงาน|"
+    r"population|statistics|ranking|\bceo\b|"
     # explicit years
     r"25[67]\d|20[23]\d|"
     # english
@@ -924,12 +928,35 @@ _WEB_SEARCH_INTENT_RE = re.compile(
 # Per-user cap on live web searches per calendar day (Asia/Bangkok).
 WEB_SEARCH_DAILY_LIMIT = int(os.getenv("WEB_SEARCH_DAILY_LIMIT", "20"))
 
+# Layer B: when the keyword list misses, let the model decide if the question
+# needs live data (ChatGPT-style). Skipped for questions that clearly never
+# need the web, so the extra classifier call only runs on plausible cases.
+WEB_SEARCH_AUTO_DECIDE = os.getenv("WEB_SEARCH_AUTO_DECIDE", "1").strip().lower() not in {"0", "false", "no"}
+_NON_WEB_RE = re.compile(
+    r"^\s*(สวัสดี|หวัดดี|ดีครับ|ดีค่ะ|ขอบคุณ|โอเค|hello|hi|hey|thanks|thank you)\b|"
+    r"เขียน\s*code|เขียนโค้ด|โค้ด|โปรแกรม|function|ฟังก์ชัน|debug|"
+    r"แต่งกลอน|แต่งเพลง|เขียนอีเมล|ช่วยร่าง|ช่วยเขียน|สรุปให้|แปลว่า|แปลเป็น|"
+    r"สร้างรูป|วาดรูป|ทำโปสเตอร์",
+    re.IGNORECASE,
+)
+
 
 def _is_web_search_request(text: str) -> bool:
-    """True when the question likely needs fresh/live info from the web."""
+    """True when the question likely needs fresh/live info from the web.
+
+    Layer A: fast keyword match. Layer B: for anything the keywords miss, ask
+    the model (unless it's an obvious non-web request) — so a question like
+    "ประชากรโตเกียวเท่าไหร่" gets current data without the user naming a year.
+    """
     if not text:
         return False
-    return _WEB_SEARCH_INTENT_RE.search(text) is not None
+    if _WEB_SEARCH_INTENT_RE.search(text) is not None:
+        return True
+    if WEB_SEARCH_AUTO_DECIDE and not _NON_WEB_RE.search(text):
+        from llm import wants_web_search
+
+        return wants_web_search(text)
+    return False
 
 
 # Company-specific FACTUAL questions — HR/benefits, specs, prices, policy, SOPs.

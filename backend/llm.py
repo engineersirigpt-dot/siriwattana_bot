@@ -2,6 +2,7 @@ import base64
 import json
 import os
 import re
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -798,6 +799,39 @@ def classify_query(question: str) -> tuple[str, dict]:
             "completion_tokens": 0,
             "cost_usd": 0.0,
         }
+
+
+_WEB_DECIDE_PROMPT = (
+    "ผู้ใช้ถามคำถามกับ chatbot ภายในบริษัท คำถามนี้จำเป็นต้องใช้ 'ข้อมูลสด/ปัจจุบันจาก"
+    "อินเทอร์เน็ต' เพื่อตอบให้ถูกต้องหรือไม่? ตอบคำเดียว: yes หรือ no\n"
+    "- yes: คำตอบที่ถูกต้องขึ้นกับข้อมูลล่าสุด/ที่เปลี่ยนตามเวลา เช่น ราคา, ข่าว, สภาพอากาศ, "
+    "ผลกีฬา, สถิติ/ประชากร/ตัวเลขเศรษฐกิจ, ผู้นำ/ผู้ดำรงตำแหน่งปัจจุบัน, อันดับ, เวอร์ชันล่าสุด, "
+    "เหตุการณ์หลังปี 2024\n"
+    "- no: ความรู้ทั่วไปที่ไม่เปลี่ยนตามเวลา, คณิตศาสตร์, เขียน/แก้โค้ด, แต่ง/ร่างข้อความ, "
+    "แปลภาษา, คำถามเกี่ยวกับบริษัทเราเอง, ทักทาย/คุยเล่น"
+)
+
+
+@lru_cache(maxsize=512)
+def wants_web_search(question: str) -> bool:
+    """Let the model decide if a question needs live web data (for cases the
+    keyword list misses). Cached; fails CLOSED (no search) on any error."""
+    q = (question or "").strip()
+    if not q:
+        return False
+    try:
+        res = _get_client().chat.completions.create(
+            model=LLM_MODEL_CLASSIFIER,
+            temperature=0,
+            messages=[
+                {"role": "system", "content": _WEB_DECIDE_PROMPT},
+                {"role": "user", "content": q},
+            ],
+            **_model_kwargs(LLM_MODEL_CLASSIFIER, 3),
+        )
+        return "yes" in (res.choices[0].message.content or "").strip().lower()
+    except Exception:
+        return False
 
 
 def answer_from_context(
