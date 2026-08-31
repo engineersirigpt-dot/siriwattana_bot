@@ -357,10 +357,11 @@ def edit_image(image_path: str, instruction: str) -> tuple[bytes, dict]:
 
     edit_kwargs: dict = {"model": IMAGE_MODEL, "image": None, "prompt": prompt, "size": size}
     if IMAGE_MODEL.startswith("gpt-image"):
-        # input_fidelity=high keeps the reference (face/logo/product/pose) intact
-        # and only changes what's asked; quality=high renders crisper.
-        edit_kwargs["input_fidelity"] = IMAGE_INPUT_FIDELITY
-        edit_kwargs["quality"] = IMAGE_QUALITY
+        edit_kwargs["quality"] = IMAGE_QUALITY  # crisper edit
+        # input_fidelity (keep the reference face/logo/pose intact) is a
+        # gpt-image-1 feature only — gpt-image-2 rejects it with a 400.
+        if IMAGE_MODEL.startswith("gpt-image-1"):
+            edit_kwargs["input_fidelity"] = IMAGE_INPUT_FIDELITY
     with open(image_path, "rb") as f:
         edit_kwargs["image"] = f
         resp = _get_client().images.edit(**edit_kwargs)
