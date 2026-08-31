@@ -114,18 +114,16 @@ def compose_text_on_image(
 
     W, H = img.size
     draw = ImageDraw.Draw(img)
-    fill = _hex_to_rgb(text_color)
-    stroke = (255, 255, 255) if not _is_light(fill) else (40, 40, 40)
     max_w = int(W * 0.86)
 
-    # Build the lines to draw: (text, font, gap-after-in-px).
+    # Build the lines to draw. Title font is a touch bigger (W/8) for impact.
     lines: list[tuple[str, ImageFont.FreeTypeFont]] = []
     if (subtitle or "").strip() and text_area != "bottom":
-        lines.append((subtitle.strip(), _fit_font(draw, subtitle.strip(), FONT_REGULAR, max_w, int(W / 20))))
+        lines.append((subtitle.strip(), _fit_font(draw, subtitle.strip(), FONT_REGULAR, max_w, int(W / 19))))
     if (title or "").strip():
-        lines.append((title.strip(), _fit_font(draw, title.strip(), FONT_BOLD, max_w, int(W / 9))))
+        lines.append((title.strip(), _fit_font(draw, title.strip(), FONT_BOLD, max_w, int(W / 8))))
     if (subtitle or "").strip() and text_area == "bottom":
-        lines.append((subtitle.strip(), _fit_font(draw, subtitle.strip(), FONT_REGULAR, max_w, int(W / 20))))
+        lines.append((subtitle.strip(), _fit_font(draw, subtitle.strip(), FONT_REGULAR, max_w, int(W / 19))))
     if (footer or "").strip():
         lines.append((footer.strip(), _fit_font(draw, footer.strip(), FONT_REGULAR, max_w, int(W / 26))))
 
@@ -147,12 +145,42 @@ def compose_text_on_image(
     if text_area == "center":
         y = (H - block_h) // 2
     elif text_area == "bottom":
-        y = int(H * 0.92) - block_h
+        y = int(H * 0.90) - block_h
     else:  # top
         y = int(H * 0.08)
-    y = max(int(H * 0.04), min(y, int(H * 0.96) - block_h))
+    y = max(int(H * 0.04), min(y, int(H * 0.94) - block_h))
 
-    stroke_w = max(2, int(W / 340))
+    # ── Readability ──────────────────────────────────────────────────────────
+    # Sample the background behind the text, drop a soft rounded scrim, and pick
+    # a text colour that actually contrasts (the planner sometimes returns a dark
+    # colour on a dark background — the original bug that made text unreadable).
+    band = img.crop((0, max(0, y - gap), W, min(H, y + block_h + gap))).convert("L")
+    px = list(band.getdata())
+    avg = (sum(px) / len(px)) if px else 128
+    dark_bg = avg < 140
+
+    longest = max(draw.textlength(t, font=f) for t, f in lines)
+    pad_x, pad_y = int(W * 0.055), int(H * 0.022)
+    panel_w = min(int(W * 0.92), int(longest) + pad_x * 2)
+    px0 = (W - panel_w) // 2
+    scrim = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    ImageDraw.Draw(scrim).rounded_rectangle(
+        [px0, y - pad_y, px0 + panel_w, y + block_h + pad_y],
+        radius=int(H * 0.022),
+        fill=(0, 0, 0, 115) if dark_bg else (255, 255, 255, 150),
+    )
+    img = Image.alpha_composite(img.convert("RGBA"), scrim).convert("RGB")
+    draw = ImageDraw.Draw(img)
+
+    plan_fill = _hex_to_rgb(text_color)
+    if dark_bg:
+        fill = plan_fill if _is_light(plan_fill) else (255, 255, 255)
+        stroke = (0, 0, 0)
+    else:
+        fill = plan_fill if not _is_light(plan_fill) else (26, 61, 124)
+        stroke = (255, 255, 255)
+
+    stroke_w = max(2, int(W / 320))
     for (text, font), h in zip(lines, heights):
         w = draw.textlength(text, font=font)
         x = (W - w) / 2
