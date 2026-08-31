@@ -950,7 +950,10 @@ _COMPANY_FACT_RE = re.compile(
     re.IGNORECASE,
 )
 
-_UNGROUNDED_SOURCES = {"llm", "llm-calc"}
+# NOT "llm-calc": a calculation where the user supplied the numbers (e.g.
+# "500 แผ่น แผ่นละ 2.75 รวมเท่าไหร่") is self-contained arithmetic, not a
+# company-fact guess — the note there just confuses people.
+_UNGROUNDED_SOURCES = {"llm"}
 
 _COMPANY_FACT_NOTE = (
     "\n\n---\n"
