@@ -307,7 +307,7 @@ export default function AdminPage() {
           </div>
           <button
             onClick={() => router.push("/chat")}
-            className="flex items-center gap-2 px-4 py-2 bg-white/80 backdrop-blur-sm border border-line rounded-xl hover:bg-surface hover:shadow-md transition-all text-sm text-content2"
+            className="flex items-center gap-2 px-4 py-2 bg-surface/80 backdrop-blur-sm border border-line rounded-xl hover:bg-surface2 hover:shadow-md transition-all text-sm text-content2"
           >
             <ArrowLeft size={18} />
             กลับไปแชท
@@ -315,7 +315,7 @@ export default function AdminPage() {
         </div>
 
         {/* Tabs */}
-        <div className="flex gap-2 mb-6 bg-white/60 backdrop-blur-sm p-1.5 rounded-2xl shadow-sm border border-white/40 w-fit">
+        <div className="flex gap-2 mb-6 bg-surface/60 backdrop-blur-sm p-1.5 rounded-2xl shadow-sm border border-line w-fit">
           <TabButton
             active={tab === "dashboard"}
             onClick={() => setTab("dashboard")}
@@ -681,7 +681,7 @@ function EmptyState({
   description: string;
 }) {
   return (
-    <div className="bg-white/60 backdrop-blur-sm rounded-2xl border border-white/40 p-12 text-center">
+    <div className="bg-surface/60 backdrop-blur-sm rounded-2xl border border-line p-12 text-center">
       <div className="flex justify-center mb-4">{icon}</div>
       <h3 className="text-content font-medium mb-1">{title}</h3>
       <p className="text-sm text-muted">{description}</p>
@@ -745,7 +745,7 @@ function UsersPanel({
       <div className="bg-surface rounded-2xl border border-line shadow-sm overflow-hidden">
         <div className="overflow-x-auto">
           <table className="min-w-full text-sm">
-            <thead className="bg-app text-purple-900">
+            <thead className="bg-app dark:bg-surface2 text-purple-900 dark:text-purple-200">
               <tr>
                 <th className="px-4 py-3 text-left font-semibold">Username</th>
                 <th className="px-4 py-3 text-left font-semibold">Role</th>
@@ -866,10 +866,13 @@ function StatCard({
   color: "purple" | "indigo" | "green" | "red";
 }) {
   const colors: Record<typeof color, string> = {
-    purple: "from-app to-purple-100 text-purple-800 border-purple-200",
-    indigo: "from-indigo-50 to-indigo-100 text-indigo-800 border-indigo-200",
-    green: "from-green-50 to-green-100 text-green-800 border-green-200",
-    red: "from-red-50 to-red-100 text-red-800 border-red-200",
+    purple:
+      "from-app to-purple-100 text-purple-800 border-purple-200 dark:from-surface dark:to-surface dark:text-purple-300 dark:border-line",
+    indigo:
+      "from-indigo-50 to-indigo-100 text-indigo-800 border-indigo-200 dark:from-surface dark:to-surface dark:text-indigo-300 dark:border-line",
+    green:
+      "from-green-50 to-green-100 text-green-800 border-green-200 dark:from-surface dark:to-surface dark:text-green-300 dark:border-line",
+    red: "from-red-50 to-red-100 text-red-800 border-red-200 dark:from-surface dark:to-surface dark:text-red-300 dark:border-line",
   };
   return (
     <div
@@ -895,10 +898,10 @@ function IconAction({
   onClick: () => void;
 }) {
   const colors: Record<typeof color, string> = {
-    indigo: "text-indigo-600 hover:bg-indigo-50",
+    indigo: "text-indigo-600 dark:text-indigo-400 hover:bg-indigo-50 dark:hover:bg-surface3",
     gray: "text-muted hover:bg-surface3",
-    green: "text-green-600 hover:bg-green-50",
-    red: "text-red-600 hover:bg-red-50",
+    green: "text-green-600 dark:text-green-400 hover:bg-green-50 dark:hover:bg-surface3",
+    red: "text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-surface3",
   };
   return (
     <button
