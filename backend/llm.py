@@ -903,11 +903,12 @@ def answer_freely(
 
 
 # Web search — for questions needing fresh/live info (news, today's prices,
-# latest regulations). Uses the Responses API `web_search` tool (openai>=2):
-# a normal base model (gpt-4o) is given the tool and actually browses, returning
-# the answer plus url_citation annotations. (The old gpt-4o-search-preview chat
-# model was sunset and had stopped searching — answers came from stale memory.)
-WEB_SEARCH_MODEL = os.getenv("WEB_SEARCH_MODEL", "gpt-4o")
+# latest regulations). Uses the Responses API `web_search` tool (openai>=2): a
+# base model is given the tool and actually browses, returning the answer plus
+# url_citation annotations. gpt-5.6-terra (verified: works with the tool and
+# returns citations) is smarter than gpt-4o for synthesising results. NOTE:
+# gpt-5-search-api is NOT compatible with the Responses API — don't use it here.
+WEB_SEARCH_MODEL = os.getenv("WEB_SEARCH_MODEL", "gpt-5.6-terra")
 # Flat surcharge per search on top of token cost (OpenAI bills web-search tool
 # calls separately). ~$0.03/search is a safe estimate for the dashboard.
 WEB_SEARCH_SURCHARGE_USD = float(os.getenv("WEB_SEARCH_SURCHARGE_USD", "0.03"))
