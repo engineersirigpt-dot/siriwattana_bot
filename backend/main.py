@@ -913,6 +913,8 @@ _WEB_SEARCH_INTENT_RE = re.compile(
     r"ประชากร|จำนวนประชากร|สถิติ|จีดีพี|\bgdp\b|ผู้นำประเทศ|นายกรัฐมนตรี|นายกฯ|"
     r"ประธานาธิบดี|รัฐมนตรี|ผู้ว่า|อันดับโลก|ค่าครองชีพ|อัตราการว่างงาน|"
     r"population|statistics|ranking|\bceo\b|"
+    # someone's current team / club / affiliation (sports rosters, transfers)
+    r"อยู่ทีม|สังกัด|ย้ายทีม|เล่นให้|แข่งให้|ทีมปัจจุบัน|\bplays for\b|\bdrives for\b|"
     # explicit years
     r"25[67]\d|20[23]\d|"
     # english
