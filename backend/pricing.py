@@ -30,6 +30,17 @@ MODEL_PRICING_USD_PER_1M_TOKENS: dict[str, dict[str, float]] = {
     "gpt-5":           {"input": 1.25,  "output": 10.00},
     "gpt-5-mini":      {"input": 0.25,  "output": 2.00},
     "gpt-5-nano":      {"input": 0.05,  "output": 0.40},
+    # Newer chat models (verified 2026 pricing page). terra = short-context rate;
+    # long-context is $4/$18 but most of our calls are short.
+    "gpt-5.6-terra":   {"input": 2.00,  "output": 12.00},
+    "gpt-5.5":         {"input": 5.00,  "output": 30.00},
+
+    # Image models — billed by tokens (text input / image output). Image gen
+    # cost is tracked as a flat per-image estimate (llm.IMAGE_GEN_COST_USD); these
+    # entries let estimate_cost_usd work if ever called with the token counts.
+    "gpt-image-2":     {"input": 5.00,  "output": 30.00},
+    "gpt-image-1.5":   {"input": 5.00,  "output": 32.00},
+    "gpt-image-1":     {"input": 5.00,  "output": 40.00},
 
     # Embedding models — used by RAG search; no output cost
     "text-embedding-3-large": {"input": 0.13, "output": 0.00},

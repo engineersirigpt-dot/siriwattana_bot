@@ -33,17 +33,17 @@ LLM_MODEL_CALC = os.getenv("LLM_MODEL_CALC", "gpt-5-mini")
 # doesn't need strong Thai context reasoning like the main answer model.
 LLM_MODEL_CLASSIFIER = os.getenv("LLM_MODEL_CLASSIFIER", "gpt-4o-mini")
 
-# Image generation (gpt-image-1). Billed per image by size/quality; OpenAI's
-# token-based billing varies, so we store a flat per-image cost estimate for
-# the dashboard. high quality (default) ≈ $0.12-0.17/image (~4-6 ฿).
-IMAGE_MODEL = os.getenv("IMAGE_MODEL", "gpt-image-1")
+# Image generation. gpt-image-2 (newer + cheaper than gpt-image-1: output tokens
+# $30 vs $40 /1M) is the default. Billed by image tokens; a 1024x1536 high image
+# ≈ 5,488 output tokens ≈ $0.16 (~6 ฿) — the flat estimate below tracks that.
+IMAGE_MODEL = os.getenv("IMAGE_MODEL", "gpt-image-2")
 # "auto" lets gpt-image-1 pick the aspect ratio that fits the content (a
 # landscape scene comes out wide, a portrait subject tall, etc.). Posters are
 # the one case we pin explicitly (see below) so headings never get clipped.
 IMAGE_SIZE = os.getenv("IMAGE_SIZE", "auto")
 IMAGE_SIZE_PORTRAIT = os.getenv("IMAGE_SIZE_PORTRAIT", "1024x1536")  # posters
 IMAGE_QUALITY = os.getenv("IMAGE_QUALITY", "high")           # crisper text
-IMAGE_GEN_COST_USD = float(os.getenv("IMAGE_GEN_COST_USD", "0.12"))
+IMAGE_GEN_COST_USD = float(os.getenv("IMAGE_GEN_COST_USD", "0.16"))
 # How faithfully an EDIT preserves the uploaded reference. "high" keeps faces,
 # logos, product shapes and pose intact while changing only what's asked (great
 # for "make this cat orange" / "put this logo on a car"); "low" is looser. Only
@@ -61,7 +61,7 @@ IMAGE_POSTER_BRAND = os.getenv("IMAGE_POSTER_BRAND", "0").strip().lower() not in
 # English image prompt before hitting gpt-image-1 — the same trick ChatGPT uses
 # to get polished results. Set IMAGE_PROMPT_ENHANCE=0 to send prompts raw.
 IMAGE_PROMPT_ENHANCE = os.getenv("IMAGE_PROMPT_ENHANCE", "1").strip().lower() not in {"0", "false", "no"}
-IMAGE_PROMPT_MODEL = os.getenv("IMAGE_PROMPT_MODEL", "gpt-4.1")
+IMAGE_PROMPT_MODEL = os.getenv("IMAGE_PROMPT_MODEL", "gpt-5.6-terra")
 
 # For posters/cards/flyers: generate a TEXT-FREE background, then draw the Thai
 # headings ourselves with a real font (see image_compose) — perfect Thai text
@@ -218,7 +218,7 @@ def _enhance_image_prompt(prompt: str) -> str:
                 {"role": "system", "content": _IMAGE_ENHANCE_SYSTEM},
                 {"role": "user", "content": prompt},
             ],
-            **_model_kwargs(IMAGE_PROMPT_MODEL, 700),
+            **_model_kwargs(IMAGE_PROMPT_MODEL, 2000),
         )
         enhanced = (res.choices[0].message.content or "").strip()
         return enhanced or prompt
@@ -322,7 +322,7 @@ def plan_poster(prompt: str) -> dict | None:
                 {"role": "user", "content": prompt},
             ],
             response_format={"type": "json_object"},
-            **_model_kwargs(IMAGE_PROMPT_MODEL, 700),
+            **_model_kwargs(IMAGE_PROMPT_MODEL, 2000),
         )
         data = json.loads(res.choices[0].message.content or "{}")
         if isinstance(data, dict) and (data.get("title") or "").strip():
