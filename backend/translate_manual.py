@@ -183,18 +183,32 @@ def _sanitize(md: str) -> str:
     md = md.replace("&nbsp;", " ")
     md = re.sub(r"[ \t]{3,}", " ", md)               # ช่องว่างยาว -> เดียว
     md = re.sub(r"([.\-_·•*=])\1{4,}", r"\1\1\1", md)  # จุด/ขีดซ้ำยาว -> สั้น
-    # บรรทัดเดียวกันซ้ำติดกันเกิน 2 ครั้ง -> เหลือครั้งเดียว
-    out, prev, rep = [], None, 0
-    for ln in md.split("\n"):
-        s = ln.strip()
-        if s and s == prev:
-            rep += 1
-            if rep >= 2:
+    # กันการวนซ้ำ: บล็อก 1..12 บรรทัดที่ซ้ำติดกันเกิน 2 รอบ -> เหลือ 2 รอบ
+    # (vision บางครั้งติดลูปบน LaTeX หนาแน่น เช่น เศษส่วนซ้อน E55 ที่พ่นบล็อก
+    #  =, \[, \frac..., \] วนซ้ำหลายสิบครั้ง จนไฟล์บวมเป็นสิบหน้า)
+    lines = md.split("\n")
+    norm = [ln.strip() for ln in lines]
+    out, i, n = [], 0, len(lines)
+    while i < n:
+        collapsed = False
+        for w in range(1, 13):
+            if i + 2 * w > n:
                 continue
-        else:
-            rep = 0
-            prev = s
-        out.append(ln)
+            block = norm[i:i + w]
+            if not any(block):            # หน้าต่างว่างล้วน -> ข้าม
+                continue
+            reps, j = 1, i + w
+            while j + w <= n and norm[j:j + w] == block:
+                reps += 1
+                j += w
+            if reps >= 3:                 # ซ้ำเกิน 2 รอบ -> ยุบเหลือ 2 รอบ
+                out.extend(lines[i:i + w * 2])
+                i = j
+                collapsed = True
+                break
+        if not collapsed:
+            out.append(lines[i])
+            i += 1
     return "\n".join(out).strip()
 
 
