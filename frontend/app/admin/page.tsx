@@ -289,7 +289,7 @@ export default function AdminPage() {
   }
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-surface via-app to-purple-100">
+    <div className="min-h-screen bg-gradient-to-br from-surface via-app to-purple-100 dark:to-app">
       {/* Background decoration */}
       <div className="fixed inset-0 overflow-hidden pointer-events-none">
         <div className="absolute -top-40 -right-40 w-96 h-96 bg-purple-300 rounded-full opacity-20 blur-3xl"></div>
@@ -573,8 +573,8 @@ export default function AdminPage() {
                       <div className="space-y-3">
                         {selectedSession.messages.map((m) => (
                           <div key={m.id} className="space-y-1.5">
-                            <div className="bg-gradient-to-r from-app to-purple-100 rounded-xl px-4 py-2.5 text-sm text-content">
-                              <span className="text-xs text-purple-600 font-medium block mb-0.5">
+                            <div className="bg-gradient-to-r from-app to-purple-100 dark:from-surface2 dark:to-surface2 rounded-xl px-4 py-2.5 text-sm text-content">
+                              <span className="text-xs text-purple-600 dark:text-purple-300 font-medium block mb-0.5">
                                 user
                               </span>
                               {m.question}

@@ -788,12 +788,12 @@ function TotalCostCard({
 }) {
   const total = chatThb + translationThb;
   return (
-    <div className="bg-gradient-to-br from-violet-50 to-surface rounded-2xl border border-violet-100 p-5 shadow-sm">
+    <div className="bg-gradient-to-br from-violet-50 to-surface dark:from-surface dark:to-surface rounded-2xl border border-violet-100 dark:border-line p-5 shadow-sm">
       <h3 className="font-semibold text-content flex items-center gap-2 mb-1">
-        <DollarSign size={16} className="text-violet-600" />
+        <DollarSign size={16} className="text-violet-600 dark:text-violet-400" />
         ค่าใช้จ่าย AI รวม (ในช่วงที่เลือก)
       </h3>
-      <p className="text-3xl font-bold text-violet-700">฿{total.toFixed(2)}</p>
+      <p className="text-3xl font-bold text-violet-700 dark:text-violet-300">฿{total.toFixed(2)}</p>
       <p className="text-xs text-muted mt-1">
         แชท ฿{chatThb.toFixed(2)} · แปลเอกสาร ฿{translationThb.toFixed(2)}
       </p>
@@ -811,9 +811,9 @@ function TranslationCostCard({ t }: { t?: Overview["translation"] }) {
         ค่าใช้จ่ายการแปลเอกสาร
       </h3>
       <div className="grid grid-cols-2 gap-4">
-        <div className="rounded-xl bg-violet-50 p-4">
+        <div className="rounded-xl bg-violet-50 dark:bg-violet-500/10 p-4">
           <p className="text-xs text-muted">ในช่วงที่เลือก</p>
-          <p className="text-2xl font-bold text-violet-700">฿{t.cost_thb.toFixed(2)}</p>
+          <p className="text-2xl font-bold text-violet-700 dark:text-violet-300">฿{t.cost_thb.toFixed(2)}</p>
           <p className="text-xs text-faint">
             {t.jobs} งาน · {t.pages} หน้า
           </p>
