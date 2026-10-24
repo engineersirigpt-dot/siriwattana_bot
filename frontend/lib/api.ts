@@ -88,14 +88,31 @@ export async function transcribeAudio(blob: Blob): Promise<string> {
   return data.text ?? "";
 }
 
+// The SSO exchange normally answers in well under a second. Without a timeout
+// a hung backend leaves the /sso page spinning forever with no error.
+const SSO_TIMEOUT_MS = 20_000;
+
 // Exchange an MI-issued SSO token (from the central MI portal) for our own
 // session. The /sso page calls this with the ?token= it received from MI.
 export async function miSsoLogin(token: string) {
-  const res = await fetch(`${API_BASE}/auth/mi-sso`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ token }),
-  });
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), SSO_TIMEOUT_MS);
+  let res: Response;
+  try {
+    res = await fetch(`${API_BASE}/auth/mi-sso`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ token }),
+      signal: ctrl.signal,
+    });
+  } catch {
+    // Timed out, or the backend is unreachable.
+    throw new Error(
+      "ระบบ SiriGPT ไม่ตอบสนอง กรุณาลองเข้าผ่านเมนู MI อีกครั้งในอีกสักครู่ หรือแจ้งผู้ดูแลระบบ",
+    );
+  } finally {
+    clearTimeout(timer);
+  }
   if (!res.ok) {
     let detail = "";
     try {

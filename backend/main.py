@@ -153,6 +153,17 @@ def _startup() -> None:
     audit_log("app_startup", detail={"status": "ok"})
 
 
+@app.get("/health")
+async def health():
+    """Liveness probe for the Docker HEALTHCHECK.
+
+    Deliberately `async` with no I/O: it runs on the event loop itself, so if
+    the single uvicorn worker gets wedged (every request hangs, incl. MI SSO
+    login) this stops answering and `docker ps` shows the container unhealthy.
+    """
+    return {"ok": True}
+
+
 class ChatResponse(BaseModel):
     answer: str
     source: str

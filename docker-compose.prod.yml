@@ -2,7 +2,7 @@
 #
 # Runs alongside the test stack (docker-compose.yml) on the same server:
 #   test stack : ports 3032 / 8000 / 5433, DB = chatbot_test
-#   prod stack : ports 3031 / 8010 / 5434, DB = chatbot_prod
+#   prod stack : ports 3031 / 8030 / 5434, DB = chatbot_prod
 #
 # Launch:
 #   sudo docker compose -f docker-compose.prod.yml up -d
@@ -37,7 +37,10 @@ services:
       context: ./backend
     container_name: siriwattana-backend-prod
     ports:
-      - "8010:8000"
+      # Not 8010: since 2026-10 the FortiGate (192.168.5.250) silently swallows
+      # traffic to :8010 from office PCs and VPN — TCP connects, no reply, and
+      # the request never reaches us (/sso spins forever). 8030 passes through.
+      - "8030:8000"
     env_file:
       - ./backend/.env.prod
     environment:
@@ -58,7 +61,7 @@ services:
         # NOTE: HTTPS (Caddy) is parked pending a management decision — see the
         # Caddyfile + the commented caddy service below. To re-enable HTTPS/mic,
         # switch this to https://192.168.5.31/api and uncomment the caddy service.
-        NEXT_PUBLIC_API_BASE: http://192.168.5.31:8010
+        NEXT_PUBLIC_API_BASE: http://192.168.5.31:8030
     container_name: siriwattana-frontend-prod
     ports:
       - "3031:3000"
