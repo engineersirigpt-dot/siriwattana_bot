@@ -244,6 +244,16 @@ function hasMarkdownTable(text: string): boolean {
   return false;
 }
 
+// A spelling check on an attachment runs OCR + a slow, careful model pass
+// (~1–2 min), so the wait indicator says so instead of a bare "thinking" that
+// looks stuck. Keep in sync with _PROOFREAD_RE in backend/main.py.
+const PROOFREAD_RE =
+  /คำผิด|พิมพ์ผิด|สะกดผิด|เขียนผิด|ตัวสะกด|การสะกด|ตรวจ(?:ทาน|อักษร|ภาษา|คำ)|พิสูจน์อักษร|ไวยากรณ์|proof\s*-?\s*read|typo|spell|grammar/i;
+
+function isProofreading(msg: Msg | undefined): boolean {
+  return msg?.role === "user" && !!msg.attachments?.length && PROOFREAD_RE.test(msg.text);
+}
+
 
 function groupBySaved(sessions: Session[]) {
   const groups: Record<string, Session[]> = {
@@ -2033,7 +2043,11 @@ export default function ChatPage() {
                     className="w-2 h-2 bg-purple-400 rounded-full animate-bounce"
                     style={{ animationDelay: "300ms" }}
                   />
-                  <span className="ml-2 text-sm text-muted">กำลังคิด…</span>
+                  <span className="ml-2 text-sm text-muted">
+                    {isProofreading(messages[messages.length - 1])
+                      ? "กำลังตรวจคำผิดอย่างละเอียด (อาจใช้เวลา 1–2 นาที)…"
+                      : "กำลังคิด…"}
+                  </span>
                 </div>
               </div>
             )}

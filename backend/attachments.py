@@ -4,6 +4,8 @@ import base64
 import io
 import os
 import re
+import shutil
+import subprocess
 import uuid
 from pathlib import Path
 
@@ -517,6 +519,37 @@ def render_pdf_pages_as_images(
         pass
 
     return urls
+
+
+# Literal OCR for proofreading. Vision LLMs silently "fix" Thai typos while
+# reading an image (they see 'สามรถ' as 'สามารถ'), so spelling checks need a
+# character-level reader. Tesseract (tha+eng, installed in the Docker image)
+# keeps typos exactly as printed.
+OCR_LANGS = os.getenv("OCR_LANGS", "tha+eng")
+OCR_TIMEOUT_S = int(os.getenv("OCR_TIMEOUT_S", "90"))
+
+
+def ocr_data_url(data_url: str) -> str:
+    """OCR a base64 image data URL (from encode_image_data_url or
+    render_pdf_pages_as_images). Returns "" if tesseract is missing or fails."""
+    if not shutil.which("tesseract"):
+        return ""
+    try:
+        raw = base64.b64decode(data_url.split(",", 1)[1])
+        res = subprocess.run(
+            ["tesseract", "stdin", "stdout", "-l", OCR_LANGS, "--psm", "6"],
+            input=raw,
+            capture_output=True,
+            timeout=OCR_TIMEOUT_S,
+            check=False,
+        )
+    except Exception:
+        return ""
+    if res.returncode != 0:
+        return ""
+    # Tesseract emits sara-am as nikhahit + sara-aa ("ํา"); normalise to "ำ" so
+    # the proofreader doesn't flag every ทำ/จำ as a typo.
+    return res.stdout.decode("utf-8", "replace").replace("ํา", "ำ").strip()
 
 
 def count_pdf_pages(file_path: str) -> int:

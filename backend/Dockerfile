@@ -25,6 +25,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     # ── LibreOffice Writer — headless .docx → .pdf for document translation ──
     libreoffice-writer \
     libreoffice-core \
+    # ── Tesseract OCR (Thai+English) — literal text for proofreading images ──
+    tesseract-ocr \
+    tesseract-ocr-tha \
     && rm -rf /var/lib/apt/lists/*
 
 # ── Sarabun — the brand-aligned Thai font for PDF exports ──

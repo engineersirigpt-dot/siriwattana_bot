@@ -64,6 +64,7 @@ def mock_external(monkeypatch):
     monkeypatch.setattr("main.add_knowledge", lambda q, a, uid: 1)
     monkeypatch.setattr("main.resolve_pending", lambda pid, ans, uid: 99)
     monkeypatch.setattr("main.classify_query", lambda q: "general")
+    monkeypatch.setattr("llm.wants_image_generation", lambda q: False)
     monkeypatch.setattr(
         "main.answer_freely",
         lambda q, model=None, history=None: MOCK_ANSWER,

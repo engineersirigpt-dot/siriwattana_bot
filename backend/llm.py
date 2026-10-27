@@ -33,6 +33,13 @@ LLM_MODEL_CALC = os.getenv("LLM_MODEL_CALC", "gpt-5-mini")
 # doesn't need strong Thai context reasoning like the main answer model.
 LLM_MODEL_CLASSIFIER = os.getenv("LLM_MODEL_CLASSIFIER", "gpt-4o-mini")
 
+# Proofreading ("ตรวจคำผิด" on an attachment). Accuracy over speed: on a test
+# poster with 11 planted Thai/English typos, gpt-5 @ high + literal OCR found
+# 11/11 in 6/6 runs (~90s); the normal files path (gpt-5 @ low, image only)
+# found 0-1. gpt-5.6-terra was ~5x faster but missed 1-2 per run.
+PROOFREAD_MODEL = os.getenv("PROOFREAD_MODEL", "gpt-5")
+PROOFREAD_REASONING_EFFORT = os.getenv("PROOFREAD_REASONING_EFFORT", "high")
+
 # Image generation. gpt-image-2 (newer + cheaper than gpt-image-1: output tokens
 # $30 vs $40 /1M) is the default. Billed by image tokens; a 1024x1536 high image
 # ≈ 5,488 output tokens ≈ $0.16 (~6 ฿) — the flat estimate below tracks that.
@@ -198,6 +205,11 @@ _IMAGE_ENHANCE_SYSTEM = (
     "they asked for Thai numerals (เลขไทย) write the exact Thai digits ๐-๙.\n"
     "- For posters, lay out a clear title and, if given, a date/subtitle; leave "
     "generous margins so nothing is clipped.\n"
+    "- NEVER invent a logo, brand name, company name, trademark or watermark — the "
+    "image model will otherwise make one up (it once drew a real, unrelated "
+    "company's logo). If the user asks for their logo (e.g. 'ใส่โลโก้', 'logo from "
+    "the file'), draw NO logo or placeholder: just leave a clean, empty area at the "
+    "top centre where the real logo can be placed later.\n"
     "Output ONLY the final image prompt as one flowing paragraph — no preamble, no "
     "surrounding quotes, no explanation."
 )
@@ -863,6 +875,40 @@ def wants_web_search(question: str) -> bool:
         return False
 
 
+_IMAGE_DECIDE_PROMPT = (
+    "ผู้ใช้พิมพ์ถึง chatbot ภายในบริษัท ซึ่ง 'สร้างรูปภาพได้' (โปสเตอร์ ป้าย การ์ด แบนเนอร์ "
+    "ใบปลิว ภาพประกอบ ฯลฯ) ข้อความนี้ต้องการให้ระบบ 'สร้างรูปภาพใหม่ขึ้นมา' หรือไม่? "
+    "ตอบคำเดียว: yes หรือ no\n"
+    "- yes: ขอให้ทำ/สร้าง/ออกแบบ/ขอ/อยากได้ รูป ภาพ โปสเตอร์ ป้าย ใบปลิว artwork ฯลฯ "
+    "(เช่น 'ทำรูปโปสเตอร์รับสมัครงาน', 'ขอโปสเตอร์โปรโมชัน', 'อยากได้ภาพสำหรับโพสต์', "
+    "'ทำประกาศนี้เป็นรูป') — แม้ข้อความจะยาวและมีเนื้อหาที่ต้องใส่ในรูปมาด้วย\n"
+    "- no: ถามข้อมูล/ขอคำแนะนำเกี่ยวกับรูปหรือภาพ, ขอรูปถ่ายของสิ่งที่มีอยู่จริง "
+    "(เช่น รูปเครื่องจักร รูปสินค้า), ขอให้เขียนเฉพาะข้อความ/แคปชันสำหรับโปสเตอร์ (ไม่ได้ขอรูป)"
+)
+
+
+@lru_cache(maxsize=512)
+def wants_image_generation(question: str) -> bool:
+    """Let the model decide if the user wants a NEW image made (for phrasings
+    the create-verb regex misses). Cached; fails CLOSED (no image) on any error."""
+    q = (question or "").strip()
+    if not q:
+        return False
+    try:
+        res = _get_client().chat.completions.create(
+            model=LLM_MODEL_CLASSIFIER,
+            temperature=0,
+            messages=[
+                {"role": "system", "content": _IMAGE_DECIDE_PROMPT},
+                {"role": "user", "content": q},
+            ],
+            **_model_kwargs(LLM_MODEL_CLASSIFIER, 3),
+        )
+        return "yes" in (res.choices[0].message.content or "").strip().lower()
+    except Exception:
+        return False
+
+
 def answer_from_context(
     question: str,
     context_question: str,
@@ -1154,3 +1200,74 @@ def answer_with_files(
     )
     text = (res.choices[0].message.content or "").strip()
     return text, _extract_usage(res, LLM_MODEL_FILES)
+
+
+# The core rule: Thai spelling is judged from the literal text (OCR / document
+# text), never from the model's own view of the image — vision auto-corrects
+# Thai while reading. Inviting it to "double-check against the image" dropped
+# recall from 11/11 to 3/11 in testing, so the image is scoped to English,
+# numbers and locations only.
+SYSTEM_PROMPT_PROOFREAD = (
+    "คุณคือนักพิสูจน์อักษร (proofreader) ภาษาไทยและอังกฤษมืออาชีพ งานคือหาคำผิดในไฟล์ที่ผู้ใช้แนบมาให้ครบทุกจุด\n\n"
+    "แหล่งข้อมูลแต่ละอย่างใช้คนละหน้าที่ (ห้ามสลับ):\n"
+    "1) \"ข้อความจาก OCR ของรูปที่ N\" = สิ่งที่พิมพ์อยู่ในรูปจริงทีละตัวอักษร (OCR ไม่แก้คำผิดให้) "
+    "→ ใช้ตัดสินการสะกด \"คำภาษาไทย\" ในรูปนั้นเท่านั้น\n"
+    "2) \"ข้อความจากไฟล์ ...\" = ข้อความดิจิทัลของเอกสาร ตรงตัวอักษร 100% → ใช้ตัดสินการสะกดทั้งไทยและอังกฤษ "
+    "(ไม่มีปัญหาอ่านพลาด คำที่ผิดแม้แค่วรรณยุกต์ให้ใส่ตารางคำผิดได้เลย)\n"
+    "3) รูปภาพ = ใช้อ่าน \"คำภาษาอังกฤษ ตัวเลข เบอร์โทร\" และใช้บอกตำแหน่งในรูปเท่านั้น\n"
+    "   ห้ามใช้การมองรูปมาตัดสินว่าคำไทยสะกดถูก เพราะการมองรูปจะแก้คำผิดภาษาไทยให้อัตโนมัติโดยไม่รู้ตัว "
+    "(เช่น รูปเขียน 'สามรถ' แต่จะมองเห็นเป็น 'สามารถ') — ถ้า OCR กับสิ่งที่คุณเห็นในรูปต่างกันในคำไทย ให้เชื่อ OCR\n"
+    "   ถ้ารูปไหนไม่มีข้อความจาก OCR ให้ตรวจจากรูปเอง แล้วแจ้งท้ายคำตอบว่าการตรวจคำไทยในรูปนั้นอาจไม่ครบ\n\n"
+    "ข้อผิดพลาดที่ OCR ทำเป็นประจำ (ไม่ใช่คำผิดในรูป):\n"
+    "- คำภาษาอังกฤษกลายเป็นอักขระมั่ว (เช่น 0ล๐ฮู๑) และเศษอักขระ/สัญลักษณ์แปลก ๆ ที่ไม่ใช่คำ → ไม่ต้องรายงาน\n"
+    "- วรรณยุกต์หรือสระบน (่ ้ ๊ ๋ ิ ี ึ ื ็ ั ์) หาย และพยัญชนะที่ต่างกันแค่หาง/ขีดเล็ก ๆ (ช/ซ ด/ต บ/ป ผ/ฝ พ/ฟ ฎ/ฏ)\n"
+    "  → ถ้าคำไทยจาก OCR ผิดเฉพาะแบบนี้ ให้ใส่หัวข้อ \"ควรตรวจซ้ำ\" (อาจเป็นคำผิดจริงหรือ OCR อ่านพลาด) ห้ามใส่ในตารางคำผิด\n\n"
+    "วิธีทำ:\n"
+    "- ไล่ตรวจทุกคำไทยเทียบการสะกดตามพจนานุกรมฉบับราชบัณฑิตยสภา: พยัญชนะผิด, สระหน้า/หลัง/ล่างผิด, "
+    "ตัวสะกดผิด, ตัวซ้ำ/ตัวหาย, ใ/ไ → คำผิดจริง\n"
+    "- ตรวจคำภาษาอังกฤษ\n"
+    "- ตรวจลำดับเลขข้อที่ข้าม/ซ้ำ\n\n"
+    "รูปแบบคำตอบ:\n"
+    "### คำผิดที่พบ\n"
+    "| # | ตำแหน่ง | ในไฟล์เขียนว่า | ที่ถูกต้อง | หมายเหตุ |\n"
+    "### ควรตรวจซ้ำ\n"
+    "- ตำแหน่ง: \"สิ่งที่อ่านได้\" → \"ที่น่าจะถูก\" (ถ้าไม่มีให้เขียนว่า \"ไม่มี\")\n"
+    "ถ้าไม่พบคำผิดจริง ๆ ให้บอกว่าไม่พบ ห้ามแต่งคำผิดขึ้นมาเอง ห้ามพูดถึง OCR หรือกระบวนการภายในในคำตอบ"
+)
+
+
+def answer_proofread(
+    question: str,
+    image_data_urls: list[str],
+    ocr_texts: list[str],
+    doc_texts: list[tuple[str, str]],
+    history: list[dict] | None = None,
+) -> tuple[str, dict]:
+    """Proofread attachments. Returns (answer_text, usage).
+
+    `ocr_texts[i]` is the literal OCR of `image_data_urls[i]` ("" if none);
+    `doc_texts` are (filename, extracted text) for text-bearing files.
+    """
+    blocks = [question]
+    for name, text in doc_texts:
+        blocks.append(f"=== ข้อความจากไฟล์ {name} (ข้อความดิจิทัล ตรงตัวอักษร) ===\n{text}")
+    for i, ocr in enumerate(ocr_texts, 1):
+        blocks.append(f"=== ข้อความจาก OCR ของรูปที่ {i} ===\n{ocr or '(ไม่มี — OCR อ่านรูปนี้ไม่ได้)'}")
+
+    content: list[dict] = [{"type": "text", "text": "\n\n".join(blocks)}]
+    for url in image_data_urls:
+        content.append({"type": "image_url", "image_url": {"url": url, "detail": "high"}})
+
+    messages: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT_PROOFREAD}]
+    if history:
+        messages.extend(history)
+    messages.append({"role": "user", "content": content})
+
+    kwargs = _model_kwargs(PROOFREAD_MODEL, 32000)
+    if "reasoning_effort" in kwargs:
+        kwargs["reasoning_effort"] = PROOFREAD_REASONING_EFFORT
+    res = _get_client().chat.completions.create(
+        model=PROOFREAD_MODEL, messages=messages, **kwargs
+    )
+    text = (res.choices[0].message.content or "").strip()
+    return text, _extract_usage(res, PROOFREAD_MODEL)

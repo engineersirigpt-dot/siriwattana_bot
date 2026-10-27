@@ -46,6 +46,7 @@ from llm import (
     accumulate_usage,
     answer_freely,
     answer_from_context,
+    answer_proofread,
     answer_with_files,
     answer_with_web_search,
     classify_query,
@@ -635,6 +636,36 @@ def _is_export_request(text: str) -> bool:
     return True
 
 
+# ── Proofreading attachments ────────────────────────────────────────────────
+# "ตรวจคำผิดในรูปนี้" needs more than the normal vision answer: vision models
+# read Thai typos as the correct word, so images are OCR'd literally first and
+# a stronger model judges spelling from that text (see llm.answer_proofread).
+# Keep in sync with PROOFREAD_RE in frontend/app/chat/page.tsx.
+_PROOFREAD_RE = re.compile(
+    r"คำผิด|พิมพ์ผิด|สะกดผิด|เขียนผิด|ตัวสะกด|การสะกด|ตรวจ(?:ทาน|อักษร|ภาษา|คำ)|"
+    r"พิสูจน์อักษร|ไวยากรณ์|proof\s*-?\s*read|typo|spell|grammar",
+    re.IGNORECASE,
+)
+
+
+def _is_proofread_request(text: str) -> bool:
+    return bool(text) and _PROOFREAD_RE.search(text) is not None
+
+
+def _answer_files(
+    question: str,
+    image_urls: list[str],
+    text_attachments: list[tuple[str, str]],
+    history: list[dict] | None,
+) -> tuple[str, dict]:
+    """Answer about attached files — proofreading mode when asked to check
+    spelling, otherwise the normal vision/document answer."""
+    if _is_proofread_request(question):
+        ocr_texts = [att.ocr_data_url(u) for u in image_urls]
+        return answer_proofread(question, image_urls, ocr_texts, text_attachments, history=history)
+    return answer_with_files(question, image_urls, text_attachments, history=history)
+
+
 # ── AI image generation ─────────────────────────────────────────────────────
 # Detect a "please draw/generate an image" request so we route it to the image
 # model instead of the text LLM. A create-verb must sit right before the
@@ -644,10 +675,11 @@ def _is_export_request(text: str) -> bool:
 _IMAGE_INTENT_RE = re.compile(
     # create-verb + any image noun (posters/cards/banners included now)
     r"(?:สร้าง|วาด|ออกแบบ|เจน)\s*"
+    # "โป/โพ[สร]เตอร์" also catches the common misspelling "โปรเตอร์"
     r"(?:รูปภาพ|รูป|ภาพประกอบ|ภาพ|โลโก้|อินโฟกราฟิก|"
-    r"โปสเตอร์|โพสเตอร์|การ์ด|แบนเนอร์|ใบปลิว|แผ่นพับ|ปฏิทิน|สติกเกอร์)"
+    r"โ[ปพ][สร]เตอร์|การ์ด|แบนเนอร์|ใบปลิว|แผ่นพับ|ปฏิทิน|สติกเกอร์)"
     # "ทำ" only before unambiguous graphic nouns — so "ทำไม/ทำงาน/ทำรูปแบบ" don't trip it
-    r"|ทำ\s*(?:โปสเตอร์|โพสเตอร์|การ์ด|แบนเนอร์|ใบปลิว|แผ่นพับ|ปฏิทิน|สติกเกอร์|อินโฟกราฟิก|โลโก้)"
+    r"|ทำ\s*(?:โ[ปพ][สร]เตอร์|การ์ด|แบนเนอร์|ใบปลิว|แผ่นพับ|ปฏิทิน|สติกเกอร์|อินโฟกราฟิก|โลโก้)"
     r"|(?:generate|create|draw|make|gen|design)\s+"
     r"(?:an?\s+|the\s+|me\s+(?:an?\s+)?|us\s+(?:an?\s+)?)?"
     r"(?:image|picture|logo|illustration|drawing|photo|graphic|"
@@ -659,11 +691,34 @@ _IMAGE_INTENT_RE = re.compile(
 IMAGE_GEN_DAILY_LIMIT = int(os.getenv("IMAGE_GEN_DAILY_LIMIT", "10"))
 
 
+# Layer B: phrasings the regex misses ("ทำรูปโปสเตอร์…", "ขอโปสเตอร์…", "ทำประกาศ
+# นี้เป็นรูป") go to a small classifier — but only when the message names an
+# image/graphic at all, so ordinary chat never pays for the extra call.
+IMAGE_AUTO_DECIDE = os.getenv("IMAGE_AUTO_DECIDE", "1").strip().lower() not in {"0", "false", "no"}
+_IMAGE_NOUN_RE = re.compile(
+    r"รูป(?!แบบ)|ภาพ(?!รวม)|โ[ปพ][สร]เตอร์|ป้าย|แบนเนอร์|การ์ด|ใบปลิว|แผ่นพับ|"
+    r"อาร์ตเวิร์[กค]|โลโก้|สติกเกอร์|อินโฟกราฟิก|"
+    r"\b(?:image|picture|poster|banner|flyer|artwork|graphic|illustration|logo)s?\b",
+    re.IGNORECASE,
+)
+
+
 def _is_image_request(text: str) -> bool:
-    """True when the user is asking the bot to CREATE an image."""
+    """True when the user is asking the bot to CREATE an image.
+
+    Layer A: fast create-verb+noun regex. Layer B: if that misses but the
+    message mentions an image/graphic, let the classifier decide.
+    """
     if not text:
         return False
-    return _IMAGE_INTENT_RE.search(text.strip()) is not None
+    stripped = text.strip()
+    if _IMAGE_INTENT_RE.search(stripped) is not None:
+        return True
+    if IMAGE_AUTO_DECIDE and _IMAGE_NOUN_RE.search(stripped):
+        from llm import wants_image_generation
+
+        return wants_image_generation(stripped)
+    return False
 
 
 # Edit-intent: a modification instruction. Only acted on when the session
@@ -1814,11 +1869,8 @@ async def chat(
                         text_attachments.append((sf["filename"], extracted))
 
                 prompt_question = question or "ช่วยอธิบายเนื้อหาในไฟล์ที่แนบ และให้คำแนะนำที่เกี่ยวข้อง"
-                answer, files_usage = answer_with_files(
-                    prompt_question,
-                    image_urls,
-                    text_attachments,
-                    history=history,
+                answer, files_usage = _answer_files(
+                    prompt_question, image_urls, text_attachments, history
                 )
                 # Prepend notices: (1) long-document translation may be incomplete,
                 # (2) scanned PDF exceeded the 50-page vision cap — so the user
@@ -2039,7 +2091,7 @@ async def chat(
                     text_attachments.append((sf["filename"], extracted))
 
             prompt_question = question or "ช่วยอธิบายเนื้อหาในไฟล์ที่แนบ และให้คำแนะนำที่เกี่ยวข้อง"
-            answer, _files_usage = answer_with_files(prompt_question, image_urls, text_attachments, history=history)
+            answer, _files_usage = _answer_files(prompt_question, image_urls, text_attachments, history)
             notices = list(truncation_notes)
             warn = att.long_translation_warning(question, total_text_chars, len(image_urls))
             if warn:
