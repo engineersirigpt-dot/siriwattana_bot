@@ -809,7 +809,10 @@ def _handle_image_edit(
     try:
         src_path = att.validate_upload_path(last_img["file_path"])
         data, usage = edit_image(str(src_path), question)
-    except Exception:
+    except Exception as e:
+        import sys
+
+        print(f"IMAGE_EDIT_FAILED: {e!r}", file=sys.stderr)
         text = "ขออภัยค่ะ แก้ไขรูปไม่สำเร็จ ลองพิมพ์คำสั่งใหม่ หรือสร้างรูปใหม่ก็ได้ค่ะ"
         mid = save_chat_message_pg(
             user_id=user["id"], session_id=sid, question=question,
@@ -881,6 +884,9 @@ def _handle_image_generation(
     try:
         data, usage = generate_image(question, logo_path=logo_path)
     except Exception as e:
+        import sys
+
+        print(f"IMAGE_GEN_FAILED: {e!r}", file=sys.stderr)
         # Distinguish OpenAI's content-policy rejection (copyrighted characters,
         # brands, real people, unsafe content) from a real system error so the
         # user knows to reword instead of just "try again". Neither consumes the
