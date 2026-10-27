@@ -246,20 +246,29 @@ def test_failed_stream_raises_agent_error(pages):
 
 @pytest.fixture
 def glue(monkeypatch):
-    saved, audits, searches = [], [], []
+    saved, audits, searches, attached = [], [], [], []
+    monkeypatch.setattr(agent, "AGENT_V1_MODE", "all")
+    monkeypatch.setattr(main, "use_postgres_auth", lambda: True)
     monkeypatch.setattr(chat_pg, "get_session_history_pg", lambda **kw: [])
     monkeypatch.setattr(chat_pg, "count_web_searches_today_pg", lambda uid: 18)
+    monkeypatch.setattr(chat_pg, "count_code_runs_today_pg", lambda uid: 0)
+    monkeypatch.setattr(chat_pg, "get_session_spreadsheets_pg", lambda sid, uid: [])
     monkeypatch.setattr(chat_pg, "record_web_search_pg", lambda uid, q, cost: searches.append((uid, q, cost)))
     monkeypatch.setattr(chat_pg, "ensure_session_pg", lambda **kw: (7, "title"))
     monkeypatch.setattr(chat_pg, "save_chat_message_pg", lambda **kw: saved.append(kw) or 99)
+    monkeypatch.setattr(
+        chat_pg, "save_attachment_pg",
+        lambda **kw: attached.append(kw) or {"id": len(attached), "filename": kw["filename"],
+                                             "generated": kw.get("generated", False)},
+    )
     monkeypatch.setattr(main, "audit_log", lambda action, **kw: audits.append(action))
-    return NS(saved=saved, audits=audits, searches=searches)
+    return NS(saved=saved, audits=audits, searches=searches, attached=attached)
 
 
 def _turn(monkeypatch, events, seen=None):
-    def fake_run(question, history, *, web_quota_left, on_web_search):
+    def fake_run(question, history, *, web_quota_left, on_web_search, **kw):
         if seen is not None:
-            seen.update(quota=web_quota_left, on_web_search=on_web_search)
+            seen.update(quota=web_quota_left, on_web_search=on_web_search, **kw)
         for e in events:
             if isinstance(e, Exception):
                 raise e
@@ -295,7 +304,8 @@ def test_agent_turn_saves_answer_with_cost_and_sources(monkeypatch, glue):
 def test_agent_turn_standard_route_saves_nothing(monkeypatch, glue):
     out = _turn(monkeypatch, [("standard", {"cost_usd": 0.001})])
 
-    assert out == [("standard", {"cost_usd": 0.001})]
+    # Agent V1 on → the legacy URL/web steps are skipped (the router covered them)
+    assert out == [("standard", {"usage": {"cost_usd": 0.001}, "legacy_tools": False})]
     assert glue.saved == []
 
 

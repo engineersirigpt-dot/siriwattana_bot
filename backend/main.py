@@ -1188,53 +1188,110 @@ def _try_web_search_answer(
     }
 
 
-def _agent_enabled(user: dict, mode: str) -> bool:
-    """Agent V1 runs for text chat on postgres, outside company-only mode, and
-    only for users the AGENT_V1_MODE flag lets in (off by default)."""
+def _agent_tools(user: dict, mode: str) -> tuple[bool, bool]:
+    """(web, code): the tool groups the agent router may offer this user.
+    Agent V1 (web search / read link, AGENT_V1_MODE) and Code Interpreter V2
+    (CODE_INTERPRETER_MODE) have separate flags, both off by default. Postgres
+    only, never in company-only mode."""
     import agent
+    import code_interpreter
 
-    return mode != "company" and use_postgres_auth() and agent.agent_enabled_for(user)
+    if mode == "company" or not use_postgres_auth():
+        return False, False
+    return agent.agent_enabled_for(user), code_interpreter.ci_enabled_for(user)
 
 
-def _agent_turn(user: dict, question: str, session_id: int | None, mode: str, request: Request):
-    """Run Agent V1 for one text question. Replaces the legacy URL-reading and
+def _agent_enabled(user: dict, mode: str) -> bool:
+    """The agent router runs when Agent V1 or Code Interpreter is on for this user."""
+    return any(_agent_tools(user, mode))
+
+
+def _agent_turn(
+    user: dict, question: str, session_id: int | None, mode: str, request: Request,
+    uploads: list[dict] | None = None,
+):
+    """Run the agent router for one question. Replaces the legacy URL-reading and
     web-search steps (the agent decides which tools to use, if any). Yields:
         ("status", state) / ("delta", text) — progress and streamed answer text
         ("done", result)    — answer saved; `result` holds the response fields,
                               incl. `tail` (source list) not yet sent as a delta
-        ("standard", usage) — no tool needed: run the normal pipeline WITHOUT the
-                              legacy URL/web steps, adding `usage` to its cost
+                              and `attachments` (uploads + generated files)
+        ("standard", info)  — no tool needed: run the normal pipeline, adding
+                              info["usage"] to its cost; the legacy URL/web steps
+                              run only if info["legacy_tools"]
         ("fallback", None)  — failed before any text: run the legacy pipeline
         ("error", None)     — failed after text was already streamed
+    `uploads` are this message's saved files (dicts from the /chat files path):
+    their Excel/CSV go into the Python sandbox and, on "done", all are saved
+    with the answer. With uploads only run_python is offered.
     """
     import agent
+    import attachments as att
+    import code_interpreter
     from chat_pg import (
+        count_code_runs_today_pg,
         count_web_searches_today_pg,
         ensure_session_pg,
         get_session_history_pg,
+        get_session_spreadsheets_pg,
         record_web_search_pg,
+        save_attachment_pg,
         save_chat_message_pg,
     )
+
+    uploads = uploads or []
+    web, code = _agent_tools(user, mode)
+    web = web and not uploads
+    if code and count_code_runs_today_pg(user["id"]) >= code_interpreter.CI_DAILY_LIMIT:
+        code = False  # daily cap reached — the normal pipeline still answers
+        audit_log("code_limit_hit", user=user, detail={"limit": code_interpreter.CI_DAILY_LIMIT}, request=request)
+    if not (web or code):
+        yield "fallback", None
+        return
+
+    # Spreadsheets for the sandbox: this message's uploads, or — for a text
+    # follow-up — the ones uploaded earlier in this session.
+    file_note = ""
+    input_files: list[tuple[str, str]] = []
+    if code:
+        sources = uploads if uploads else (
+            get_session_spreadsheets_pg(session_id, user["id"]) if session_id else []
+        )
+        for f in sources:
+            if not code_interpreter.is_ci_input(f["filename"]):
+                continue
+            try:
+                input_files.append((f["filename"], str(att.validate_upload_path(f["file_path"]))))
+            except HTTPException:
+                continue  # file purged from disk
+        input_files = input_files[: code_interpreter.CI_MAX_INPUT_FILES]
+        if uploads:
+            file_note = "\n\n[ผู้ใช้แนบไฟล์: " + ", ".join(u["filename"] for u in uploads) + "]"
+        elif input_files:
+            file_note = "\n\n[ไฟล์ Excel/CSV ที่แนบไว้ก่อนหน้าในแชทนี้: " + ", ".join(n for n, _ in input_files) + "]"
 
     started = time.monotonic()
     history = get_session_history_pg(
         session_id=session_id, user_id=user["id"], limit=HISTORY_TURNS,
     )
-    quota_left = max(0, WEB_SEARCH_DAILY_LIMIT - count_web_searches_today_pg(user["id"]))
+    quota_left = max(0, WEB_SEARCH_DAILY_LIMIT - count_web_searches_today_pg(user["id"])) if web else 0
+    prompt = question or "ช่วยวิเคราะห์ไฟล์ที่แนบ"
     emitted = False
     result = None
     try:
         for kind, payload in agent.run_agent(
-            question, history, web_quota_left=quota_left,
+            prompt, history, web_quota_left=quota_left,
             on_web_search=lambda q, cost: record_web_search_pg(user["id"], q, cost),
+            web_enabled=web, ci_enabled=code, input_files=input_files, file_note=file_note,
         ):
             if kind == "done":
                 result = payload
                 break
+            if kind == "standard":
+                yield "standard", {"usage": payload, "legacy_tools": not web}
+                return
             emitted = emitted or kind == "delta"
             yield kind, payload
-            if kind == "standard":
-                return
     except Exception as e:
         audit_log(
             "agent_failed",
@@ -1248,31 +1305,79 @@ def _agent_turn(user: dict, question: str, session_id: int | None, mode: str, re
         yield ("error" if emitted else "fallback"), None
         return
 
+    if uploads and not result.used_code:
+        # The sandbox failed on the attached file — the normal file answer
+        # (extracted text) beats an apology. Uploads only come from the
+        # non-stream path, so no text has reached the client yet.
+        audit_log(
+            "code_failed_fallback", user=user,
+            detail={"tools": result.tools[:10], "prompt": question[:200]}, request=request,
+        )
+        yield "fallback", None
+        return
+
     tail = _format_citations(result.citations)
     answer = (result.answer + tail).strip()
+    # "code" also feeds the Code Interpreter daily cap (count_code_runs_today_pg).
+    source = "code" if result.used_code else "agent"
     sid, stitle = ensure_session_pg(
         user_id=user["id"], session_id=session_id,
-        first_question=question, mode=mode,
+        first_question=question or uploads[0]["filename"], mode=mode,
     )
     mid = save_chat_message_pg(
-        user_id=user["id"], session_id=sid, question=question,
-        answer=answer, source="agent", knowledge_id=None, mode=mode,
-        usage=accumulate_usage(*result.usage, primary_model=agent.AGENT_MODEL),
+        user_id=user["id"], session_id=sid, question=question or "[ไฟล์แนบ]",
+        answer=answer, source=source, knowledge_id=None, mode=mode,
+        usage=accumulate_usage(
+            *result.usage,
+            primary_model=code_interpreter.CI_MODEL if result.used_code else agent.AGENT_MODEL,
+        ),
     )
+    rows = [
+        save_attachment_pg(
+            message_id=mid, user_id=user["id"], filename=u["filename"],
+            content_type=u["content_type"], size_bytes=u["size"], file_path=u["file_path"],
+        )
+        for u in uploads
+    ]
+    # Sandbox outputs are stored like uploads, so they're only reachable through
+    # the owner-checked /attachments/{id} route — never an OpenAI link.
+    for f in result.files:
+        display, ctype, size, path = att.save_generated_file(f.data, f.name, f.content_type)
+        rows.append(save_attachment_pg(
+            message_id=mid, user_id=user["id"], filename=display,
+            content_type=ctype, size_bytes=size, file_path=path, generated=True,
+        ))
     audit_log(
         "agent_answer",
         user=user,
         detail={
             "session_id": sid, "message_id": mid, "steps": result.steps,
             "tools": result.tools[:10], "n_citations": len(result.citations),
+            "used_code": result.used_code, "n_files": len(result.files),
+            "n_inputs": len(input_files),
             "ms": int((time.monotonic() - started) * 1000), "prompt": question[:200],
         },
         request=request,
     )
     yield "done", {
-        "answer": answer, "tail": tail, "source": "agent", "session_id": sid,
-        "session_title": stitle, "message_id": mid,
+        "answer": answer, "tail": tail, "source": source, "session_id": sid,
+        "session_title": stitle, "message_id": mid, "attachments": rows,
     }
+
+
+def _agent_chat_response(payload: dict) -> "ChatResponse":
+    """/chat response for a finished agent turn (the `done` payload)."""
+    return ChatResponse(
+        answer=payload["answer"],
+        source=payload["source"],
+        similarity=None,
+        session_id=payload["session_id"],
+        session_title=payload["session_title"],
+        message_id=payload["message_id"],
+        attachments=payload["attachments"],
+        turn_count=_count_session_turns(payload["session_id"]),
+        turn_limit=MAX_TURNS_PER_SESSION,
+    )
 
 
 def _try_url_answer(
@@ -1816,27 +1921,23 @@ async def chat(
                 turn_limit=MAX_TURNS_PER_SESSION,
             )
 
-    # Agent V1 (AGENT_V1_MODE flag) — the model decides whether to search the
-    # web / read links, over several steps, replacing the two legacy steps
-    # below. If it needs no tool, the normal pipeline runs without them.
+    # Agent router (AGENT_V1_MODE / CODE_INTERPRETER_MODE flags) — the model
+    # decides whether to search the web / read links / run Python, over several
+    # steps, replacing the two legacy steps below when web tools are on. If it
+    # needs no tool, the normal pipeline runs. Off the event loop: a code run
+    # takes 10-60s and must not stall other users' requests.
     legacy_tools = True
     agent_router_usage: dict = {}
     if question and not files and _agent_enabled(user, mode):
-        for kind, payload in _agent_turn(user, question, session_id, mode, request):
+        events = await run_in_threadpool(
+            lambda: list(_agent_turn(user, question, session_id, mode, request))
+        )
+        for kind, payload in events:
             if kind == "done":
-                return ChatResponse(
-                    answer=payload["answer"],
-                    source=payload["source"],
-                    similarity=None,
-                    session_id=payload["session_id"],
-                    session_title=payload["session_title"],
-                    message_id=payload["message_id"],
-                    turn_count=_count_session_turns(payload["session_id"]),
-                    turn_limit=MAX_TURNS_PER_SESSION,
-                )
+                return _agent_chat_response(payload)
             if kind == "standard":
-                legacy_tools = False
-                agent_router_usage = payload
+                legacy_tools = payload["legacy_tools"]
+                agent_router_usage = payload["usage"]
             # "fallback"/"error": nothing has reached the client on this
             # non-stream path, so the legacy pipeline below simply runs.
 
@@ -1960,6 +2061,26 @@ async def chat(
                         turn_limit=MAX_TURNS_PER_SESSION,
                     )
 
+                # Code Interpreter (CODE_INTERPRETER_MODE flag): an Excel/CSV is
+                # attached → the router picks run_python (exact totals, charts,
+                # new files) or hands back to the normal file answer below.
+                # Images/PDF/proofreading never reach this branch.
+                import code_interpreter
+
+                if (
+                    not _is_proofread_request(question)
+                    and any(code_interpreter.is_ci_input(sf["filename"]) for sf in saved_files)
+                    and _agent_tools(user, mode)[1]
+                ):
+                    events = await run_in_threadpool(
+                        lambda: list(_agent_turn(user, question, sid, mode, request, uploads=saved_files))
+                    )
+                    for kind, payload in events:
+                        if kind == "done":
+                            return _agent_chat_response(payload)
+                        if kind == "standard":
+                            agent_router_usage = payload["usage"]
+
                 image_urls: list[str] = []
                 text_attachments: list[tuple[str, str]] = []
                 truncation_notes: list[str] = []
@@ -2029,7 +2150,7 @@ async def chat(
                 # Files path doesn't run the classifier so usage = just the
                 # vision call. Wrap in accumulate_usage for consistent shape
                 # with the keys save_chat_message_pg expects.
-                usage_row = accumulate_usage(files_usage)
+                usage_row = accumulate_usage(agent_router_usage, files_usage)
                 source = "files"
                 knowledge_id = None
                 similarity = None
@@ -2541,10 +2662,11 @@ async def chat_stream(
                 })
                 return
 
-            # 3.54) Agent V1 (AGENT_V1_MODE flag) — the model decides whether
-            #       to search the web / read links, over several steps, and the
-            #       final answer streams. Replaces 3.55/3.6 when it runs; if no
-            #       tool is needed the normal pipeline runs without them.
+            # 3.54) Agent router (AGENT_V1_MODE / CODE_INTERPRETER_MODE flags) —
+            #       the model decides whether to search the web / read links /
+            #       run Python, over several steps, and the final answer streams.
+            #       Replaces 3.55/3.6 when web tools are on; if no tool is
+            #       needed the normal pipeline runs.
             legacy_tools = True
             agent_router_usage: dict = {}
             if _agent_enabled(user, mode):
@@ -2556,18 +2678,21 @@ async def chat_stream(
                     elif kind == "done":
                         if payload["tail"]:
                             yield ev({"type": "delta", "v": payload["tail"]})
-                        yield ev({
+                        done_evt = {
                             "type": "done", "source": payload["source"],
                             "session_id": payload["session_id"],
                             "session_title": payload["session_title"],
                             "message_id": payload["message_id"],
                             "turn_count": _count_session_turns(payload["session_id"]),
                             "turn_limit": MAX_TURNS_PER_SESSION,
-                        })
+                        }
+                        if payload["attachments"]:
+                            done_evt["attachments"] = payload["attachments"]
+                        yield ev(done_evt)
                         return
                     elif kind == "standard":
-                        legacy_tools = False
-                        agent_router_usage = payload
+                        legacy_tools = payload["legacy_tools"]
+                        agent_router_usage = payload["usage"]
                     elif kind == "error":
                         yield ev({"type": "error", "detail": "เกิดข้อผิดพลาดในการสร้างคำตอบ"})
                         return

@@ -137,7 +137,7 @@ export async function sendChat(opts: {
   source: string;
   session_id: number;
   session_title: string;
-  attachments: Array<{ id: number; filename: string; content_type: string; size_bytes: number }>;
+  attachments: Array<{ id: number; filename: string; content_type: string; size_bytes: number; generated?: boolean }>;
   // RAG hits carry the source document so the UI can offer a "📎 ดาวน์โหลด
   // เอกสารต้นฉบับ" button. Null for LLM-only answers and blocked questions.
   source_knowledge_id?: number | null;
@@ -178,13 +178,15 @@ export type StreamDone = {
   source_file?: string | null;
   turn_count?: number | null;
   turn_limit?: number | null;
-  // Present only for AI image-generation answers (source="image_gen"): the
-  // saved image, rendered inline on the bot bubble.
+  // Present only for answers that produced files — AI images (source=
+  // "image_gen") or Code Interpreter output (source="code", generated=true):
+  // rendered inline on the bot bubble.
   attachments?: Array<{
     id: number;
     filename: string;
     content_type: string;
     size_bytes: number;
+    generated?: boolean;
   }>;
 };
 

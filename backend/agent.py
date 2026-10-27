@@ -6,6 +6,7 @@ Built on the OpenAI Responses API with function calling. Every tool wraps code
 that already exists, so its guards carry over unchanged:
   - web_search  → llm.answer_with_web_search (daily quota + cost surcharge)
   - read_url    → url_reader.fetch_url_text (SSRF guard, internal-host allowlist)
+  - run_python  → code_interpreter.run_code (OpenAI-hosted sandbox; V2, own flag)
   - use_standard_answer → hand the question back to the normal pipeline
     (company AI Brain / KB / LLM), untouched.
 
@@ -28,6 +29,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Iterator
 from urllib.parse import urlparse
 
+import code_interpreter
 import llm
 import url_reader
 from pricing import estimate_cost_usd
@@ -49,7 +51,8 @@ AGENT_REASONING_EFFORT = os.getenv("AGENT_REASONING_EFFORT", "low")
 AGENT_MAX_STEPS = int(os.getenv("AGENT_MAX_STEPS", "5"))            # model calls per question
 AGENT_MAX_WEB_SEARCHES = int(os.getenv("AGENT_MAX_WEB_SEARCHES", "3"))
 AGENT_MAX_URL_READS = int(os.getenv("AGENT_MAX_URL_READS", str(url_reader.MAX_URLS)))
-AGENT_TIMEOUT_S = float(os.getenv("AGENT_TIMEOUT_S", "90"))         # whole question
+AGENT_MAX_CODE_RUNS = int(os.getenv("CODE_INTERPRETER_MAX_PER_QUESTION", "2"))  # run_python calls
+AGENT_TIMEOUT_S = float(os.getenv("AGENT_TIMEOUT_S", "90"))         # whole question (+CI timeout when offered)
 AGENT_MIN_CALL_TIMEOUT_S = 20.0   # floor for any single call, so the final answer can finish
 AGENT_MAX_OUTPUT_TOKENS = 8000
 AGENT_TOOL_TEXT_CHARS = 8000      # cap on page/summary text fed back to the model
@@ -59,12 +62,7 @@ AGENT_INSTRUCTIONS = (
     "## การเลือกเครื่องมือ\n"
     "อ่านประวัติสนทนาก่อนเสมอ — ข้อความสั้น/สรรพนาม (เช่น 'แล้วพรุ่งนี้ล่ะ', 'อันนั้นราคาเท่าไหร่') "
     "คือคำถามต่อเนื่องจากเทิร์นก่อน\n"
-    "- web_search: เมื่อคำตอบที่ถูกต้องขึ้นกับข้อมูลปัจจุบัน/เปลี่ยนตามเวลา (ข่าว ราคา อากาศ ผลกีฬา "
-    "ผู้ดำรงตำแหน่งปัจจุบัน เวอร์ชันล่าสุด เหตุการณ์หลังปี 2024)\n"
-    "- read_url: เมื่อผู้ใช้ให้ลิงก์ หรือเมื่อต้องอ่านรายละเอียดจากหน้าเว็บที่ได้จาก web_search\n"
-    "- use_standard_answer: เมื่อไม่ต้องใช้ข้อมูลจากอินเทอร์เน็ต — คำถามเกี่ยวกับบริษัทเราเอง "
-    "(HR สวัสดิการ เครื่องจักร ขั้นตอน ฯลฯ ระบบภายในตอบได้ดีกว่า), ความรู้ทั่วไป, เขียน/แปล/สรุป/"
-    "คำนวณ/โค้ด, ทักทาย, หรือคำถามต่อเนื่องที่ตอบได้จากประวัติ\n"
+    "{tool_guide}"
     "- ทำงานหลายขั้นได้ เช่น ค้นเว็บ → อ่านหน้าต้นฉบับที่เกี่ยวข้อง → ค้นเพิ่มถ้ายังไม่พอ แล้วจึงตอบ "
     "ใช้เครื่องมือเท่าที่จำเป็น\n\n"
     "## ความปลอดภัย\n"
@@ -80,6 +78,19 @@ AGENT_INSTRUCTIONS = (
     "- ไม่ต้องใส่รายการแหล่งอ้างอิงเอง ระบบจะแนบลิงก์ให้อัตโนมัติ"
 )
 
+# One line per tool, included only for the tools a request offers.
+_TOOL_GUIDE = {
+    "web_search": "- web_search: เมื่อคำตอบที่ถูกต้องขึ้นกับข้อมูลปัจจุบัน/เปลี่ยนตามเวลา (ข่าว ราคา อากาศ "
+    "ผลกีฬา ผู้ดำรงตำแหน่งปัจจุบัน เวอร์ชันล่าสุด เหตุการณ์หลังปี 2024)\n",
+    "read_url": "- read_url: เมื่อผู้ใช้ให้ลิงก์ หรือเมื่อต้องอ่านรายละเอียดจากหน้าเว็บที่ได้จาก web_search\n",
+    "run_python": "- run_python: เมื่อต้องคำนวณหลายขั้นหรือต้องแม่นยำ (สูตร การเงิน ดอกเบี้ย สถิติ), "
+    "วิเคราะห์ข้อมูลตารางหรือไฟล์ Excel/CSV ที่แนบ, สร้างกราฟ หรือสร้างไฟล์ Excel/CSV/PNG — ใส่ task "
+    "ให้ครบพร้อมตัวเลขที่ต้องใช้\n",
+    "use_standard_answer": "- use_standard_answer: เมื่อไม่ต้องใช้เครื่องมืออื่นข้างบน — คำถามเกี่ยวกับบริษัท"
+    "เราเอง (HR สวัสดิการ เครื่องจักร ขั้นตอน ฯลฯ ระบบภายในตอบได้ดีกว่า), ความรู้ทั่วไป, เขียน/แปล/สรุป/"
+    "โค้ด, คิดเลขง่าย ๆ, ทักทาย, หรือคำถามต่อเนื่องที่ตอบได้จากประวัติ\n",
+}
+
 _THAI_MONTHS = (
     "มกราคม", "กุมภาพันธ์", "มีนาคม", "เมษายน", "พฤษภาคม", "มิถุนายน",
     "กรกฎาคม", "สิงหาคม", "กันยายน", "ตุลาคม", "พฤศจิกายน", "ธันวาคม",
@@ -87,12 +98,13 @@ _THAI_MONTHS = (
 _BANGKOK = timezone(timedelta(hours=7))  # no DST in Thailand
 
 
-def _instructions() -> str:
+def _instructions(tool_names: list[str]) -> str:
     # The model doesn't know today's date: without it, a search hit from March
     # was presented as "ราคาทองวันนี้" in October.
     d = datetime.now(_BANGKOK).date()
     today = f"{d.day} {_THAI_MONTHS[d.month - 1]} {d.year + 543} ({d.isoformat()})"
-    return f"วันนี้คือวันที่ {today} เวลาประเทศไทย\n\n{AGENT_INSTRUCTIONS}"
+    guide = "".join(line for name, line in _TOOL_GUIDE.items() if name in tool_names)
+    return f"วันนี้คือวันที่ {today} เวลาประเทศไทย\n\n" + AGENT_INSTRUCTIONS.replace("{tool_guide}", guide)
 
 
 def _fn(name: str, description: str, props: dict, required: list[str]) -> dict:
@@ -127,11 +139,19 @@ TOOL_READ_URL = _fn(
 )
 TOOL_STANDARD = _fn(
     "use_standard_answer",
-    "Use when NO live web data and NO web page is needed: questions about our own "
-    "company, general knowledge, writing, translation, math, coding, chit-chat, or "
-    "follow-ups answerable from the conversation.",
+    "Use when none of the other tools is needed: questions about our own company, "
+    "general knowledge, writing, translation, simple arithmetic, coding, chit-chat, "
+    "or follow-ups answerable from the conversation.",
     {},
     [],
+)
+TOOL_RUN_PYTHON = _fn(
+    "run_python",
+    "Run Python in a secure sandbox: multi-step or exact calculations (formulas, "
+    "finance, statistics), analysing tables or attached Excel/CSV files, making "
+    "charts, or producing Excel/CSV/PNG files.",
+    {"task": {"type": "string", "description": "what to compute/analyse/produce, with every number needed"}},
+    ["task"],
 )
 
 
@@ -146,6 +166,8 @@ class AgentResult:
     usage: list[dict] = field(default_factory=list)   # per-call dicts for llm.accumulate_usage
     tools: list[dict] = field(default_factory=list)   # [{"tool", "arg", "ok"}] for the audit log
     steps: int = 0
+    files: list = field(default_factory=list)         # code_interpreter.CIFile from run_python
+    used_code: bool = False
 
 
 def agent_enabled_for(user: dict) -> bool:
@@ -196,24 +218,32 @@ def run_agent(
     web_quota_left: int,
     on_web_search: Callable[[str, float], None] | None = None,
     client: Any = None,
+    web_enabled: bool = True,
+    ci_enabled: bool = False,
+    input_files: list[tuple[str, str]] | None = None,
+    file_note: str = "",
 ) -> Iterator[tuple[str, Any]]:
     """Run one agent turn. Yields:
-        ("status", "agent_searching" | "agent_reading" | "agent_writing")
+        ("status", "agent_searching" | "agent_reading" | "agent_coding" | "agent_writing")
         ("delta", text)            — answer text, streamed
         ("standard", usage_dict)   — no tool needed; caller runs its normal pipeline
         ("done", AgentResult)      — finished (text already yielded as deltas)
     Raises AgentError on API failure/timeout. Tool failures don't raise — they're
     reported to the model as tool output so it can answer from what it has.
     `on_web_search(query, cost_usd)` is called once per search (quota logging).
+    `web_enabled` / `ci_enabled` pick the tools offered (web_search+read_url /
+    run_python); `input_files` [(name, path)] go into the Python sandbox and
+    `file_note` tells the router what is attached.
     """
     client = client or llm._get_client()
-    deadline = time.monotonic() + AGENT_TIMEOUT_S
+    budget = AGENT_TIMEOUT_S + (code_interpreter.CI_TIMEOUT_S if ci_enabled else 0)
+    deadline = time.monotonic() + budget
     reasoning = (
         {"reasoning": {"effort": AGENT_REASONING_EFFORT}} if llm._is_reasoning_model(AGENT_MODEL) else {}
     )
     result = AgentResult(answer="")
     seen: dict[tuple[str, str], str] = {}
-    searches = reads = 0
+    searches = reads = code_runs = 0
 
     def remaining() -> float:
         return deadline - time.monotonic()
@@ -222,14 +252,16 @@ def run_agent(
         return searches < min(AGENT_MAX_WEB_SEARCHES, web_quota_left)
 
     def tools(first: bool) -> list[dict]:
-        out = ([TOOL_WEB_SEARCH] if can_search() else []) + [TOOL_READ_URL]
+        out = (([TOOL_WEB_SEARCH] if can_search() else []) + [TOOL_READ_URL]) if web_enabled else []
+        if ci_enabled and code_runs < AGENT_MAX_CODE_RUNS:
+            out.append(TOOL_RUN_PYTHON)
         return out + [TOOL_STANDARD] if first else out
 
     def create(**kw: Any) -> Any:
         try:
             return client.responses.create(
                 model=AGENT_MODEL,
-                instructions=_instructions(),
+                instructions=_instructions([t["name"] for t in kw.get("tools", [])]),
                 max_output_tokens=AGENT_MAX_OUTPUT_TOKENS,
                 timeout=max(AGENT_MIN_CALL_TIMEOUT_S, remaining()),
                 **reasoning,
@@ -239,7 +271,7 @@ def run_agent(
             raise AgentError(f"{type(e).__name__}: {e}") from e
 
     # Step 0 — must pick a tool, so routing costs one short call.
-    resp = create(input=_history_input(history, question), tools=tools(first=True), tool_choice="required")
+    resp = create(input=_history_input(history, question + file_note), tools=tools(first=True), tool_choice="required")
     result.usage.append(_call_usage(resp))
     result.steps = 1
     calls = _function_calls(resp)
@@ -261,6 +293,7 @@ def run_agent(
         # Execute this step's tool calls. Every call gets an output (the API
         # requires one per call_id), even when a guard refuses to run it.
         outputs: list[dict] = []
+        step_code: list[str] = []
         for call in calls:
             try:
                 args = json.loads(call.arguments or "{}")
@@ -270,6 +303,8 @@ def run_agent(
                 arg = str(args.get("query") or "").strip()[:300]
             elif call.name == "read_url":
                 arg = str(args.get("url") or "").strip()
+            elif call.name == "run_python":
+                arg = str(args.get("task") or "").strip()[:4000]
             else:
                 arg = ""
             key = (call.name, arg.lower())
@@ -314,6 +349,27 @@ def run_agent(
                         out = {"title": label, "url": arg, "text": text[:AGENT_TOOL_TEXT_CHARS]}
                     else:
                         out = {"error": "อ่านหน้านี้ไม่ได้ (อาจต้องล็อกอิน บล็อกบอท ไม่ใช่ข้อความ หรือเป็นที่อยู่ภายในที่ไม่อนุญาต)"}
+            elif call.name == "run_python" and ci_enabled:
+                if code_runs >= AGENT_MAX_CODE_RUNS:
+                    out = {"error": "รันโค้ดครบจำนวนที่อนุญาตแล้ว — ให้ตอบจากข้อมูลที่มี"}
+                else:
+                    yield "status", "agent_coding"
+                    code_runs += 1
+                    try:
+                        ci = code_interpreter.run_code(
+                            question + file_note, arg, history, input_files,
+                            client=client, timeout=remaining(),
+                        )
+                        result.usage.append(ci.usage)
+                        result.files.extend(ci.files)
+                        result.used_code = True
+                        step_code.append(ci.answer)
+                        out = {
+                            "result": ci.answer[:AGENT_TOOL_TEXT_CHARS],
+                            "files_attached_for_user": [f.name for f in ci.files],
+                        }
+                    except Exception as e:
+                        out = {"error": f"รันโค้ดไม่สำเร็จ ({e if isinstance(e, code_interpreter.CIError) else type(e).__name__})"}
             else:
                 out = {"error": f"ไม่รู้จักเครื่องมือ {call.name}"}
 
@@ -325,6 +381,17 @@ def run_agent(
                 "call_id": call.call_id,
                 "output": json.dumps(out, ensure_ascii=False),
             })
+
+        # run_python already returns a finished Thai answer. When it was the only
+        # tool this turn, show it as-is — a rewrite costs one more model call.
+        if step_code and all(
+            t["tool"] == "use_standard_answer" or (t["tool"] == "run_python" and t["ok"])
+            for t in result.tools
+        ):
+            result.answer = "\n\n".join(step_code)
+            yield "delta", result.answer
+            yield "done", result
+            return
 
         # Last allowed step, or out of time → force a final answer (no tools).
         final = result.steps >= AGENT_MAX_STEPS - 1 or remaining() < AGENT_MIN_CALL_TIMEOUT_S

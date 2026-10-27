@@ -228,6 +228,16 @@ def init_pg_schema() -> None:
                 """
             )
 
+            # Files the bot produced (Code Interpreter charts/workbooks) share a
+            # chat_history row with the user's uploads; this tells them apart so
+            # the UI shows each on the right bubble.
+            cur.execute(
+                """
+                ALTER TABLE attachments
+                ADD COLUMN IF NOT EXISTS generated BOOLEAN NOT NULL DEFAULT false;
+                """
+            )
+
             # Answer feedback (👍/👎 + optional reason). One vote per
             # (message, user); re-voting overwrites via ON CONFLICT upsert.
             # A 👎 also seeds a pending question for admins.

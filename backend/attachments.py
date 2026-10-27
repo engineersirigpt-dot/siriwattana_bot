@@ -154,6 +154,22 @@ def save_generated_image(
     return display_name, "image/png", len(data), str(file_path)
 
 
+def save_generated_file(data: bytes, display_name: str, content_type: str) -> tuple[str, str, int, str]:
+    """Persist a bot-produced file (Code Interpreter chart/workbook) into
+    UPLOAD_DIR under a random name — same return shape as save_upload, so it's
+    served only through the owner-checked /attachments/{id} route."""
+    _ensure_dir()
+    ext = Path(display_name).suffix.lower()
+    file_path = (_upload_root() / f"{uuid.uuid4().hex}{ext}").resolve()
+    try:
+        file_path.relative_to(_upload_root())
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid upload path")
+    with open(file_path, "wb") as fh:
+        fh.write(data)
+    return display_name, content_type, len(data), str(file_path)
+
+
 async def save_upload(upload: UploadFile) -> tuple[str, str, int, str]:
     if not _is_allowed(upload.content_type or "", upload.filename or ""):
         raise HTTPException(

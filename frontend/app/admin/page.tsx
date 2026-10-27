@@ -927,6 +927,7 @@ const SOURCE_LABELS: Record<string, string> = {
   blocked: "ถูกบล็อก",
   export_offer: "ขอ export",
   agent: "Agent (ค้นเว็บ/อ่านลิงก์)",
+  code: "Code Interpreter (Python)",
 };
 
 function MetricCard({
