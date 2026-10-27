@@ -19,6 +19,7 @@ from fastapi import (
     Request,
     UploadFile,
 )
+from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.security import OAuth2PasswordRequestForm
@@ -29,6 +30,7 @@ from slowapi.util import get_remote_address
 
 import attachments as att
 import doc_translation as doctr
+import proofread
 from auth import (
     create_token,
     current_user,
@@ -46,7 +48,6 @@ from llm import (
     accumulate_usage,
     answer_freely,
     answer_from_context,
-    answer_proofread,
     answer_with_files,
     answer_with_web_search,
     classify_query,
@@ -638,9 +639,9 @@ def _is_export_request(text: str) -> bool:
 
 # ── Proofreading attachments ────────────────────────────────────────────────
 # "ตรวจคำผิดในรูปนี้" needs more than the normal vision answer: vision models
-# read Thai typos as the correct word, so images are OCR'd literally first and
-# a stronger model judges spelling from that text (see llm.answer_proofread).
-# Keep in sync with PROOFREAD_RE in frontend/app/chat/page.tsx.
+# read Thai typos as the correct word, so images are read literally (OCR),
+# checked as text, and every reported typo is verified against the image
+# (see proofread.py). Keep in sync with PROOFREAD_RE in frontend/app/chat/page.tsx.
 _PROOFREAD_RE = re.compile(
     r"คำผิด|พิมพ์ผิด|สะกดผิด|เขียนผิด|ตัวสะกด|การสะกด|ตรวจ(?:ทาน|อักษร|ภาษา|คำ)|"
     r"พิสูจน์อักษร|ไวยากรณ์|proof\s*-?\s*read|typo|spell|grammar",
@@ -661,8 +662,7 @@ def _answer_files(
     """Answer about attached files — proofreading mode when asked to check
     spelling, otherwise the normal vision/document answer."""
     if _is_proofread_request(question):
-        ocr_texts = [att.ocr_data_url(u) for u in image_urls]
-        return answer_proofread(question, image_urls, ocr_texts, text_attachments, history=history)
+        return proofread.proofread(question, image_urls, text_attachments)
     return answer_with_files(question, image_urls, text_attachments, history=history)
 
 
@@ -1899,8 +1899,11 @@ async def chat(
                         text_attachments.append((sf["filename"], extracted))
 
                 prompt_question = question or "ช่วยอธิบายเนื้อหาในไฟล์ที่แนบ และให้คำแนะนำที่เกี่ยวข้อง"
-                answer, files_usage = _answer_files(
-                    prompt_question, image_urls, text_attachments, history
+                # Off the event loop: proofreading takes 10-40s, and running it
+                # inline froze every other request (4 concurrent proofreads ran
+                # one at a time; a plain "สวัสดี" waited 103s for its first byte).
+                answer, files_usage = await run_in_threadpool(
+                    _answer_files, prompt_question, image_urls, text_attachments, history
                 )
                 # Prepend notices: (1) long-document translation may be incomplete,
                 # (2) scanned PDF exceeded the 50-page vision cap — so the user
@@ -2121,7 +2124,9 @@ async def chat(
                     text_attachments.append((sf["filename"], extracted))
 
             prompt_question = question or "ช่วยอธิบายเนื้อหาในไฟล์ที่แนบ และให้คำแนะนำที่เกี่ยวข้อง"
-            answer, _files_usage = _answer_files(prompt_question, image_urls, text_attachments, history)
+            answer, _files_usage = await run_in_threadpool(
+                _answer_files, prompt_question, image_urls, text_attachments, history
+            )
             notices = list(truncation_notes)
             warn = att.long_translation_warning(question, total_text_chars, len(image_urls))
             if warn:

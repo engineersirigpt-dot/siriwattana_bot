@@ -1,0 +1,44 @@
+# Proofreading glossary — correctly spelled proper names the checker must never
+# report as misspelled (temples, places, companies, brands, machines, standards).
+#
+# Format: one term per line, written exactly as it is officially spelled.
+# Lines starting with # and blank lines are ignored. A term only protects text
+# that matches it exactly, so misspelled variants are still reported. Edit
+# freely; changes apply on the next request (rebuild the backend image after
+# editing on the server).
+
+# --- Company ---
+ศิริวัฒนาอินเตอร์พริ้นท์
+บริษัท ศิริวัฒนาอินเตอร์พริ้นท์ จำกัด (มหาชน)
+Sirivatana Interprint
+
+# --- Royal temples (long official names) ---
+วัดอรุณราชวรารามราชวรมหาวิหาร
+วัดพระเชตุพนวิมลมังคลารามราชวรมหาวิหาร
+วัดพระศรีรัตนศาสดาราม
+วัดเบญจมบพิตรดุสิตวนารามราชวรวิหาร
+วัดสุทัศนเทพวรารามราชวรมหาวิหาร
+วัดสระเกศราชวรมหาวิหาร
+วัดบวรนิเวศวิหารราชวรวิหาร
+วัดไตรมิตรวิทยารามวรวิหาร
+วัดโสธรวรารามวรวิหาร
+ราชวรมหาวิหาร
+ราชวรวิหาร
+วรมหาวิหาร
+วรวิหาร
+ราชวราราม
+
+# --- Places ---
+กรุงเทพมหานคร
+ฉะเชิงเทรา
+บางกอกใหญ่
+
+# --- Print machines, brands, standards ---
+Heidelberg
+Speedmaster
+Komori
+Lithrone
+Pantone
+Fogra
+FSC
+ISO
