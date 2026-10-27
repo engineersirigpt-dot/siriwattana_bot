@@ -1,12 +1,12 @@
 """
-Tests for proofreading routing: _is_proofread_request, _answer_files, and
-attachments.ocr_data_url's graceful fallback.
+Tests for proofreading routing: _is_proofread_request and _answer_files.
+(The pipeline itself is covered in test_proofread_pipeline.py.)
 """
 
 import pytest
 
-import attachments as att
 import main
+import proofread
 
 IMG = "data:image/png;base64,iVBORw0KGgo="
 
@@ -24,32 +24,25 @@ def test_other_file_questions_are_not_proofreading(text):
     assert main._is_proofread_request(text) is False
 
 
-def test_proofread_ocrs_each_image_and_uses_proofread_model(monkeypatch):
+def test_proofread_request_goes_to_proofread_pipeline(monkeypatch):
     seen = {}
-    monkeypatch.setattr(att, "ocr_data_url", lambda u: "สามรถ")
 
-    def fake_proofread(q, imgs, ocr, docs, history=None):
-        seen.update(q=q, imgs=imgs, ocr=ocr, docs=docs)
+    def fake_proofread(q, imgs, docs):
+        seen.update(q=q, imgs=imgs, docs=docs)
         return "ok", {}
 
-    monkeypatch.setattr(main, "answer_proofread", fake_proofread)
+    monkeypatch.setattr(proofread, "proofread", fake_proofread)
     monkeypatch.setattr(main, "answer_with_files", lambda *a, **k: pytest.fail("normal path used"))
 
     answer, _ = main._answer_files("ตรวจคำผิดให้หน่อย", [IMG, IMG], [("a.docx", "ข้อความ")], None)
 
     assert answer == "ok"
-    assert seen["ocr"] == ["สามรถ", "สามรถ"]
+    assert seen["imgs"] == [IMG, IMG]
     assert seen["docs"] == [("a.docx", "ข้อความ")]
 
 
 def test_non_proofread_question_keeps_normal_files_path(monkeypatch):
     monkeypatch.setattr(main, "answer_with_files", lambda q, i, t, history=None: ("normal", {}))
-    monkeypatch.setattr(main, "answer_proofread", lambda *a, **k: pytest.fail("proofread path used"))
-    monkeypatch.setattr(att, "ocr_data_url", lambda u: pytest.fail("OCR should not run"))
+    monkeypatch.setattr(proofread, "proofread", lambda *a, **k: pytest.fail("proofread path used"))
 
     assert main._answer_files("สรุปรูปนี้", [IMG], [], None)[0] == "normal"
-
-
-def test_ocr_returns_empty_without_tesseract(monkeypatch):
-    monkeypatch.setattr(att.shutil, "which", lambda name: None)
-    assert att.ocr_data_url(IMG) == ""

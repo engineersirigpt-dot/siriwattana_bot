@@ -29,6 +29,7 @@ from slowapi.util import get_remote_address
 
 import attachments as att
 import doc_translation as doctr
+import proofread
 from auth import (
     create_token,
     current_user,
@@ -46,7 +47,6 @@ from llm import (
     accumulate_usage,
     answer_freely,
     answer_from_context,
-    answer_proofread,
     answer_with_files,
     answer_with_web_search,
     classify_query,
@@ -638,9 +638,9 @@ def _is_export_request(text: str) -> bool:
 
 # ── Proofreading attachments ────────────────────────────────────────────────
 # "ตรวจคำผิดในรูปนี้" needs more than the normal vision answer: vision models
-# read Thai typos as the correct word, so images are OCR'd literally first and
-# a stronger model judges spelling from that text (see llm.answer_proofread).
-# Keep in sync with PROOFREAD_RE in frontend/app/chat/page.tsx.
+# read Thai typos as the correct word, so images are read literally (OCR),
+# checked as text, and every reported typo is verified against the image
+# (see proofread.py). Keep in sync with PROOFREAD_RE in frontend/app/chat/page.tsx.
 _PROOFREAD_RE = re.compile(
     r"คำผิด|พิมพ์ผิด|สะกดผิด|เขียนผิด|ตัวสะกด|การสะกด|ตรวจ(?:ทาน|อักษร|ภาษา|คำ)|"
     r"พิสูจน์อักษร|ไวยากรณ์|proof\s*-?\s*read|typo|spell|grammar",
@@ -661,8 +661,7 @@ def _answer_files(
     """Answer about attached files — proofreading mode when asked to check
     spelling, otherwise the normal vision/document answer."""
     if _is_proofread_request(question):
-        ocr_texts = [att.ocr_data_url(u) for u in image_urls]
-        return answer_proofread(question, image_urls, ocr_texts, text_attachments, history=history)
+        return proofread.proofread(question, image_urls, text_attachments)
     return answer_with_files(question, image_urls, text_attachments, history=history)
 
 
