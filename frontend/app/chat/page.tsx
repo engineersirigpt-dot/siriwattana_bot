@@ -98,6 +98,9 @@ type Msg = {
   // True while the backend is generating an image for this (streaming) bubble,
   // so we can show a "creating image" placeholder instead of the thinking dots.
   generatingImage?: boolean;
+  // Agent V1 progress ("กำลังค้นข้อมูลจากเว็บ…") shown in place of "กำลังคิด…"
+  // while the agent runs tools before its first answer token.
+  agentStatus?: string;
   // True while this bot bubble is being streamed token-by-token. Drives the
   // "กำลังคิด…" indicator (when still empty) and the live cursor.
   streaming?: boolean;
@@ -249,6 +252,13 @@ function hasMarkdownTable(text: string): boolean {
 // looks stuck. Keep in sync with _PROOFREAD_RE in backend/main.py.
 const PROOFREAD_RE =
   /คำผิด|พิมพ์ผิด|สะกดผิด|เขียนผิด|ตัวสะกด|การสะกด|ตรวจ(?:ทาน|อักษร|ภาษา|คำ)|พิสูจน์อักษร|ไวยากรณ์|proof\s*-?\s*read|typo|spell|grammar/i;
+
+// Agent V1 tool-progress statuses streamed by /chat/stream (backend agent.py).
+const AGENT_STATUS_LABELS: Record<string, string> = {
+  agent_searching: "กำลังค้นข้อมูลจากเว็บ…",
+  agent_reading: "กำลังอ่านลิงก์…",
+  agent_writing: "กำลังเรียบเรียงคำตอบ…",
+};
 
 function isProofreading(msg: Msg | undefined): boolean {
   return msg?.role === "user" && !!msg.attachments?.length && PROOFREAD_RE.test(msg.text);
@@ -1106,6 +1116,7 @@ export default function ChatPage() {
             // Backend signals the slow image-generation step — swap the
             // "thinking" dots for a "creating image" placeholder.
             if (state === "generating_image") patchLastBot({ generatingImage: true });
+            else if (AGENT_STATUS_LABELS[state]) patchLastBot({ agentStatus: AGENT_STATUS_LABELS[state] });
           },
           onDone: (meta) => {
             patchLastBot({
@@ -1115,6 +1126,7 @@ export default function ChatPage() {
               id: meta.message_id ?? undefined,
               streaming: false,
               generatingImage: false,
+              agentStatus: undefined,
               // AI-generated image (source="image_gen") rides along on the
               // done event so it renders inline on this bot bubble.
               ...(meta.attachments && meta.attachments.length > 0
@@ -1905,7 +1917,7 @@ export default function ChatPage() {
                           className="w-2 h-2 bg-purple-400 rounded-full animate-bounce"
                           style={{ animationDelay: "300ms" }}
                         />
-                        <span className="ml-2 text-sm text-muted">กำลังคิด…</span>
+                        <span className="ml-2 text-sm text-muted">{m.agentStatus ?? "กำลังคิด…"}</span>
                       </div>
                     ) : isTyping ? (
                       // Fake char-by-char typing (used by the file/non-stream

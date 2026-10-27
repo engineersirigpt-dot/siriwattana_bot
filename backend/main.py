@@ -3,6 +3,7 @@ import io
 import json
 import os
 import re
+import time
 
 from audit import audit_log
 from dotenv import load_dotenv
@@ -1187,6 +1188,93 @@ def _try_web_search_answer(
     }
 
 
+def _agent_enabled(user: dict, mode: str) -> bool:
+    """Agent V1 runs for text chat on postgres, outside company-only mode, and
+    only for users the AGENT_V1_MODE flag lets in (off by default)."""
+    import agent
+
+    return mode != "company" and use_postgres_auth() and agent.agent_enabled_for(user)
+
+
+def _agent_turn(user: dict, question: str, session_id: int | None, mode: str, request: Request):
+    """Run Agent V1 for one text question. Replaces the legacy URL-reading and
+    web-search steps (the agent decides which tools to use, if any). Yields:
+        ("status", state) / ("delta", text) — progress and streamed answer text
+        ("done", result)    — answer saved; `result` holds the response fields,
+                              incl. `tail` (source list) not yet sent as a delta
+        ("standard", usage) — no tool needed: run the normal pipeline WITHOUT the
+                              legacy URL/web steps, adding `usage` to its cost
+        ("fallback", None)  — failed before any text: run the legacy pipeline
+        ("error", None)     — failed after text was already streamed
+    """
+    import agent
+    from chat_pg import (
+        count_web_searches_today_pg,
+        ensure_session_pg,
+        get_session_history_pg,
+        record_web_search_pg,
+        save_chat_message_pg,
+    )
+
+    started = time.monotonic()
+    history = get_session_history_pg(
+        session_id=session_id, user_id=user["id"], limit=HISTORY_TURNS,
+    )
+    quota_left = max(0, WEB_SEARCH_DAILY_LIMIT - count_web_searches_today_pg(user["id"]))
+    emitted = False
+    result = None
+    try:
+        for kind, payload in agent.run_agent(
+            question, history, web_quota_left=quota_left,
+            on_web_search=lambda q, cost: record_web_search_pg(user["id"], q, cost),
+        ):
+            if kind == "done":
+                result = payload
+                break
+            emitted = emitted or kind == "delta"
+            yield kind, payload
+            if kind == "standard":
+                return
+    except Exception as e:
+        audit_log(
+            "agent_failed",
+            user=user,
+            detail={
+                "error_type": e.__class__.__name__, "error": str(e)[:300],
+                "after_text": emitted, "prompt": question[:200],
+            },
+            request=request,
+        )
+        yield ("error" if emitted else "fallback"), None
+        return
+
+    tail = _format_citations(result.citations)
+    answer = (result.answer + tail).strip()
+    sid, stitle = ensure_session_pg(
+        user_id=user["id"], session_id=session_id,
+        first_question=question, mode=mode,
+    )
+    mid = save_chat_message_pg(
+        user_id=user["id"], session_id=sid, question=question,
+        answer=answer, source="agent", knowledge_id=None, mode=mode,
+        usage=accumulate_usage(*result.usage, primary_model=agent.AGENT_MODEL),
+    )
+    audit_log(
+        "agent_answer",
+        user=user,
+        detail={
+            "session_id": sid, "message_id": mid, "steps": result.steps,
+            "tools": result.tools[:10], "n_citations": len(result.citations),
+            "ms": int((time.monotonic() - started) * 1000), "prompt": question[:200],
+        },
+        request=request,
+    )
+    yield "done", {
+        "answer": answer, "tail": tail, "source": "agent", "session_id": sid,
+        "session_title": stitle, "message_id": mid,
+    }
+
+
 def _try_url_answer(
     user: dict, question: str, session_id: int | None, mode: str, request: Request
 ) -> dict | None:
@@ -1728,10 +1816,34 @@ async def chat(
                 turn_limit=MAX_TURNS_PER_SESSION,
             )
 
+    # Agent V1 (AGENT_V1_MODE flag) — the model decides whether to search the
+    # web / read links, over several steps, replacing the two legacy steps
+    # below. If it needs no tool, the normal pipeline runs without them.
+    legacy_tools = True
+    agent_router_usage: dict = {}
+    if question and not files and _agent_enabled(user, mode):
+        for kind, payload in _agent_turn(user, question, session_id, mode, request):
+            if kind == "done":
+                return ChatResponse(
+                    answer=payload["answer"],
+                    source=payload["source"],
+                    similarity=None,
+                    session_id=payload["session_id"],
+                    session_title=payload["session_title"],
+                    message_id=payload["message_id"],
+                    turn_count=_count_session_turns(payload["session_id"]),
+                    turn_limit=MAX_TURNS_PER_SESSION,
+                )
+            if kind == "standard":
+                legacy_tools = False
+                agent_router_usage = payload
+            # "fallback"/"error": nothing has reached the client on this
+            # non-stream path, so the legacy pipeline below simply runs.
+
     # URL reading — the user pasted a link; fetch that page and answer about it.
     # Runs BEFORE web search so an explicit link is read directly rather than
     # re-searched. Returns None (no URL) to fall through.
-    if question and not files and use_postgres_auth():
+    if question and not files and use_postgres_auth() and legacy_tools:
         ur = _try_url_answer(user, question, session_id, mode, request)
         if ur is not None:
             return ChatResponse(
@@ -1747,7 +1859,7 @@ async def chat(
 
     # Live web search intent (postgres only — mirrors /chat/stream). Returns
     # None to fall through to the normal pipeline on non-match / failure.
-    if question and not files and use_postgres_auth():
+    if question and not files and use_postgres_auth() and legacy_tools:
         ws = _try_web_search_answer(user, question, session_id, mode, request)
         if ws is not None:
             return ChatResponse(
@@ -1974,7 +2086,8 @@ async def chat(
                     similarity = float(top.get("score") or 0)
                     source_file_hit = top.get("source")
                     usage_row = accumulate_usage(
-                        classify_usage, answer_usage, primary_model=chosen_model,
+                        classify_usage, answer_usage, agent_router_usage,
+                        primary_model=chosen_model,
                     )
                 else:
                     # Layer 2: fall back to local pgvector (admin Q&A +
@@ -2017,7 +2130,8 @@ async def chat(
                         similarity = None
                         source_file_hit = None
                     usage_row = accumulate_usage(
-                        classify_usage, answer_usage, primary_model=chosen_model,
+                        classify_usage, answer_usage, agent_router_usage,
+                        primary_model=chosen_model,
                     )
 
             # Honesty note for an ungrounded answer to a company-specific factual
@@ -2422,10 +2536,42 @@ async def chat_stream(
                 })
                 return
 
+            # 3.54) Agent V1 (AGENT_V1_MODE flag) — the model decides whether
+            #       to search the web / read links, over several steps, and the
+            #       final answer streams. Replaces 3.55/3.6 when it runs; if no
+            #       tool is needed the normal pipeline runs without them.
+            legacy_tools = True
+            agent_router_usage: dict = {}
+            if _agent_enabled(user, mode):
+                for kind, payload in _agent_turn(user, question, session_id, mode, request):
+                    if kind == "status":
+                        yield ev({"type": "status", "state": payload})
+                    elif kind == "delta":
+                        yield ev({"type": "delta", "v": payload})
+                    elif kind == "done":
+                        if payload["tail"]:
+                            yield ev({"type": "delta", "v": payload["tail"]})
+                        yield ev({
+                            "type": "done", "source": payload["source"],
+                            "session_id": payload["session_id"],
+                            "session_title": payload["session_title"],
+                            "message_id": payload["message_id"],
+                            "turn_count": _count_session_turns(payload["session_id"]),
+                            "turn_limit": MAX_TURNS_PER_SESSION,
+                        })
+                        return
+                    elif kind == "standard":
+                        legacy_tools = False
+                        agent_router_usage = payload
+                    elif kind == "error":
+                        yield ev({"type": "error", "detail": "เกิดข้อผิดพลาดในการสร้างคำตอบ"})
+                        return
+                    # "fallback" → legacy_tools stays True
+
             # 3.55) URL reading — the user pasted a link. Fetch that page and
             #       answer about it (before web search, so an explicit link is
             #       read directly). Non-streaming — emitted as one delta.
-            ur = _try_url_answer(user, question, session_id, mode, request)
+            ur = _try_url_answer(user, question, session_id, mode, request) if legacy_tools else None
             if ur is not None:
                 yield ev({"type": "delta", "v": ur["answer"]})
                 yield ev({
@@ -2442,7 +2588,7 @@ async def chat_stream(
             #      "ราคาทองวันนี้"). Skipped in company mode; falls through to
             #      the normal pipeline if the search fails or quota is hit-and-
             #      returned. Non-streaming (search is slow) — emitted as one delta.
-            ws = _try_web_search_answer(user, question, session_id, mode, request)
+            ws = _try_web_search_answer(user, question, session_id, mode, request) if legacy_tools else None
             if ws is not None:
                 yield ev({"type": "delta", "v": ws["answer"]})
                 yield ev({
@@ -2576,7 +2722,8 @@ async def chat_stream(
             # whichever stream we entered above. Combine with the classifier
             # call so cost_usd reflects all OpenAI work for this question.
             usage_row = accumulate_usage(
-                classify_usage, stream_usage, primary_model=chosen_model,
+                classify_usage, stream_usage, agent_router_usage,
+                primary_model=chosen_model,
             )
 
             mid = save_chat_message_pg(

@@ -1036,6 +1036,7 @@ SYSTEM_PROMPT_WEB = (
 def answer_with_web_search(
     question: str,
     history: list[dict] | None = None,
+    timeout: float | None = None,
 ) -> tuple[str, list[dict], dict]:
     """Answer a question using live web search.
 
@@ -1045,6 +1046,7 @@ def answer_with_web_search(
         usage: per-call dict (like _extract_usage) with the web-search surcharge
                already folded into cost_usd.
     Raises on API error — the caller falls back to the normal pipeline.
+    `timeout` (seconds) bounds the call; None keeps the client default.
     """
     input_msgs: list[dict] = []
     if history:
@@ -1066,6 +1068,7 @@ def answer_with_web_search(
         tools=[{"type": "web_search", "search_context_size": WEB_SEARCH_CONTEXT_SIZE}],
         input=input_msgs,
         max_output_tokens=4000,
+        **({"timeout": timeout} if timeout else {}),
     )
 
     text = (getattr(resp, "output_text", "") or "").strip()
