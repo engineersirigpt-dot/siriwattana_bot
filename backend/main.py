@@ -754,6 +754,19 @@ _IMAGE_FROM_REF_RE = re.compile(
 )
 
 
+_LOGO_WORD_RE = re.compile(r"โลโก|logo", re.IGNORECASE)
+_DESIGN_NOUN_RE = re.compile(
+    r"โ[ปพ][สร]เตอร์|ป้าย|ใบปลิว|แผ่นพับ|แบนเนอร์|การ์ด|ปฏิทิน|poster|flyer|banner|card",
+    re.IGNORECASE,
+)
+
+
+def _wants_logo_on_new_design(text: str) -> bool:
+    """True when the attached image is a logo to put on a new poster/sign/card
+    ("ทำโปสเตอร์ … ใส่โลโก้ตามไฟล์"), not a picture to edit ("สร้างรถจากโลโก้นี้")."""
+    return bool(text) and bool(_LOGO_WORD_RE.search(text)) and bool(_DESIGN_NOUN_RE.search(text))
+
+
 def _wants_image_from_reference(text: str) -> bool:
     """True when (an image is attached and) the user wants a new/edited image
     made from it, not a description."""
@@ -825,7 +838,8 @@ def _handle_image_edit(
 
 
 def _handle_image_generation(
-    user: dict, question: str, session_id: int | None, mode: str
+    user: dict, question: str, session_id: int | None, mode: str,
+    logo_path: str | None = None,
 ) -> dict:
     """Generate an image (or refuse if over the daily quota) and persist it.
 
@@ -833,6 +847,7 @@ def _handle_image_generation(
     turns into a ChatResponse / stream 'done' event:
         {answer, source, session_id, session_title, message_id, attachment}
     `attachment` is the saved-image row dict (or None when limited/failed).
+    `logo_path` is a user-attached logo to place on the new design.
     """
     import attachments as att
     from chat_pg import (
@@ -864,7 +879,7 @@ def _handle_image_generation(
         }
 
     try:
-        data, usage = generate_image(question)
+        data, usage = generate_image(question, logo_path=logo_path)
     except Exception as e:
         # Distinguish OpenAI's content-policy rejection (copyrighted characters,
         # brands, real people, unsafe content) from a real system error so the
@@ -1800,12 +1815,21 @@ async def chat(
                 # "เพิ่มแมวอีกตัวในรูป") → run the image edit on the uploaded
                 # image instead of just describing it. Pure "อธิบาย/สรุปรูปนี้"
                 # (no create verb) still goes to the vision path below.
+                # A logo + a design request ("ทำโปสเตอร์ … ใส่โลโก้ตามไฟล์") makes a
+                # NEW design carrying that logo instead of editing the logo itself.
                 _ref_images = [sf for sf in saved_files if att.is_image(sf["content_type"])]
-                if _ref_images and _wants_image_from_reference(question):
-                    res = _handle_image_edit(
-                        user, question, sid, mode,
-                        {"file_path": _ref_images[0]["file_path"]},
-                    )
+                _logo_design = bool(_ref_images) and _wants_logo_on_new_design(question)
+                if _logo_design or (_ref_images and _wants_image_from_reference(question)):
+                    if _logo_design:
+                        res = _handle_image_generation(
+                            user, question, sid, mode,
+                            logo_path=_ref_images[0]["file_path"],
+                        )
+                    else:
+                        res = _handle_image_edit(
+                            user, question, sid, mode,
+                            {"file_path": _ref_images[0]["file_path"]},
+                        )
                     return ChatResponse(
                         answer=res["answer"],
                         source=res["source"],

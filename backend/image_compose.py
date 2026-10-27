@@ -21,25 +21,36 @@ LOGO_PATH = Path(__file__).parent / "assets" / "logo.jpg"
 
 def _add_brand_logo(
     img: "Image.Image", logo_path: Path, *, size_frac: float = 0.15,
-    margin_frac: float = 0.045,
+    margin_frac: float = 0.045, top_band_frac: float | None = None,
 ) -> "Image.Image":
     """Composite the company logo as a small rounded 'brand chip' in the
     bottom-right corner. The logo's white background blends into the white chip,
-    so it reads as an intentional brand sign-off on any poster. No-op on error."""
+    so it reads as an intentional brand sign-off on any poster. No-op on error.
+
+    With `top_band_frac`, the chip is instead centred in a band of that height
+    at the top (the band the generator was told to leave empty)."""
     try:
         logo = Image.open(logo_path).convert("RGBA")
     except Exception:
         return img
 
     W, H = img.size
-    target = max(64, int(W * size_frac))
-    logo.thumbnail((target, target), Image.LANCZOS)
+    if top_band_frac:
+        band = int(H * top_band_frac)
+        logo.thumbnail((int(W * 0.5), int(band * 0.68)), Image.LANCZOS)
+        pad = max(8, int(logo.size[1] * 0.14))
+    else:
+        target = max(64, int(W * size_frac))
+        logo.thumbnail((target, target), Image.LANCZOS)
+        pad = max(8, int(target * 0.12))
     lw, lh = logo.size
 
-    pad = max(8, int(target * 0.12))
     panel_w, panel_h = lw + pad * 2, lh + pad * 2
-    margin = int(W * margin_frac)
-    px, py = W - panel_w - margin, H - panel_h - margin
+    if top_band_frac:
+        px, py = (W - panel_w) // 2, (band - panel_h) // 2
+    else:
+        margin = int(W * margin_frac)
+        px, py = W - panel_w - margin, H - panel_h - margin
 
     base = img.convert("RGBA")
     # Soft shadow behind the chip for a bit of lift.
@@ -60,6 +71,16 @@ def _add_brand_logo(
     base.paste(panel, (px, py), mask)
     base.paste(logo, (px + pad, py + pad), logo)
     return base.convert("RGB")
+
+
+def place_logo_top(image: bytes, logo_path: Path, band_frac: float) -> bytes:
+    """Put a user-supplied logo, pixel-exact (no AI redraw), on a white chip
+    centred in the empty band left at the top of a generated design."""
+    img = Image.open(BytesIO(image)).convert("RGB")
+    img = _add_brand_logo(img, logo_path, top_band_frac=band_frac)
+    buf = BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
 
 
 def _hex_to_rgb(color: str, default=(26, 61, 124)) -> tuple[int, int, int]:

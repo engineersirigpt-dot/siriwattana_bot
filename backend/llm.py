@@ -396,13 +396,29 @@ def edit_image(image_path: str, instruction: str) -> tuple[bytes, dict]:
     return data, usage
 
 
-def generate_image(prompt: str) -> tuple[bytes, dict]:
+# A user-attached logo is pasted pixel-exact into a band the image model is told
+# to leave empty at the top. Letting gpt-image-2 draw the logo from the
+# reference looked smoother but redraws it — detailed marks and small lettering
+# drift — so for brand fidelity we composite the real file instead.
+LOGO_BAND_FRAC = 0.15
+_LOGO_BAND_SUFFIX = (
+    f" LAYOUT RULE: leave the top {int(LOGO_BAND_FRAC * 100)}% of the canvas as a plain, "
+    "empty, light background band — no text, no shapes, no box, no frame and no logo "
+    "there; start all content below it. The real logo is added there afterwards."
+)
+
+
+def generate_image(prompt: str, logo_path: str | None = None) -> tuple[bytes, dict]:
     """Generate one image for a text prompt.
 
     Posters/cards (see _pick_image_size / _PORTRAIT_IMAGE_RE) go through a
     text-overlay path: a text-free background is generated, then the Thai
     headings are drawn with a real font for perfect text. Everything else is
     enhanced (ChatGPT-style) and generated directly.
+
+    With `logo_path` (the user attached their logo), the full design is always
+    rendered directly — the overlay path only draws a title, dropping details —
+    and the logo is pasted into an empty top band.
 
     Returns (png_bytes, usage_row). Raises on API error.
     """
@@ -413,6 +429,12 @@ def generate_image(prompt: str) -> tuple[bytes, dict]:
         "completion_tokens": 0,
         "cost_usd": IMAGE_GEN_COST_USD,
     }
+
+    if logo_path:
+        from image_compose import place_logo_top
+
+        data = _render_image(_enhance_image_prompt(prompt) + _LOGO_BAND_SUFFIX, size)
+        return place_logo_top(data, Path(logo_path), LOGO_BAND_FRAC), usage
 
     # Poster path: real-font Thai text on a generated background. We ALWAYS
     # overlay for a poster (falling back to a self-built plan if the LLM planner
