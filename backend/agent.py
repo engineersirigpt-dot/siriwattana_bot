@@ -222,6 +222,7 @@ def run_agent(
     ci_enabled: bool = False,
     input_files: list[tuple[str, str]] | None = None,
     file_note: str = "",
+    allow_standard: bool = True,
 ) -> Iterator[tuple[str, Any]]:
     """Run one agent turn. Yields:
         ("status", "agent_searching" | "agent_reading" | "agent_coding" | "agent_writing")
@@ -233,7 +234,8 @@ def run_agent(
     `on_web_search(query, cost_usd)` is called once per search (quota logging).
     `web_enabled` / `ci_enabled` pick the tools offered (web_search+read_url /
     run_python); `input_files` [(name, path)] go into the Python sandbox and
-    `file_note` tells the router what is attached.
+    `file_note` tells the router what is attached. `allow_standard=False` drops
+    use_standard_answer, so the turn can only be answered with the offered tools.
     """
     client = client or llm._get_client()
     budget = AGENT_TIMEOUT_S + (code_interpreter.CI_TIMEOUT_S if ci_enabled else 0)
@@ -255,7 +257,7 @@ def run_agent(
         out = (([TOOL_WEB_SEARCH] if can_search() else []) + [TOOL_READ_URL]) if web_enabled else []
         if ci_enabled and code_runs < AGENT_MAX_CODE_RUNS:
             out.append(TOOL_RUN_PYTHON)
-        return out + [TOOL_STANDARD] if first else out
+        return out + [TOOL_STANDARD] if first and allow_standard else out
 
     def create(**kw: Any) -> Any:
         try:

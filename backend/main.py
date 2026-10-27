@@ -1206,9 +1206,80 @@ def _agent_enabled(user: dict, mode: str) -> bool:
     return any(_agent_tools(user, mode))
 
 
+def _owned_spreadsheets(
+    user: dict, session_id: int | None, uploads: list[dict] | None = None
+) -> list[tuple[str, str]]:
+    """Excel/CSV the sandbox may read this turn, as [(filename, path)]: this
+    message's uploads, else the ones this user uploaded earlier in this session
+    (session, message and file ownership checked in SQL). Paths are re-checked
+    to be inside UPLOAD_DIR; purged files are skipped."""
+    import attachments as att
+    import code_interpreter
+    from chat_pg import get_session_spreadsheets_pg
+
+    if uploads:
+        sources = uploads
+    elif session_id:
+        sources = get_session_spreadsheets_pg(session_id, user["id"])
+    else:
+        sources = []
+    out: list[tuple[str, str]] = []
+    for f in sources:
+        if not code_interpreter.is_ci_input(f["filename"]):
+            continue
+        try:
+            out.append((f["filename"], str(att.validate_upload_path(f["file_path"]))))
+        except HTTPException:
+            continue  # file purged from disk
+    return out[: code_interpreter.CI_MAX_INPUT_FILES]
+
+
+# Classifier categories never exempted, even for the user's own file.
+_FILE_SCOPE_NEVER = {"CREDENTIALS"}
+FILE_SCOPE_FAILED = "ขออภัยค่ะ วิเคราะห์ข้อมูลจากไฟล์ไม่สำเร็จ กรุณาลองถามใหม่อีกครั้ง หรือแนบไฟล์ใหม่ค่ะ"
+
+
+def _file_scope_allowed(
+    user: dict, question: str, session_id: int | None, mode: str, category: str,
+    request: Request, uploads: list[dict] | None = None,
+) -> bool:
+    """The AI classifier flagged `question`. Allow it ONLY as analysis of the
+    user's own spreadsheets: Code Interpreter on for this user and under its
+    daily cap, owned Excel/CSV in this message or session, never credentials,
+    and a second, file-aware check (classify_file_question) agrees.
+
+    An approval is narrow: the caller answers with _agent_turn(scoped=True) —
+    the Python sandbox over those files only, never KB / AI Brain / web / other
+    users' files. The keyword filter has already run and is never relaxed."""
+    import code_interpreter
+    from chat_pg import count_code_runs_today_pg
+    from sensitivity_classifier import classify_file_question
+
+    if category in _FILE_SCOPE_NEVER or not _agent_tools(user, mode)[1]:
+        return False
+    if count_code_runs_today_pg(user["id"]) >= code_interpreter.CI_DAILY_LIMIT:
+        return False
+    files = _owned_spreadsheets(user, session_id, uploads)
+    if not files:
+        return False
+    allowed, reason = classify_file_question(
+        question, [code_interpreter.outline(name, path) for name, path in files]
+    )
+    audit_log(
+        "sensitive_file_scope_allowed" if allowed else "sensitive_file_scope_denied",
+        user=user,
+        detail={
+            "category": category, "reason": reason,
+            "files": [name for name, _ in files], "prompt": question[:200],
+        },
+        request=request,
+    )
+    return allowed
+
+
 def _agent_turn(
     user: dict, question: str, session_id: int | None, mode: str, request: Request,
-    uploads: list[dict] | None = None,
+    uploads: list[dict] | None = None, scoped: bool = False,
 ):
     """Run the agent router for one question. Replaces the legacy URL-reading and
     web-search steps (the agent decides which tools to use, if any). Yields:
@@ -1224,6 +1295,9 @@ def _agent_turn(
     `uploads` are this message's saved files (dicts from the /chat files path):
     their Excel/CSV go into the Python sandbox and, on "done", all are saved
     with the answer. With uploads only run_python is offered.
+    `scoped=True` (a flagged question approved by _file_scope_allowed): only
+    run_python over the owned spreadsheets, no standard route, and anything but
+    a successful sandbox answer ends as "fallback" with no text sent.
     """
     import agent
     import attachments as att
@@ -1233,7 +1307,6 @@ def _agent_turn(
         count_web_searches_today_pg,
         ensure_session_pg,
         get_session_history_pg,
-        get_session_spreadsheets_pg,
         record_web_search_pg,
         save_attachment_pg,
         save_chat_message_pg,
@@ -1241,7 +1314,7 @@ def _agent_turn(
 
     uploads = uploads or []
     web, code = _agent_tools(user, mode)
-    web = web and not uploads
+    web = web and not uploads and not scoped
     if code and count_code_runs_today_pg(user["id"]) >= code_interpreter.CI_DAILY_LIMIT:
         code = False  # daily cap reached — the normal pipeline still answers
         audit_log("code_limit_hit", user=user, detail={"limit": code_interpreter.CI_DAILY_LIMIT}, request=request)
@@ -1252,23 +1325,17 @@ def _agent_turn(
     # Spreadsheets for the sandbox: this message's uploads, or — for a text
     # follow-up — the ones uploaded earlier in this session.
     file_note = ""
-    input_files: list[tuple[str, str]] = []
+    input_files = _owned_spreadsheets(user, session_id, uploads) if code else []
     if code:
-        sources = uploads if uploads else (
-            get_session_spreadsheets_pg(session_id, user["id"]) if session_id else []
-        )
-        for f in sources:
-            if not code_interpreter.is_ci_input(f["filename"]):
-                continue
-            try:
-                input_files.append((f["filename"], str(att.validate_upload_path(f["file_path"]))))
-            except HTTPException:
-                continue  # file purged from disk
-        input_files = input_files[: code_interpreter.CI_MAX_INPUT_FILES]
         if uploads:
             file_note = "\n\n[ผู้ใช้แนบไฟล์: " + ", ".join(u["filename"] for u in uploads) + "]"
         elif input_files:
             file_note = "\n\n[ไฟล์ Excel/CSV ที่แนบไว้ก่อนหน้าในแชทนี้: " + ", ".join(n for n, _ in input_files) + "]"
+        if scoped:
+            file_note += (
+                "\n[ตอบจากข้อมูลในไฟล์ที่แนบเท่านั้น — ถ้าคำถามต้องใช้ข้อมูลที่ไม่อยู่ในไฟล์ "
+                "ให้บอกว่าไม่มีข้อมูลนั้นในไฟล์]"
+            )
 
     started = time.monotonic()
     history = get_session_history_pg(
@@ -1283,6 +1350,7 @@ def _agent_turn(
             prompt, history, web_quota_left=quota_left,
             on_web_search=lambda q, cost: record_web_search_pg(user["id"], q, cost),
             web_enabled=web, ci_enabled=code, input_files=input_files, file_note=file_note,
+            allow_standard=not scoped,
         ):
             if kind == "done":
                 result = payload
@@ -1290,6 +1358,8 @@ def _agent_turn(
             if kind == "standard":
                 yield "standard", {"usage": payload, "legacy_tools": not web}
                 return
+            if kind == "delta" and scoped:
+                continue  # sent below, only if the sandbox really answered
             emitted = emitted or kind == "delta"
             yield kind, payload
     except Exception as e:
@@ -1305,16 +1375,20 @@ def _agent_turn(
         yield ("error" if emitted else "fallback"), None
         return
 
-    if uploads and not result.used_code:
+    if (uploads or scoped) and not result.used_code:
         # The sandbox failed on the attached file — the normal file answer
-        # (extracted text) beats an apology. Uploads only come from the
-        # non-stream path, so no text has reached the client yet.
+        # (extracted text) beats an apology; a scoped question must not get a
+        # model-only answer at all. Uploads only come from the non-stream path
+        # and scoped deltas are held back, so no text has reached the client.
         audit_log(
             "code_failed_fallback", user=user,
-            detail={"tools": result.tools[:10], "prompt": question[:200]}, request=request,
+            detail={"tools": result.tools[:10], "scoped": scoped, "prompt": question[:200]},
+            request=request,
         )
         yield "fallback", None
         return
+    if scoped:
+        yield "delta", result.answer
 
     tail = _format_citations(result.citations)
     answer = (result.answer + tail).strip()
@@ -1363,6 +1437,21 @@ def _agent_turn(
         "answer": answer, "tail": tail, "source": source, "session_id": sid,
         "session_title": stitle, "message_id": mid, "attachments": rows,
     }
+
+
+def _agent_done_event(payload: dict) -> dict:
+    """/chat/stream `done` event for a finished agent turn (the `done` payload)."""
+    evt = {
+        "type": "done", "source": payload["source"],
+        "session_id": payload["session_id"],
+        "session_title": payload["session_title"],
+        "message_id": payload["message_id"],
+        "turn_count": _count_session_turns(payload["session_id"]),
+        "turn_limit": MAX_TURNS_PER_SESSION,
+    }
+    if payload["attachments"]:
+        evt["attachments"] = payload["attachments"]
+    return evt
 
 
 def _agent_chat_response(payload: dict) -> "ChatResponse":
@@ -1753,29 +1842,45 @@ async def chat(
             attachments=[],
         )
 
+    # A classifier flag on analysis of the user's OWN spreadsheets doesn't block:
+    # the turn becomes file-scoped (sandbox over those files only — see
+    # _file_scope_allowed). For uploads that's decided once they're saved
+    # (`pending_scope`); for follow-ups, from the session's files now.
+    import code_interpreter
+
+    file_scoped = False
+    pending_scope: str | None = None
     if question and not _is_linsip_query(question, session_id, user):
         classification = classify_sensitivity(question)
         if classification is not None:
             category, reason = classification
-            audit_log(
-                "sensitive_blocked_classifier",
-                user=user,
-                detail={
-                    "category": category,
-                    "reason": reason,
-                    "message_length": len(question),
-                    "had_files": bool(files),
-                },
-                request=request,
-            )
-            return ChatResponse(
-                answer=BLOCKED_RESPONSE,
-                source="blocked",
-                similarity=None,
-                session_id=session_id or 0,
-                session_title="",
-                attachments=[],
-            )
+            if files and any(code_interpreter.is_ci_input(f.filename or "") for f in files) \
+                    and _agent_tools(user, mode)[1]:
+                pending_scope = category
+            elif not files and await run_in_threadpool(
+                _file_scope_allowed, user, question, session_id, mode, category, request
+            ):
+                file_scoped = True
+            else:
+                audit_log(
+                    "sensitive_blocked_classifier",
+                    user=user,
+                    detail={
+                        "category": category,
+                        "reason": reason,
+                        "message_length": len(question),
+                        "had_files": bool(files),
+                    },
+                    request=request,
+                )
+                return ChatResponse(
+                    answer=BLOCKED_RESPONSE,
+                    source="blocked",
+                    similarity=None,
+                    session_id=session_id or 0,
+                    session_title="",
+                    attachments=[],
+                )
 
     # Enforce per-session turn cap. Export-intent messages are allowed even
     # at the limit so the user can still save their work, then start a fresh
@@ -1799,6 +1904,24 @@ async def chat(
                 f"แชทนี้ครบ {MAX_TURNS_PER_SESSION} คำถามแล้ว — กรุณาเปิด 'แชทใหม่' "
                 "เพื่อถามต่อค่ะ (ช่วยให้ระบบเร็วและประหยัด token)",
             )
+
+    # File-scoped follow-up (approved above): only the sandbox over the user's
+    # own spreadsheets may answer it; nothing else in the pipeline runs.
+    if file_scoped:
+        events = await run_in_threadpool(
+            lambda: list(_agent_turn(user, question, session_id, mode, request, scoped=True))
+        )
+        for kind, payload in events:
+            if kind == "done":
+                return _agent_chat_response(payload)
+        return ChatResponse(
+            answer=FILE_SCOPE_FAILED,
+            source="code_error",
+            similarity=None,
+            session_id=session_id or 0,
+            session_title="",
+            attachments=[],
+        )
 
     # Intent: user is asking to export the previous answer as PDF.
     # Short-circuit before RAG/LLM so we don't waste tokens; the frontend
@@ -2007,6 +2130,33 @@ async def chat(
                 request=request,
             )
 
+        # Flagged question on an attached spreadsheet: allowed only as analysis
+        # of that file (decided now that its sheets/headers can be read).
+        if pending_scope is not None:
+            if not await run_in_threadpool(
+                _file_scope_allowed, user, question, session_id, mode, pending_scope, request, saved_files
+            ):
+                for sf in saved_files:  # blocked → keep nothing of this upload
+                    try:
+                        os.remove(sf["file_path"])
+                    except OSError:
+                        pass
+                audit_log(
+                    "sensitive_blocked_classifier",
+                    user=user,
+                    detail={"category": pending_scope, "message_length": len(question), "had_files": True},
+                    request=request,
+                )
+                return ChatResponse(
+                    answer=BLOCKED_RESPONSE,
+                    source="blocked",
+                    similarity=None,
+                    session_id=session_id or 0,
+                    session_title="",
+                    attachments=[],
+                )
+            file_scoped = True
+
         if use_postgres_auth():
             from chat_pg import (
                 ensure_session_pg,
@@ -2064,16 +2214,17 @@ async def chat(
                 # Code Interpreter (CODE_INTERPRETER_MODE flag): an Excel/CSV is
                 # attached → the router picks run_python (exact totals, charts,
                 # new files) or hands back to the normal file answer below.
-                # Images/PDF/proofreading never reach this branch.
-                import code_interpreter
-
+                # Images/PDF/proofreading never reach this branch. A file-scoped
+                # question may only fall back to the answer about these files.
                 if (
                     not _is_proofread_request(question)
                     and any(code_interpreter.is_ci_input(sf["filename"]) for sf in saved_files)
                     and _agent_tools(user, mode)[1]
                 ):
                     events = await run_in_threadpool(
-                        lambda: list(_agent_turn(user, question, sid, mode, request, uploads=saved_files))
+                        lambda: list(_agent_turn(
+                            user, question, sid, mode, request, uploads=saved_files, scoped=file_scoped,
+                        ))
                     )
                     for kind, payload in events:
                         if kind == "done":
@@ -2533,11 +2684,16 @@ async def chat_stream(
             # 1) Safety — keyword then classifier. Mirror /chat: blocked answers
             #    are NOT persisted to history. A job-number lookup skips the
             #    classifier (answered from the authorized WI page) but still runs
-            #    the hard keyword filter.
-            if is_sensitive(question) is not None or (
-                not _is_linsip_query(question, session_id, user)
-                and classify_sensitivity(question) is not None
-            ):
+            #    the hard keyword filter. A classifier flag on analysis of the
+            #    user's own spreadsheets becomes a file-scoped turn (2.5) instead.
+            keyword_hit = is_sensitive(question) is not None
+            flagged = None
+            if not keyword_hit and not _is_linsip_query(question, session_id, user):
+                flagged = classify_sensitivity(question)
+            file_scoped = flagged is not None and _file_scope_allowed(
+                user, question, session_id, mode, flagged[0], request
+            )
+            if keyword_hit or (flagged is not None and not file_scoped):
                 audit_log(
                     "sensitive_blocked_stream",
                     user=user,
@@ -2567,6 +2723,27 @@ async def chat_stream(
                         "กรุณาเปิด 'แชทใหม่' เพื่อถามต่อค่ะ",
                     })
                     return
+
+            # 2.5) File-scoped analysis — a flagged question approved by
+            #      _file_scope_allowed. Only the sandbox over the user's own
+            #      spreadsheets may answer it; nothing else in the pipeline runs.
+            if file_scoped:
+                for kind, payload in _agent_turn(user, question, session_id, mode, request, scoped=True):
+                    if kind == "status":
+                        yield ev({"type": "status", "state": payload})
+                    elif kind == "delta":
+                        yield ev({"type": "delta", "v": payload})
+                    elif kind == "done":
+                        yield ev(_agent_done_event(payload))
+                        return
+                yield ev({"type": "delta", "v": FILE_SCOPE_FAILED})
+                yield ev({
+                    "type": "done", "source": "code_error",
+                    "session_id": session_id or 0, "session_title": "",
+                    "message_id": None, "turn_count": None,
+                    "turn_limit": MAX_TURNS_PER_SESSION,
+                })
+                return
 
             # 3) Export intent — save the offer, no token streaming.
             if _is_export_request(question):
@@ -2678,17 +2855,7 @@ async def chat_stream(
                     elif kind == "done":
                         if payload["tail"]:
                             yield ev({"type": "delta", "v": payload["tail"]})
-                        done_evt = {
-                            "type": "done", "source": payload["source"],
-                            "session_id": payload["session_id"],
-                            "session_title": payload["session_title"],
-                            "message_id": payload["message_id"],
-                            "turn_count": _count_session_turns(payload["session_id"]),
-                            "turn_limit": MAX_TURNS_PER_SESSION,
-                        }
-                        if payload["attachments"]:
-                            done_evt["attachments"] = payload["attachments"]
-                        yield ev(done_evt)
+                        yield ev(_agent_done_event(payload))
                         return
                     elif kind == "standard":
                         legacy_tools = payload["legacy_tools"]

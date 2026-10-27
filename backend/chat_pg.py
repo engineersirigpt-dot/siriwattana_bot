@@ -953,7 +953,9 @@ def count_code_runs_today_pg(user_id: int) -> int:
 
 def get_session_spreadsheets_pg(session_id: int, user_id: int, limit: int = 5) -> list[dict]:
     """Excel/CSV files the user uploaded earlier in this session (newest first),
-    so a follow-up ("แล้วเดือนไหนขายดีสุด") can be computed on the same data."""
+    so a follow-up ("แล้วเดือนไหนขายดีสุด") can be computed on the same data.
+    Only when the session, the message and the file all belong to `user_id` —
+    never another user's chat, a forked copy of a shared chat, or bot output."""
     with get_pg_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -961,14 +963,17 @@ def get_session_spreadsheets_pg(session_id: int, user_id: int, limit: int = 5) -
                 SELECT a.filename, a.file_path
                 FROM attachments a
                 JOIN chat_history h ON h.id = a.message_id
-                WHERE h.session_id = %s AND a.user_id = %s
+                JOIN chat_sessions s ON s.id = h.session_id
+                WHERE h.session_id = %s
+                  AND s.user_id = %s AND h.user_id = %s AND a.user_id = %s
+                  AND NOT COALESCE(h.is_forked, false)
                   AND NOT COALESCE(a.generated, false)
                   AND (lower(a.filename) LIKE '%%.xlsx' OR lower(a.filename) LIKE '%%.xls'
                        OR lower(a.filename) LIKE '%%.csv')
                 ORDER BY a.id DESC
                 LIMIT %s
                 """,
-                (session_id, user_id, limit),
+                (session_id, user_id, user_id, user_id, limit),
             )
             rows = cur.fetchall()
     return [{"filename": r[0], "file_path": r[1]} for r in rows]
