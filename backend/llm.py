@@ -33,11 +33,13 @@ LLM_MODEL_CALC = os.getenv("LLM_MODEL_CALC", "gpt-5-mini")
 # doesn't need strong Thai context reasoning like the main answer model.
 LLM_MODEL_CLASSIFIER = os.getenv("LLM_MODEL_CLASSIFIER", "gpt-4o-mini")
 
-# Proofreading ("ตรวจคำผิด" on an attachment) — see proofread.py. Accuracy over
-# speed: gpt-5 @ high checks the OCR'd text; gpt-5.6-terra was ~5x faster but
-# missed 1-2 of 11 planted typos per run.
+# Proofreading ("ตรวจคำผิด" on an attachment) — see proofread.py. gpt-5 checks
+# the OCR'd text. Effort low matched high exactly on the labelled set (0 false
+# positives, same typos found) at ~1/4 the time and cost — high spent 5-20k
+# reasoning tokens on ~1k of input. medium let one OCR misread through;
+# gpt-5.6-terra / minimal were faster but missed real typos.
 PROOFREAD_MODEL = os.getenv("PROOFREAD_MODEL", "gpt-5")
-PROOFREAD_REASONING_EFFORT = os.getenv("PROOFREAD_REASONING_EFFORT", "high")
+PROOFREAD_REASONING_EFFORT = os.getenv("PROOFREAD_REASONING_EFFORT", "low")
 
 # Image generation. gpt-image-2 (newer + cheaper than gpt-image-1: output tokens
 # $30 vs $40 /1M) is the default. Billed by image tokens; a 1024x1536 high image

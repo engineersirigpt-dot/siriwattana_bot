@@ -19,6 +19,7 @@ from fastapi import (
     Request,
     UploadFile,
 )
+from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.security import OAuth2PasswordRequestForm
@@ -1898,8 +1899,11 @@ async def chat(
                         text_attachments.append((sf["filename"], extracted))
 
                 prompt_question = question or "ช่วยอธิบายเนื้อหาในไฟล์ที่แนบ และให้คำแนะนำที่เกี่ยวข้อง"
-                answer, files_usage = _answer_files(
-                    prompt_question, image_urls, text_attachments, history
+                # Off the event loop: proofreading takes 10-40s, and running it
+                # inline froze every other request (4 concurrent proofreads ran
+                # one at a time; a plain "สวัสดี" waited 103s for its first byte).
+                answer, files_usage = await run_in_threadpool(
+                    _answer_files, prompt_question, image_urls, text_attachments, history
                 )
                 # Prepend notices: (1) long-document translation may be incomplete,
                 # (2) scanned PDF exceeded the 50-page vision cap — so the user
@@ -2120,7 +2124,9 @@ async def chat(
                     text_attachments.append((sf["filename"], extracted))
 
             prompt_question = question or "ช่วยอธิบายเนื้อหาในไฟล์ที่แนบ และให้คำแนะนำที่เกี่ยวข้อง"
-            answer, _files_usage = _answer_files(prompt_question, image_urls, text_attachments, history)
+            answer, _files_usage = await run_in_threadpool(
+                _answer_files, prompt_question, image_urls, text_attachments, history
+            )
             notices = list(truncation_notes)
             warn = att.long_translation_warning(question, total_text_chars, len(image_urls))
             if warn:
