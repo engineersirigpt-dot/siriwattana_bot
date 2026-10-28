@@ -1502,7 +1502,8 @@ def _agent_turn(
         yield ("error" if emitted else "fallback"), None
         return
 
-    if (uploads or scoped) and not (result.used_code or result.used_document):
+    asked = any(t["tool"] == "ask_user" for t in result.tools)   # a question back is an answer
+    if (uploads or scoped) and not (result.used_code or result.used_document or asked):
         # The sandbox failed on the attached file — the normal file answer
         # (extracted text) beats an apology; a scoped question must not get a
         # model-only answer at all. Uploads only come from the non-stream path

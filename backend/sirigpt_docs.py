@@ -223,7 +223,7 @@ def add_page_numbers(doc, text: str = "หน้า {PAGE} จาก {NUMPAGES}"
 
 
 def heading(doc, text: str, level: int = 1):
-    return doc.add_heading(text, level=level)
+    return doc.add_heading(_plain(text), level=level)
 
 
 def para(doc, text: str = "", bold: bool = False, align: str | None = None, size: float | None = None,
@@ -232,23 +232,29 @@ def para(doc, text: str = "", bold: bool = False, align: str | None = None, size
     from docx.enum.text import WD_ALIGN_PARAGRAPH
 
     p = doc.add_paragraph(style=style)
-    for i, part in enumerate(re.split(r"\*\*(.+?)\*\*", text)):
-        if part:
-            r = p.add_run(part)
-            if bold or i % 2:
-                r.bold = True
-                _set_val(r._r.get_or_add_rPr(), "w:bCs", "1")
-            if size:
-                thai_font(r, DOCX_FONT, size)
+    _md_runs(p, text, bold, size)
     if align:
         p.alignment = {"center": WD_ALIGN_PARAGRAPH.CENTER, "right": WD_ALIGN_PARAGRAPH.RIGHT,
                        "justify": WD_ALIGN_PARAGRAPH.JUSTIFY}.get(align, WD_ALIGN_PARAGRAPH.LEFT)
     return p
 
 
+def _md_runs(p, text: str, bold: bool = False, size: float | None = None) -> None:
+    """**bold** segments become bold runs (no literal asterisks)."""
+    for i, part in enumerate(re.split(r"\*\*(.+?)\*\*", text)):
+        if part:
+            r = p.add_run(_plain(part))
+            if bold or i % 2:
+                r.bold = True
+                _set_val(r._r.get_or_add_rPr(), "w:bCs", "1")
+            if size:
+                thai_font(r, DOCX_FONT, size)
+
+
 def bullets(doc, items: list[str], numbered: bool = False) -> None:
+    """Bulleted (or numbered) list; **bold** works as in para()."""
     for it in items:
-        doc.add_paragraph(str(it), style="List Number" if numbered else "List Bullet")
+        _md_runs(doc.add_paragraph(style="List Number" if numbered else "List Bullet"), str(it))
 
 
 def _fmt_cell(v) -> tuple[str, bool]:

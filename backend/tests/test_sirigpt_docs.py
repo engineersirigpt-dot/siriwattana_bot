@@ -232,6 +232,20 @@ def test_five_slide_deck_is_editable_and_fits(tmp_path, png):
     assert r["warnings"] == []                                        # nothing overflows or overlaps
 
 
+def test_word_bullets_and_headings_have_no_literal_markdown(tmp_path):
+    # Seen on prod: "**ยอดขายรวม**: …" bullets kept their asterisks.
+    from docx import Document
+
+    doc = sd.new_docx()
+    sd.heading(doc, "**บทสรุป**", 1)
+    sd.bullets(doc, ["**ยอดขายรวม**: 97,650 บาท", "ข้อสอง"])
+    doc.save(tmp_path / "b.docx")
+    d = Document(str(tmp_path / "b.docx"))
+    assert "**" not in "\n".join(p.text for p in d.paragraphs)
+    first = next(p for p in d.paragraphs if p.style.name == "List Bullet")
+    assert first.text == "ยอดขายรวม: 97,650 บาท" and first.runs[0].text == "ยอดขายรวม" and first.runs[0].bold
+
+
 def test_kpi_cards_and_bold_bullets(tmp_path):
     from pptx import Presentation
 

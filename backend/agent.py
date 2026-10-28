@@ -90,6 +90,10 @@ _TOOL_GUIDE = {
     "Excel, PowerPoint หรือ PDF (รายงาน จดหมาย สไลด์ ตาราง Excel ที่มีสูตร) หรือแก้ไฟล์เอกสารที่แนบ/"
     "ที่สร้างไว้ก่อนหน้า หรือใช้ไฟล์แนบเป็นแม่แบบ — ใส่ task ให้ครบ (เนื้อหา โครงสร้าง ตัวเลข) และ format "
     "ถ้าแค่ถามเนื้อหาในไฟล์ (สรุป แปล ถามข้อมูล) ไม่ต้องใช้\n",
+    "ask_user": "- ask_user: เมื่อเอกสารที่ขอต้องใช้ตัวเลข/ข้อมูลเฉพาะ (ยอดขาย ต้นทุน รายชื่อ วันที่ ฯลฯ) "
+    "ที่ยังไม่มีในข้อความ ประวัติแชท หรือไฟล์ และผู้ใช้ไม่ได้ขอแม่แบบ — ถามสั้น ๆ ว่าต้องใช้ข้อมูลอะไร "
+    "(พิมพ์มาหรือแนบไฟล์ได้ หรือจะเอาแม่แบบเปล่าก็ได้) ห้ามสร้างเอกสารด้วยตัวเลขสมมติหรือ 0 — "
+    "งานที่ไม่ต้องใช้ข้อมูลเฉพาะ (ประกาศทั่วไป คู่มือ ความรู้ทั่วไป) ให้ทำได้เลย ไม่ต้องถาม\n",
     "use_standard_answer": "- use_standard_answer: เมื่อไม่ต้องใช้เครื่องมืออื่นข้างบน — คำถามเกี่ยวกับบริษัท"
     "เราเอง (HR สวัสดิการ เครื่องจักร ขั้นตอน ฯลฯ ระบบภายในตอบได้ดีกว่า), ความรู้ทั่วไป, เขียน/แปล/สรุป/"
     "โค้ด, คิดเลขง่าย ๆ, ทักทาย, หรือคำถามต่อเนื่องที่ตอบได้จากประวัติ\n",
@@ -170,6 +174,16 @@ TOOL_MAKE_DOCUMENT = _fn(
                    "description": "output file type (auto = same as the attached file / best fit)"},
     },
     ["task", "format"],
+)
+TOOL_ASK_USER = _fn(
+    "ask_user",
+    "Ask the user for data a requested document needs (e.g. the figures for a sales "
+    "report) when it is not in the message, the chat history or an attached file. "
+    "The question is shown as the answer; nothing is created. Not for documents "
+    "that need no specific data.",
+    {"question": {"type": "string", "description": "short question in the user's language: what is needed; "
+                                                  "they may type it, attach a file, or ask for an empty template"}},
+    ["question"],
 )
 
 
@@ -285,6 +299,8 @@ def run_agent(
             out.append(TOOL_RUN_PYTHON)
         if doc_enabled and code_runs < AGENT_MAX_CODE_RUNS:
             out.append(TOOL_MAKE_DOCUMENT)
+        if doc_enabled and first:
+            out.append(TOOL_ASK_USER)
         return out + [TOOL_STANDARD] if first and allow_standard else out
 
     def create(**kw: Any) -> Any:
@@ -317,6 +333,20 @@ def run_agent(
     if all(c.name == "use_standard_answer" for c in calls):
         yield "standard", result.usage[0]
         return
+    # Missing data for a document: ask instead of building one with made-up
+    # numbers (a "sales report" came back as a 0-filled template).
+    asks = [c for c in calls if c.name == "ask_user"]
+    if doc_enabled and asks and all(c.name in ("ask_user", "use_standard_answer") for c in calls):
+        try:
+            text = str(json.loads(asks[0].arguments or "{}").get("question") or "").strip()
+        except ValueError:
+            text = ""
+        if text:
+            result.answer = text
+            result.tools.append({"tool": "ask_user", "arg": text[:200], "ok": True})
+            yield "delta", text
+            yield "done", result
+            return
 
     answer_parts: list[str] = []
     while True:
@@ -339,7 +369,7 @@ def run_agent(
                 arg = ""
             key = (call.name, arg.lower())
 
-            if call.name == "use_standard_answer":
+            if call.name in ("use_standard_answer", "ask_user"):
                 out = {"note": "ไม่ใช้ — ทำงานต่อด้วยเครื่องมืออื่นที่เรียกไว้"}
             elif key in seen:
                 out = {"note": "เรียกซ้ำกับครั้งก่อน — ใช้ผลเดิมด้านบน ห้ามเรียกซ้ำอีก"}
@@ -436,7 +466,7 @@ def run_agent(
         # run_python / make_document already return a finished Thai answer. When
         # only they ran this turn, show it as-is — a rewrite costs one more call.
         if step_code and all(
-            t["tool"] == "use_standard_answer" or (t["tool"] in ("run_python", "make_document") and t["ok"])
+            t["tool"] in ("use_standard_answer", "ask_user") or (t["tool"] in ("run_python", "make_document") and t["ok"])
             for t in result.tools
         ):
             result.answer = "\n\n".join(step_code)
