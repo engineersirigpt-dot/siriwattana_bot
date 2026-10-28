@@ -36,6 +36,7 @@ import {
   LogOut,
   Menu,
   MessageSquare,
+  MoreHorizontal,
   Paperclip,
   Pencil,
   Plus,
@@ -77,7 +78,7 @@ import ThemeToggle from "@/components/ThemeToggle";
 import MemoryModal from "@/components/MemoryModal";
 import MessageRow, { type MsgV5, type RowActions } from "@/components/chat/MessageRow";
 import { PendingFile } from "@/components/chat/FileCard";
-import { knownStep } from "@/components/chat/StatusLine";
+import { knownStep, stepsFromSource } from "@/components/chat/StatusLine";
 import { useStickyScroll } from "@/components/chat/useStickyScroll";
 import {
   DATA_FILE_RE,
@@ -108,14 +109,20 @@ type LoadedMessage = {
   my_vote?: "up" | "down" | null;
 };
 
+// Ends a stopped answer the backend saved (main.STOPPED_NOTE) — shown as the
+// "หยุดแล้ว" note instead of text.
+const STOPPED_RE = /\s*_\(หยุดก่อนตอบจบ — คำตอบอาจไม่ครบ\)_\s*$/;
+
 function hydrate(loaded: LoadedMessage[]): MsgV5[] {
   const out: MsgV5[] = [];
   for (const m of loaded) {
     const atts = splitAttachments(m.source, m.attachments);
+    const stopped = STOPPED_RE.test(m.answer);
+    const text = stopped ? m.answer.replace(STOPPED_RE, "") : m.answer;
     out.push({ role: "user", text: m.question, attachments: atts.user });
     out.push({
       role: "bot",
-      text: m.answer,
+      text,
       source: m.source,
       source_knowledge_id: m.source_knowledge_id ?? null,
       source_file: m.source_file ?? null,
@@ -123,6 +130,8 @@ function hydrate(loaded: LoadedMessage[]): MsgV5[] {
       id: m.id,
       myVote: m.my_vote ?? null,
       attachments: atts.bot.length > 0 ? atts.bot : undefined,
+      steps: stepsFromSource(m.source, text),
+      stopped,
     });
   }
   return out;
@@ -709,14 +718,23 @@ export default function ChatV5() {
       patchLastBot((last) => ({ text: last.text + t }));
     };
     let receivedAny = false;
+    let sentText = false;
     try {
       await sendChatStream(
         { message: text, sessionId: currentSid, signal: controller.signal },
         {
           onDelta: (t) => {
-            receivedAny = true;
+            receivedAny = sentText = true;
             pending += t;
             if (frame === null) frame = requestAnimationFrame(flush);
+          },
+          onSession: (s) => {
+            receivedAny = true;
+            if (currentSid === null) {
+              // a new chat: it exists now, even if this answer gets stopped
+              setCurrentSid(s.session_id);
+              refreshSessions();
+            }
           },
           onStatus: (state) => {
             if (state === "generating_image") patchLastBot({ generatingImage: true });
@@ -724,15 +742,17 @@ export default function ChatV5() {
           },
           onDone: (meta) => {
             flush();
-            patchLastBot({
+            patchLastBot((last) => ({
               source: meta.source,
               source_knowledge_id: meta.source_knowledge_id ?? null,
               source_file: meta.source_file ?? null,
               id: meta.message_id ?? undefined,
               streaming: false,
               generatingImage: false,
+              // steps that sent no status (legacy web/link answers) from the source
+              steps: last.steps?.length ? last.steps : stepsFromSource(meta.source, last.text),
               ...(meta.attachments?.length ? { attachments: meta.attachments } : {}),
-            });
+            }));
             setCurrentSid(meta.session_id);
             if (typeof meta.turn_count === "number") setTurnCount(meta.turn_count);
             if (typeof meta.turn_limit === "number") setTurnLimit(meta.turn_limit);
@@ -751,6 +771,11 @@ export default function ChatV5() {
       const aborted = e instanceof DOMException && e.name === "AbortError";
       if (aborted) {
         patchLastBot((last) => (last.text ? { stopped: true } : { text: "ยกเลิกการถามแล้ว" }));
+        if (sentText) {
+          // the backend saves the text it had sent (marked as stopped) — one more turn
+          setTurnCount((c) => c + 1);
+          refreshSessions();
+        }
       } else if (!receivedAny) {
         // never started (e.g. sqlite → 501): drop the bubble, use /chat instead
         setMessages((m) => (m[m.length - 1]?.role === "bot" && !m[m.length - 1].text ? m.slice(0, -1) : m));
@@ -1287,8 +1312,10 @@ export default function ChatV5() {
   );
 }
 
-// A chat row in the sidebar: opens on click / Enter / Space; its actions show
-// on hover or keyboard focus (always on touch screens, which can't hover).
+// A chat row in the sidebar: opens on click / Enter / Space. With a mouse its
+// actions show as icons on hover or keyboard focus; on touch screens (no
+// hover) one "⋯" button opens them as labelled buttons under the row, so the
+// titles keep their width.
 function SideRow({
   active,
   icon,
@@ -1304,44 +1331,79 @@ function SideRow({
   actions: { icon: React.ReactNode; label: string; run: () => void; danger?: boolean }[];
   small?: boolean;
 }) {
+  const [menu, setMenu] = useState(false);
+  const run = (e: React.MouseEvent, a: (typeof actions)[number]) => {
+    e.stopPropagation();
+    setMenu(false);
+    a.run();
+  };
   return (
-    <div
-      role="button"
-      tabIndex={0}
-      onClick={onOpen}
-      onKeyDown={(e) => {
-        if (e.target === e.currentTarget && (e.key === "Enter" || e.key === " ")) {
-          e.preventDefault();
-          onOpen();
-        }
-      }}
-      aria-current={active ? "true" : undefined}
-      data-testid="session-row"
-      title={title}
-      className={`group flex cursor-pointer items-center gap-2 rounded-lg ${small ? "px-2 py-1.5 text-xs" : "px-2.5 py-2 text-sm"} text-white transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70 ${
-        active ? "bg-purple-400 shadow-lg" : "hover:bg-white/10"
-      }`}
-    >
-      <span className="flex-shrink-0">{icon}</span>
-      <span className="min-w-0 flex-1 truncate">{title}</span>
-      {actions.length > 0 && (
-        <span className="flex flex-shrink-0 gap-0.5 [@media(hover:hover)]:hidden [@media(hover:hover)]:group-hover:flex [@media(hover:hover)]:group-focus-within:flex">
+    <div>
+      <div
+        role="button"
+        tabIndex={0}
+        onClick={onOpen}
+        onKeyDown={(e) => {
+          if (e.target === e.currentTarget && (e.key === "Enter" || e.key === " ")) {
+            e.preventDefault();
+            onOpen();
+          }
+        }}
+        aria-current={active ? "true" : undefined}
+        data-testid="session-row"
+        title={title}
+        className={`group flex cursor-pointer items-center gap-2 rounded-lg ${small ? "px-2 py-1.5 text-xs" : "px-2.5 py-2 text-sm"} text-white transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70 ${
+          active ? "bg-purple-400 shadow-lg" : "hover:bg-white/10"
+        }`}
+      >
+        <span className="flex-shrink-0">{icon}</span>
+        <span className="min-w-0 flex-1 truncate">{title}</span>
+        {actions.length > 0 && (
+          <>
+            <span className="hidden flex-shrink-0 gap-0.5 [@media(hover:hover)]:group-hover:flex [@media(hover:hover)]:group-focus-within:flex">
+              {actions.map((a) => (
+                <button
+                  key={a.label}
+                  type="button"
+                  onClick={(e) => run(e, a)}
+                  className={`rounded p-1 text-white/85 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70 ${a.danger ? "hover:text-red-300" : "hover:text-white"}`}
+                  aria-label={a.label}
+                  title={a.label}
+                >
+                  {a.icon}
+                </button>
+              ))}
+            </span>
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                setMenu((v) => !v);
+              }}
+              className="-my-1 flex-shrink-0 rounded p-1.5 text-white/85 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70 [@media(hover:hover)]:hidden"
+              aria-label={`ตัวเลือกของแชท ${title}`}
+              aria-expanded={menu}
+              data-testid="row-menu"
+            >
+              <MoreHorizontal size={16} />
+            </button>
+          </>
+        )}
+      </div>
+      {menu && (
+        <div className="flex flex-wrap gap-1.5 px-2 pb-1.5 pt-1 [@media(hover:hover)]:hidden" data-testid="row-actions">
           {actions.map((a) => (
             <button
               key={a.label}
               type="button"
-              onClick={(e) => {
-                e.stopPropagation();
-                a.run();
-              }}
-              className={`rounded p-1 text-white/85 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70 ${a.danger ? "hover:text-red-300" : "hover:text-white"}`}
-              aria-label={a.label}
-              title={a.label}
+              onClick={(e) => run(e, a)}
+              className={`flex items-center gap-1.5 rounded-lg border border-white/20 bg-white/10 px-2.5 py-1.5 text-xs text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70 ${a.danger ? "text-red-200" : ""}`}
             >
               {a.icon}
+              {a.label}
             </button>
           ))}
-        </span>
+        </div>
       )}
     </div>
   );

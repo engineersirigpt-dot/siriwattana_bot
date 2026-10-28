@@ -22,7 +22,7 @@ import {
 
 // V5 additions on a message (all optional, so a classic Msg still fits)
 export type MsgV5 = Msg & {
-  steps?: string[];        // backend status events received while streaming
+  steps?: string[];        // backend status events received while streaming (or from the saved source)
   startedAt?: number;      // when the request went out (real elapsed time)
   waitLabel?: string;      // label before any status (e.g. "กำลังประมวลผลไฟล์…")
   waitHint?: string;       // e.g. proofreading takes 1–2 min
@@ -116,7 +116,7 @@ function MessageRow({
         )}
         {m.stopped && (
           <p className="mt-1 inline-flex items-center gap-1 text-xs text-muted" data-testid="stopped-note">
-            <Square size={10} fill="currentColor" /> หยุดแล้ว — คำตอบอาจไม่ครบ และไม่ได้บันทึกในประวัติ
+            <Square size={10} fill="currentColor" /> หยุดแล้ว — คำตอบอาจไม่ครบ
           </p>
         )}
         {m.attachments && m.attachments.length > 0 && !isImageSource(m.source) && !streaming && (
@@ -149,7 +149,7 @@ function MessageRow({
               </button>
             )}
             {(fmt === "xlsx" || hasMarkdownTable(m.text)) && (
-              <button type="button" onClick={() => actions.exportXlsx(m.text)} className="ui-btn px-2 py-1 text-xs text-green-700 bg-green-50 hover:bg-green-100 dark:bg-green-900/30">
+              <button type="button" onClick={() => actions.exportXlsx(m.text)} className="ui-btn px-2 py-1 text-xs text-green-700 bg-green-50 hover:bg-green-100 dark:bg-green-900/30 dark:text-green-300 dark:hover:bg-green-900/50">
                 <Sheet size={13} /> Excel
               </button>
             )}

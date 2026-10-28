@@ -19,14 +19,38 @@ export const STEPS: Record<string, Step> = {
   agent_writing: { now: "กำลังเรียบเรียงคำตอบ…", done: "เรียบเรียงแล้ว", icon: PenLine },
 };
 
+// Not a live status — a saved agent answer with a source list (web search
+// and/or a read link), see stepsFromSource.
+const WEB_SOURCES: Step = { now: "", done: "ใช้ข้อมูลจากเว็บ", icon: Globe };
+
 export function knownStep(state: string): boolean {
   return state in STEPS;
+}
+
+// The live steps are gone after a reload (or never came: the legacy web and
+// link steps send none), but the saved source still says which tool made the
+// answer — the chips come from that.
+export function stepsFromSource(source: string | undefined, text: string): string[] {
+  switch (source) {
+    case "web":
+      return ["agent_searching"];
+    case "url":
+      return ["agent_reading"];
+    case "code":
+      return ["agent_coding"];
+    case "document":
+      return ["agent_document"];
+    case "agent":
+      return text.includes("**แหล่งอ้างอิง:**") ? ["web_sources"] : [];
+    default:
+      return [];
+  }
 }
 
 // Finished steps as small ticked chips ("ค้นเว็บแล้ว"). Also shown above the
 // answer once text arrives, so the user still sees the web was searched.
 export function StepChips({ steps }: { steps: string[] }) {
-  const done = steps.map((s) => STEPS[s]).filter(Boolean);
+  const done = steps.map((s) => (s === "web_sources" ? WEB_SOURCES : STEPS[s])).filter(Boolean);
   if (!done.length) return null;
   return (
     <div className="mb-1.5 flex flex-wrap gap-1.5" data-testid="step-chips">

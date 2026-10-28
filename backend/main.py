@@ -5,6 +5,7 @@ import os
 import re
 import time
 
+import anyio
 from audit import audit_log
 from dotenv import load_dotenv
 
@@ -20,7 +21,7 @@ from fastapi import (
     Request,
     UploadFile,
 )
-from fastapi.concurrency import run_in_threadpool
+from fastapi.concurrency import iterate_in_threadpool, run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.security import OAuth2PasswordRequestForm
@@ -1563,7 +1564,7 @@ def _code_limit_reply(
 
 def _agent_turn(
     user: dict, question: str, session_id: int | None, mode: str, request: Request,
-    uploads: list[dict] | None = None, scoped: bool = False,
+    uploads: list[dict] | None = None, scoped: bool = False, session_ref: dict | None = None,
 ):
     """Run the agent router for one question. Replaces the legacy URL-reading and
     web-search steps (the agent decides which tools to use, if any). Yields:
@@ -1582,6 +1583,9 @@ def _agent_turn(
     `scoped=True` (a flagged question approved by _file_scope_decision): only
     run_python over the owned spreadsheets, no standard route, and anything but
     a successful sandbox answer ends as "fallback" with no text sent.
+    `session_ref`: /chat/stream creates a new chat when the first answer text
+    goes out (so a stopped answer has a chat to be saved in) and puts its id in
+    ["id"] — the finished answer is saved there too.
     """
     import agent
     import attachments as att
@@ -1685,7 +1689,7 @@ def _agent_turn(
     source = "document" if result.used_document else "code" if result.used_code else "agent"
     sandbox_used = result.used_document or result.used_code
     sid, stitle = ensure_session_pg(
-        user_id=user["id"], session_id=session_id,
+        user_id=user["id"], session_id=(session_ref or {}).get("id") or session_id,
         first_question=question or uploads[0]["filename"], mode=mode,
     )
     mid = save_chat_message_pg(
@@ -3020,6 +3024,61 @@ async def _chat_turn(
         raise
 
 
+# ── Stop button on /chat/stream ─────────────────────────────────────────────
+# A stopped answer used to vanish: when the client goes away Starlette only
+# cancels the response, and the paused generator lingered until GC, so nothing
+# after its last yield ran. _close_on_disconnect closes it right away; gen()
+# then saves the text it had already sent, marked with STOPPED_NOTE (the next
+# turn's history sees it was cut short). Closing also ends the OpenAI stream.
+
+STOPPED_NOTE = "\n\n_(หยุดก่อนตอบจบ — คำตอบอาจไม่ครบ)_"
+
+
+async def _close_on_disconnect(it):
+    try:
+        async for chunk in iterate_in_threadpool(it):
+            yield chunk
+    finally:
+        # we are being cancelled — shield the close; it runs in a worker
+        # thread because it may write to the DB (_save_stopped)
+        with anyio.CancelScope(shield=True):
+            await anyio.to_thread.run_sync(it.close)
+
+
+def _save_stopped(user: dict, question: str, mode: str, request: Request, live: dict) -> None:
+    """Save the answer text a stopped stream had sent (`live`, kept by gen()).
+    Nothing when no answer text went out or the answer was already saved."""
+    text = "".join(live["parts"]).strip()
+    if not live["source"] or not text:
+        return
+    from chat_pg import ensure_session_pg, save_chat_message_pg
+
+    try:
+        sid, _ = ensure_session_pg(
+            user_id=user["id"], session_id=live["sid"], first_question=question, mode=mode,
+        )
+        # no usage: the final chunk that carries it never came (the dashboard
+        # falls back to its estimate for rows without one)
+        mid = save_chat_message_pg(
+            user_id=user["id"], session_id=sid, question=question,
+            answer=text + STOPPED_NOTE, source=live["source"], knowledge_id=live["kid"], mode=mode,
+        )
+        _after_answer(user, sid)
+        audit_log(
+            "chat_stream_stopped",
+            user=user,
+            detail={"session_id": sid, "message_id": mid, "source": live["source"], "chars": len(text)},
+            request=request,
+        )
+    except Exception as e:
+        audit_log(
+            "chat_stream_stop_save_failed",
+            user=user,
+            detail={"error_type": e.__class__.__name__, "error": str(e)[:300]},
+            request=request,
+        )
+
+
 @app.post("/chat/stream")
 @limiter.limit("30/minute")
 async def chat_stream(
@@ -3059,6 +3118,10 @@ async def chat_stream(
             ensure_session_pg,
             save_chat_message_pg,
         )
+
+        # Answer text sent while the model streams, saved by _save_stopped if
+        # the client stops before it is done. source=None: nothing to save.
+        live: dict = {"sid": session_id, "source": None, "kid": None, "parts": []}
 
         try:
             # 1) Safety — keyword then classifier. Mirror /chat: blocked answers
@@ -3254,12 +3317,24 @@ async def chat_stream(
             legacy_tools = True
             agent_router_usage: dict = {}
             if _agent_enabled(user, mode):
-                for kind, payload in _agent_turn(user, question, session_id, mode, request):
+                ref = {"id": session_id}
+                for kind, payload in _agent_turn(user, question, session_id, mode, request, session_ref=ref):
                     if kind == "status":
                         yield ev({"type": "status", "state": payload})
                     elif kind == "delta":
+                        if live["source"] is None:
+                            # the answer starts: from here on the chat exists
+                            sid, stitle = ensure_session_pg(
+                                user_id=user["id"], session_id=session_id,
+                                first_question=question, mode=mode,
+                            )
+                            ref["id"] = live["sid"] = sid
+                            live["source"] = "agent"
+                            yield ev({"type": "session", "session_id": sid, "session_title": stitle})
+                        live["parts"].append(payload)
                         yield ev({"type": "delta", "v": payload})
                     elif kind == "done":
+                        live["source"] = None  # saved by _agent_turn
                         if payload["tail"]:
                             yield ev({"type": "delta", "v": payload["tail"]})
                         yield ev(_agent_done_event(payload))
@@ -3310,6 +3385,9 @@ async def chat_stream(
                 user_id=user["id"], session_id=session_id,
                 first_question=question, mode=mode,
             )
+            live["sid"] = sid
+            # the chat exists now — a client that stops mid-answer stays in it
+            yield ev({"type": "session", "session_id": sid, "session_title": stitle})
             history = _turn_history(user, session_id)
             knowledge_id: int | None = None
             source_file_hit: str | None = None
@@ -3422,6 +3500,7 @@ async def chat_stream(
                     source = "llm" if category == "general" else "llm-calc"
 
             parts: list[str] = []
+            live.update(source=source, kid=knowledge_id, parts=parts)
             first_token_at: float | None = None
             for delta in tokens:
                 if first_token_at is None:
@@ -3451,6 +3530,7 @@ async def chat_stream(
                 answer=answer, source=source, knowledge_id=knowledge_id,
                 mode=mode, usage=usage_row,
             )
+            live["source"] = None  # saved
             _after_answer(user, sid)
             audit_log(
                 "chat_message",
@@ -3469,6 +3549,9 @@ async def chat_stream(
                 "turn_count": _count_session_turns(sid),
                 "turn_limit": MAX_TURNS_PER_SESSION,
             })
+        except GeneratorExit:  # the client stopped (see _close_on_disconnect)
+            _save_stopped(user, question, mode, request, live)
+            raise
         except Exception as e:
             audit_log(
                 "chat_stream_error",
@@ -3479,7 +3562,7 @@ async def chat_stream(
             yield ev({"type": "error", "detail": "เกิดข้อผิดพลาดในการสร้างคำตอบ"})
 
     return StreamingResponse(
-        gen(),
+        _close_on_disconnect(gen()),
         media_type="application/x-ndjson",
         # Defeat reverse-proxy/response buffering so tokens reach the browser
         # as they're produced rather than all at once at the end.

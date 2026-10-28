@@ -8,9 +8,9 @@ export async function resetMock(page: Page, state?: Record<string, unknown>) {
 }
 
 // Sign in by putting the token where lib/api.ts keeps it (no login round trip).
-export async function signIn(page: Page, who: "admin" | "staff" = "admin", ui?: "classic") {
+export async function signIn(page: Page, who: "admin" | "staff" = "admin", ui?: "classic", theme: "light" | "dark" = "light") {
   const user = who === "admin" ? { token: "tok-admin", role: "admin", name: "admin" } : { token: "tok-staff", role: "user", name: "staff" };
-  await page.addInitScript(([u, pref]) => {
+  await page.addInitScript(([u, pref, th]) => {
     // once per test: a reload must keep what the page saved (e.g. "back to classic")
     if (sessionStorage.getItem("__e2e_init")) return;
     sessionStorage.setItem("__e2e_init", "1");
@@ -19,8 +19,8 @@ export async function signIn(page: Page, who: "admin" | "staff" = "admin", ui?: 
     localStorage.setItem("chatbot_username", u.name);
     if (pref) localStorage.setItem("siri_ui", pref);
     else localStorage.removeItem("siri_ui");
-    localStorage.setItem("theme", "light");
-  }, [user, ui ?? null] as const);
+    localStorage.setItem("theme", th);
+  }, [user, ui ?? null, theme] as const);
 }
 
 export function isMobile(testInfo: TestInfo) {

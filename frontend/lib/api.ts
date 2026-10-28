@@ -207,6 +207,9 @@ export async function sendChatStream(
     // Progress signal before any token (e.g. "generating_image" during the
     // slow image-generation step). Optional.
     onStatus?: (state: string) => void;
+    // The chat the answer goes into, sent before the answer starts — a new
+    // chat that is stopped mid-answer is still that chat. Optional.
+    onSession?: (s: { session_id: number; session_title: string }) => void;
   },
 ): Promise<void> {
   const fd = new FormData();
@@ -241,6 +244,8 @@ export async function sendChatStream(
     }
     if (evt.type === "delta") handlers.onDelta(String(evt.v ?? ""));
     else if (evt.type === "status") handlers.onStatus?.(String(evt.state ?? ""));
+    else if (evt.type === "session")
+      handlers.onSession?.({ session_id: Number(evt.session_id), session_title: String(evt.session_title ?? "") });
     else if (evt.type === "done") handlers.onDone(evt as unknown as StreamDone);
     else if (evt.type === "error")
       handlers.onError(String(evt.detail ?? "เกิดข้อผิดพลาด"), evt.code as string | undefined);

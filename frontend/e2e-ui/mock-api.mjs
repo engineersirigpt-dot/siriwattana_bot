@@ -79,7 +79,10 @@ const FILES = {
   508: { filename: "ของคนอื่น.pptx", content_type: PPTX, owner: 9, body: Buffer.from("PK"), generated: true },
   509: { filename: "โปสเตอร์.png", content_type: "image/png", owner: 1, body: png(300, 300, [234, 88, 12]) },
   510: { filename: "ใบเสนอราคา.pdf", content_type: "application/pdf", owner: 1, body: pdf("Quotation") },
+  511: { filename: "คู่มือเครื่องตัด.pdf", content_type: "application/pdf", owner: 5, body: pdf("Cutter manual"), generated: true },
 };
+// main.STOPPED_NOTE — what the backend appends to an answer saved after หยุด
+const STOPPED_NOTE = "\n\n_(หยุดก่อนตอบจบ — คำตอบอาจไม่ครบ)_";
 const meta = (id) => {
   const f = FILES[id];
   return { id: Number(id), filename: f.filename, content_type: f.content_type, size_bytes: f.body ? f.body.length : 20480, generated: !!f.generated };
@@ -125,6 +128,9 @@ function freshState() {
     })),
   };
   for (let i = 0; i < 24; i++) messages[200 + i] = [{ id: 9000 + i, question: "คำถามทดสอบ", answer: "คำตอบทดสอบ", source: "llm" }];
+  // an agent answer that used the web (its source list) — chips come back after a reload
+  messages[200] = [{ id: 9000, question: "ราคาทองวันนี้", source: "agent",
+    answer: "ทองคำแท่งขายออกบาทละ 41,000 บาทค่ะ\n\n**แหล่งอ้างอิง:**\n- [ราคาทองวันนี้](https://example.com/gold)" }];
   return {
     ui: { 1: true, 2: false },
     memory: { 1: { available: true, enabled: true, items: [{ id: 1, content: "ฉันอยู่ฝ่ายผลิต กะเช้า", created_at: null }] }, 2: { available: false, enabled: false, items: [] } },
@@ -161,15 +167,37 @@ function formFields(buf, contentType) {
   return out;
 }
 
+// Like /chat/stream: a `session` event names the chat before the answer
+// starts; if the client goes away mid-answer the text sent so far is saved
+// with STOPPED_NOTE; a finished answer is saved too.
 async function streamAnswer(req, res, user, message, sid) {
   res.writeHead(200, { "Content-Type": "application/x-ndjson", "Access-Control-Allow-Origin": "*" });
   let closed = false;
-  req.on("close", () => (closed = true));
+  let sessionId = sid;
+  let sent = "";
+  let saved = false;
+  const save = (answer, source, attachments = []) => {
+    saved = true;
+    (S.messages[sessionId] ??= []).push({ id: S.nextMid++, question: message, answer, source, attachments });
+  };
+  res.on("close", () => {
+    closed = true;
+    if (!saved && sent) save(sent.trim() + STOPPED_NOTE, "llm");
+  });
   const emit = (o) => !closed && res.write(JSON.stringify(o) + "\n");
+  const startAnswer = () => {
+    if (sessionId) return emit({ type: "session", session_id: sessionId, session_title: "" });
+    sessionId = S.nextSid++;
+    S.sessions.unshift({ id: sessionId, title: message.slice(0, 40), is_saved: 0, created_at: "", updated_at: "", message_count: 1, last_preview: null });
+    emit({ type: "session", session_id: sessionId, session_title: message.slice(0, 40) });
+  };
+  const delta = (v) => {
+    sent += v;
+    emit({ type: "delta", v });
+  };
   const done = (extra = {}) => {
-    const sessionId = sid || S.nextSid++;
-    if (!S.sessions.find((s) => s.id === sessionId)) S.sessions.unshift({ id: sessionId, title: message.slice(0, 40), is_saved: 0, created_at: "", updated_at: "", message_count: 1, last_preview: null });
-    emit({ type: "done", source: "llm", session_id: sessionId, session_title: message.slice(0, 40), message_id: S.nextMid++, turn_count: 1, turn_limit: 20, ...extra });
+    save(sent, extra.source ?? "llm", extra.attachments ?? []);
+    emit({ type: "done", source: "llm", session_id: sessionId, session_title: message.slice(0, 40), message_id: S.nextMid - 1, turn_count: 1, turn_limit: 20, ...extra });
   };
   if (message.includes("ค้นเว็บ")) {
     emit({ type: "status", state: "agent_searching" }); await sleep(700);
@@ -179,19 +207,23 @@ async function streamAnswer(req, res, user, message, sid) {
     emit({ type: "status", state: "generating_image" }); await sleep(900);
     const id = S.nextAtt++;
     FILES[id] = { filename: "ภาพที่สร้าง.png", content_type: "image/png", owner: user.id, body: png(512, 512, [16, 185, 129]), generated: true };
-    emit({ type: "delta", v: "สร้างรูปให้แล้วค่ะ" });
-    return done({ source: "image_gen", attachments: [meta(id)] }) || res.end();
+    startAnswer();
+    delta("สร้างรูปให้แล้วค่ะ");
+    done({ source: "image_gen", attachments: [meta(id)] });
+    return res.end();
   }
   if (message.includes("เอกสาร")) {
     emit({ type: "status", state: "agent_document" }); await sleep(900);
-    emit({ type: "delta", v: "ทำรายงานให้แล้วค่ะ\n\n**ตรวจไฟล์ก่อนส่ง**\n- ✅ รายงานยอดขาย.docx — 2 หน้า, ตาราง 1" });
+    startAnswer();
+    delta("ทำรายงานให้แล้วค่ะ\n\n**ตรวจไฟล์ก่อนส่ง**\n- ✅ รายงานยอดขาย.docx — 2 หน้า, ตาราง 1");
     done({ source: "document", attachments: [meta(502), meta(503)] });
     return res.end();
   }
   const slow = message.includes("ช้า");
   const text = slow ? "คำตอบยาวที่ส่งมาช้า ๆ ".repeat(60) : message.includes("ตาราง") ? RICH_ANSWER : "ได้เลยค่ะ นี่คือคำตอบสำหรับคำถามของคุณ พร้อม **ตัวหนา** และรายการ:\n\n- ข้อหนึ่ง\n- ข้อสอง";
+  startAnswer();
   for (let i = 0; i < text.length && !closed; i += 4) {
-    emit({ type: "delta", v: text.slice(i, i + 4) });
+    delta(text.slice(i, i + 4));
     await sleep(slow ? 60 : 8);
   }
   if (!closed) {
@@ -268,7 +300,7 @@ const server = http.createServer(async (req, res) => {
   }
   if (/^\/chat\/sessions\/\d+\/export$/.test(path)) return send(res, 200, "q,a\n", "text/csv");
   if (path === "/chat/shared-sessions") return send(res, 200, [{ id: 301, title: "วิธีใช้เครื่องตัด", user_id: 5, username: "somchai", shared_token: "tok301", updated_at: null, message_count: 2 }]);
-  if (path === "/chat/shared/tok301") return send(res, 200, { messages: [{ id: 1, question: "เครื่องตัดใช้ยังไง", answer: "ปรับใบมีดก่อนเสมอ", source: "llm" }], mode: "normal" });
+  if (path === "/chat/shared/tok301") return send(res, 200, { messages: [{ id: 1, question: "เครื่องตัดใช้ยังไง", answer: "ปรับใบมีดก่อนเสมอ ดูคู่มือแนบค่ะ", source: "llm", attachments: [meta(511)] }], mode: "normal" });
   if (path === "/admin/chat-history") return user.role === "admin"
     ? send(res, 200, [{ id: 401, title: "แชทของพนักงาน A", user_id: 3, username: "staffA", created_at: "", updated_at: "", message_count: 1 }])
     : send(res, 403, { detail: "forbidden" });
@@ -287,8 +319,7 @@ const server = http.createServer(async (req, res) => {
   if (am) {
     const f = FILES[am[1]];
     if (!f || f.gone) return send(res, 404, { detail: "attachment not found" });
-    if (f.owner !== user.id && user.role !== "admin") return send(res, 403, { detail: "forbidden" });
-    if (f.owner !== user.id) return send(res, 403, { detail: "forbidden" }); // the mock: even admins can't open file 508
+    if (f.owner !== user.id && user.role !== "admin") return send(res, 403, { detail: "forbidden" }); // as the backend
     res.writeHead(200, { "Content-Type": f.content_type, "Access-Control-Allow-Origin": "*" });
     return res.end(f.body);
   }

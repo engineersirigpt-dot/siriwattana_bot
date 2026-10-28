@@ -146,7 +146,7 @@ function CodeBlock({ children, raw, lang }: { children: ReactNode; raw: string; 
           {copied ? "คัดลอกแล้ว" : "คัดลอก"}
         </button>
       </div>
-      <pre className="m-0 overflow-x-auto bg-white text-sm [&>code]:!bg-transparent [&>code]:block [&>code]:p-4">
+      <pre className="md-code m-0 overflow-x-auto bg-white text-sm dark:bg-[#0d1117] [&>code]:!bg-transparent [&>code]:block [&>code]:p-4">
         {children}
       </pre>
     </div>

@@ -77,7 +77,7 @@ test.describe("chat and streaming", () => {
     await expect(page.getByTestId("msg-bot").last()).toContainText("คำตอบ");
   });
 
-  test("หยุด keeps what arrived and says the answer was stopped", async ({ page }) => {
+  test("หยุด keeps what arrived, stays in its chat, and is still there after a reload", async ({ page }, testInfo) => {
     await page.getByLabel("ข้อความ").fill("ตอบช้า ๆ ยาว ๆ");
     await page.getByTestId("send").click();
     const bot = page.getByTestId("msg-bot").last();
@@ -87,6 +87,20 @@ test.describe("chat and streaming", () => {
     await expect(bot).toContainText("คำตอบยาวที่ส่งมาช้า"); // not wiped
     await expect(bot).toHaveAttribute("data-streaming", "0");
     await expect(page.getByTestId("send")).toBeVisible();
+    // the new chat got its id from the `session` event before the answer
+    await expect(page.getByRole("heading", { name: "ตอบช้า ๆ ยาว ๆ" })).toBeVisible();
+
+    await page.reload();
+    await openSession(page, testInfo, "ตอบช้า ๆ ยาว ๆ");
+    const saved = page.getByTestId("msg-bot").last();
+    await expect(saved).toContainText("คำตอบยาวที่ส่งมาช้า");
+    await expect(saved.getByTestId("stopped-note")).toBeVisible(); // the backend's note, shown as the note
+    await expect(saved).not.toContainText("หยุดก่อนตอบจบ");
+  });
+
+  test("a saved web answer still shows what was used after a reload", async ({ page }, testInfo) => {
+    await openSession(page, testInfo, "ขั้นตอนเบิกค่าเดินทาง 1");
+    await expect(page.getByTestId("msg-bot").last().getByTestId("step-chips")).toHaveText("ใช้ข้อมูลจากเว็บ");
   });
 
   test("image generation shows its status, then the picture", async ({ page }) => {
@@ -183,14 +197,27 @@ test.describe("files", () => {
     expect(dl.suggestedFilename()).toBe("ยอดขาย_Q1.xlsx");
   });
 
-  test("a file that's gone or not yours says so", async ({ page }) => {
+  test("a file that's gone says so; an admin may open another user's file", async ({ page }) => {
     const gone = page.getByTestId("file-card").filter({ hasText: "ไฟล์เก่า_หมดอายุ.xlsx" });
     await gone.getByRole("button", { name: /ดาวน์โหลด/ }).click();
     await expect(gone.getByRole("alert")).toHaveText(/ไฟล์นี้ไม่มีแล้ว/);
     const theirs = page.getByTestId("file-card").filter({ hasText: "ของคนอื่น.pptx" });
-    await theirs.getByRole("button", { name: /ดาวน์โหลด/ }).click();
-    await expect(theirs.getByRole("alert")).toHaveText(/ไม่มีสิทธิ์/);
+    const [dl] = await Promise.all([page.waitForEvent("download"), theirs.getByRole("button", { name: /ดาวน์โหลด/ }).click()]);
+    expect(dl.suggestedFilename()).toBe("ของคนอื่น.pptx");
+    await expect(theirs.getByRole("alert")).toHaveCount(0);
   });
+});
+
+test("staff: a teammate's file in a shared chat says it isn't theirs", async ({ page }, testInfo) => {
+  await resetMock(page, { ui: { 2: true } });
+  await signIn(page, "staff");
+  await page.goto("/chat");
+  await openNav(page, testInfo);
+  await page.getByRole("button", { name: /แชร์ร่วมกันในทีม/ }).click();
+  await page.getByTestId("session-row").filter({ hasText: "วิธีใช้เครื่องตัด" }).click();
+  const card = page.getByTestId("file-card").filter({ hasText: "คู่มือเครื่องตัด.pdf" });
+  await card.getByRole("button", { name: /ดาวน์โหลด/ }).click();
+  await expect(card.getByRole("alert")).toHaveText(/ไม่มีสิทธิ์/);
 });
 
 test("attaching files: typed chips, then cards on both sides", async ({ page }) => {
@@ -296,12 +323,30 @@ test("phone: drawer navigation, nothing overflows", async ({ page }, testInfo) =
   await expect(page.getByTestId("sidebar")).not.toBeInViewport();
 });
 
+test("phone: a chat's actions sit behind ⋯, so titles keep their width", async ({ page }, testInfo) => {
+  test.skip(!isMobile(testInfo), "touch layout");
+  await signIn(page);
+  await page.goto("/chat");
+  await openNav(page, testInfo);
+  const row = page.getByTestId("session-row").filter({ hasText: "แชทยาว 18 คำถามเรื่องการผลิต" });
+  await expect(row.getByRole("button", { name: "ลบ" })).toBeHidden();
+  const title = row.locator(".truncate");
+  expect(await title.evaluate((el) => el.scrollWidth <= el.clientWidth)).toBe(true); // not cut off
+  await row.getByTestId("row-menu").click();
+  const actions = page.getByTestId("row-actions");
+  await expect(actions.getByRole("button")).toHaveText(["บันทึกแชทนี้ไว้", "เปลี่ยนชื่อ", "ดาวน์โหลด CSV", "ลบ"]);
+  await actions.getByRole("button", { name: "เปลี่ยนชื่อ" }).click();
+  await expect(page.getByRole("dialog")).toBeVisible();
+  await expect(actions).toHaveCount(0); // closes after use
+});
+
 test("desktop and tablet: the sidebar stays put", async ({ page }, testInfo) => {
   test.skip(isMobile(testInfo), "desktop layout");
   await signIn(page);
   await page.goto("/chat");
   await expect(page.getByTestId("sidebar")).toBeInViewport();
   await expect(page.getByTestId("open-nav")).toBeHidden();
+  await expect(page.getByTestId("row-menu").first()).toBeHidden(); // a mouse gets hover icons instead
   await page.setViewportSize({ width: 820, height: 1180 }); // tablet portrait
   await expect(page.getByTestId("sidebar")).toBeInViewport();
   await expectNoHorizontalOverflow(page);

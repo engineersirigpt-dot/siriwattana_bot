@@ -77,6 +77,21 @@ body {
 }
 
 /* Shimmer sweep for the "creating image" placeholder (image generation). */
+/* V5 code blocks in dark mode: highlight.js "github-dark" colours over the
+   light github.css theme the page imports (more specific, so they win) */
+.dark .md-code :is(code, .hljs-subst) { color: #c9d1d9; }
+.dark .md-code .hljs-section { color: #1f6feb; }
+.dark .md-code .hljs-bullet { color: #f2cc60; }
+.dark .md-code .hljs-addition { color: #aff5b4; background: #033a16; }
+.dark .md-code .hljs-deletion { color: #ffdcd7; background: #67060c; }
+.dark .md-code :is(.hljs-doctag, .hljs-keyword, .hljs-template-tag, .hljs-template-variable, .hljs-type, .hljs-variable.language_) { color: #ff7b72; }
+.dark .md-code :is(.hljs-title, .hljs-title.class_, .hljs-title.function_) { color: #d2a8ff; }
+.dark .md-code :is(.hljs-attr, .hljs-attribute, .hljs-literal, .hljs-meta, .hljs-number, .hljs-operator, .hljs-variable, .hljs-selector-attr, .hljs-selector-class, .hljs-selector-id) { color: #79c0ff; }
+.dark .md-code :is(.hljs-regexp, .hljs-string) { color: #a5d6ff; }
+.dark .md-code :is(.hljs-built_in, .hljs-symbol) { color: #ffa657; }
+.dark .md-code :is(.hljs-comment, .hljs-code, .hljs-formula) { color: #8b949e; }
+.dark .md-code :is(.hljs-name, .hljs-quote, .hljs-selector-tag, .hljs-selector-pseudo) { color: #7ee787; }
+
 @keyframes shimmer {
   100% { transform: translateX(100%); }
 }

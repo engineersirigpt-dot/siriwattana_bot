@@ -25,15 +25,15 @@ const EXT: Record<string, FileKind> = {
 };
 
 const INFO: Record<FileKind, Omit<KindInfo, "kind">> = {
-  pdf: { label: "PDF", tile: "bg-red-100 text-red-700", preview: "pdf" },
-  word: { label: "Word", tile: "bg-blue-100 text-blue-700", preview: null },
-  excel: { label: "Excel", tile: "bg-green-100 text-green-700", preview: null },
-  csv: { label: "CSV", tile: "bg-emerald-100 text-emerald-700", preview: "csv" },
-  powerpoint: { label: "PowerPoint", tile: "bg-orange-100 text-orange-700", preview: null },
-  image: { label: "รูปภาพ", tile: "bg-purple-100 text-purple-700", preview: "image" },
-  text: { label: "ข้อความ", tile: "bg-slate-100 text-slate-700", preview: "text" },
-  audio: { label: "เสียง", tile: "bg-pink-100 text-pink-700", preview: null },
-  other: { label: "ไฟล์", tile: "bg-slate-100 text-slate-700", preview: null },
+  pdf: { label: "PDF", tile: "bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300", preview: "pdf" },
+  word: { label: "Word", tile: "bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300", preview: null },
+  excel: { label: "Excel", tile: "bg-green-100 text-green-700 dark:bg-green-900/40 dark:text-green-300", preview: null },
+  csv: { label: "CSV", tile: "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300", preview: "csv" },
+  powerpoint: { label: "PowerPoint", tile: "bg-orange-100 text-orange-700 dark:bg-orange-900/40 dark:text-orange-300", preview: null },
+  image: { label: "รูปภาพ", tile: "bg-purple-100 text-purple-700 dark:bg-purple-900/40 dark:text-purple-300", preview: "image" },
+  text: { label: "ข้อความ", tile: "bg-slate-100 text-slate-700 dark:bg-slate-700/60 dark:text-slate-200", preview: "text" },
+  audio: { label: "เสียง", tile: "bg-pink-100 text-pink-700 dark:bg-pink-900/40 dark:text-pink-300", preview: null },
+  other: { label: "ไฟล์", tile: "bg-slate-100 text-slate-700 dark:bg-slate-700/60 dark:text-slate-200", preview: null },
 };
 
 export function extensionOf(name: string): string {
