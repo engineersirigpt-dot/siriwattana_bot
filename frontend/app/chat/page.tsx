@@ -72,6 +72,9 @@ type Attachment = {
   filename: string;
   content_type: string;
   size_bytes: number;
+  // Produced by the bot (Code Interpreter chart/workbook) → shown on the bot
+  // bubble; false/absent = the user's own upload.
+  generated?: boolean;
   // Local blob URL for an optimistic (not-yet-persisted) upload, so it previews
   // immediately without fetching from the server.
   previewUrl?: string;
@@ -98,6 +101,9 @@ type Msg = {
   // True while the backend is generating an image for this (streaming) bubble,
   // so we can show a "creating image" placeholder instead of the thinking dots.
   generatingImage?: boolean;
+  // Agent V1 progress ("กำลังค้นข้อมูลจากเว็บ…") shown in place of "กำลังคิด…"
+  // while the agent runs tools before its first answer token.
+  agentStatus?: string;
   // True while this bot bubble is being streamed token-by-token. Drives the
   // "กำลังคิด…" indicator (when still empty) and the live cursor.
   streaming?: boolean;
@@ -250,8 +256,34 @@ function hasMarkdownTable(text: string): boolean {
 const PROOFREAD_RE =
   /คำผิด|พิมพ์ผิด|สะกดผิด|เขียนผิด|ตัวสะกด|การสะกด|ตรวจ(?:ทาน|อักษร|ภาษา|คำ)|พิสูจน์อักษร|ไวยากรณ์|proof\s*-?\s*read|typo|spell|grammar/i;
 
+// Agent V1 tool-progress statuses streamed by /chat/stream (backend agent.py).
+const AGENT_STATUS_LABELS: Record<string, string> = {
+  agent_searching: "กำลังค้นข้อมูลจากเว็บ…",
+  agent_reading: "กำลังอ่านลิงก์…",
+  agent_coding: "กำลังคำนวณ/วิเคราะห์ข้อมูลด้วย Python…",
+  agent_writing: "กำลังเรียบเรียงคำตอบ…",
+};
+
 function isProofreading(msg: Msg | undefined): boolean {
   return msg?.role === "user" && !!msg.attachments?.length && PROOFREAD_RE.test(msg.text);
+}
+
+const SPREADSHEET_RE = /\.(xlsx|xls|csv)$/i;
+
+function isImageSource(source: string | undefined): boolean {
+  return source === "image_gen" || source === "image_edit";
+}
+
+function hasSpreadsheet(msg: Msg | undefined): boolean {
+  return msg?.role === "user" && !!msg.attachments?.some((a) => SPREADSHEET_RE.test(a.filename));
+}
+
+// Split a saved row's attachments: the user's uploads stay on their bubble;
+// bot output (generated images, Code Interpreter files) goes on the answer.
+function splitAttachments(source: string | undefined, atts: Attachment[] | undefined) {
+  const all = atts ?? [];
+  if (source === "image_gen" || source === "image_edit") return { user: [], bot: all };
+  return { user: all.filter((a) => !a.generated), bot: all.filter((a) => a.generated) };
 }
 
 
@@ -479,13 +511,13 @@ export default function ChatPage() {
     const result: Msg[] = [];
     for (const m of loaded) {
       // Attachments live on the chat_history row (which holds both Q and A).
-      // For AI-generated images the attachment is the bot's OUTPUT, so it
-      // belongs on the bot bubble; everything else is a user upload.
-      const isBotImage = m.source === "image_gen" || m.source === "image_edit";
+      // Bot output (AI images, Code Interpreter files) belongs on the bot
+      // bubble; everything else is a user upload.
+      const atts = splitAttachments(m.source, m.attachments);
       result.push({
         role: "user",
         text: m.question,
-        attachments: isBotImage ? [] : m.attachments ?? [],
+        attachments: atts.user,
       });
       result.push({
         role: "bot",
@@ -496,7 +528,7 @@ export default function ChatPage() {
         question: m.question,
         id: m.id,
         myVote: m.my_vote ?? null,
-        attachments: isBotImage ? m.attachments ?? [] : undefined,
+        attachments: atts.bot.length > 0 ? atts.bot : undefined,
       });
     }
     return result;
@@ -1014,15 +1046,17 @@ export default function ChatPage() {
         // For an image RESULT (generate/edit from an attached reference), the
         // returned attachment is the produced image → it belongs on the bot
         // bubble. Keep the user's optimistic upload on their own bubble.
-        // Otherwise (normal file upload) echo the persisted attachments there.
+        // Otherwise (normal file upload) echo the persisted uploads there;
+        // Code Interpreter outputs (generated) go on the bot bubble.
         const isImageResult =
           res.source === "image_edit" || res.source === "image_gen";
+        const atts = splitAttachments(res.source, res.attachments);
         if (
           filesToSend.length > 0 &&
           copy[lastUserIdx]?.role === "user" &&
           !isImageResult
         ) {
-          copy[lastUserIdx] = { ...copy[lastUserIdx], attachments: res.attachments };
+          copy[lastUserIdx] = { ...copy[lastUserIdx], attachments: atts.user };
         }
         copy.push({
           role: "bot",
@@ -1033,7 +1067,7 @@ export default function ChatPage() {
           question: text,
           id: res.message_id ?? undefined,
           myVote: null,
-          attachments: isImageResult ? res.attachments : undefined,
+          attachments: atts.bot.length > 0 ? atts.bot : undefined,
         });
         newBotIdx = copy.length - 1;
         return copy;
@@ -1106,6 +1140,7 @@ export default function ChatPage() {
             // Backend signals the slow image-generation step — swap the
             // "thinking" dots for a "creating image" placeholder.
             if (state === "generating_image") patchLastBot({ generatingImage: true });
+            else if (AGENT_STATUS_LABELS[state]) patchLastBot({ agentStatus: AGENT_STATUS_LABELS[state] });
           },
           onDone: (meta) => {
             patchLastBot({
@@ -1115,6 +1150,7 @@ export default function ChatPage() {
               id: meta.message_id ?? undefined,
               streaming: false,
               generatingImage: false,
+              agentStatus: undefined,
               // AI-generated image (source="image_gen") rides along on the
               // done event so it renders inline on this bot bubble.
               ...(meta.attachments && meta.attachments.length > 0
@@ -1869,12 +1905,8 @@ export default function ChatPage() {
                     className="w-9 h-9 rounded-full object-cover flex-shrink-0 shadow-sm border border-line"
                   />
                   <div className="flex-1 min-w-0 pt-1">
-                    {m.attachments && m.attachments.length > 0 && (
-                      <AttachmentList
-                        attachments={m.attachments}
-                        onUserBubble={false}
-                        large={m.source === "image_gen" || m.source === "image_edit"}
-                      />
+                    {m.attachments && m.attachments.length > 0 && isImageSource(m.source) && (
+                      <AttachmentList attachments={m.attachments} onUserBubble={false} large />
                     )}
                     {isStreaming && m.generatingImage ? (
                       // Image generation is running (10-20s) — ChatGPT-style
@@ -1905,7 +1937,7 @@ export default function ChatPage() {
                           className="w-2 h-2 bg-purple-400 rounded-full animate-bounce"
                           style={{ animationDelay: "300ms" }}
                         />
-                        <span className="ml-2 text-sm text-muted">กำลังคิด…</span>
+                        <span className="ml-2 text-sm text-muted">{m.agentStatus ?? "กำลังคิด…"}</span>
                       </div>
                     ) : isTyping ? (
                       // Fake char-by-char typing (used by the file/non-stream
@@ -1920,6 +1952,13 @@ export default function ChatPage() {
                       // so tables/bold/headings look formatted as they stream in
                       // (instead of raw "| col | col |" text).
                       (m.text || isStreaming) && <MarkdownMessage text={shownText} />
+                    )}
+                    {/* Code Interpreter output (charts, Excel/CSV) follows the
+                        answer that explains it. */}
+                    {m.attachments && m.attachments.length > 0 && !isImageSource(m.source) && !animating && (
+                      <div className="mt-3">
+                        <AttachmentList attachments={m.attachments} onUserBubble={false} large />
+                      </div>
                     )}
                     {/* Export controls — only when the bot's reply is an
                         export offer (user asked "ขอ PDF" etc.). Buttons act
@@ -2046,7 +2085,9 @@ export default function ChatPage() {
                   <span className="ml-2 text-sm text-muted">
                     {isProofreading(messages[messages.length - 1])
                       ? "กำลังตรวจคำผิดอย่างละเอียด (อาจใช้เวลา 1–2 นาที)…"
-                      : "กำลังคิด…"}
+                      : hasSpreadsheet(messages[messages.length - 1])
+                        ? "กำลังอ่านและวิเคราะห์ไฟล์ (อาจใช้เวลาสักครู่)…"
+                        : "กำลังคิด…"}
                   </span>
                 </div>
               </div>
@@ -2873,15 +2914,29 @@ function AttachmentFile({
   attachment: Attachment;
   onUserBubble: boolean;
 }) {
+  const isSheet = SPREADSHEET_RE.test(attachment.filename);
   async function open() {
     if (attachment.id < 0) return;
     const u = await fetchAttachmentBlobUrl(attachment.id);
-    window.open(u, "_blank");
+    // PDFs/plain text preview in a tab; anything else (Excel/CSV…) would
+    // download under the blob's random name, so save it under its real name.
+    const ct = attachment.content_type || "";
+    if (ct === "application/pdf" || (ct.startsWith("text/") && !isSheet)) {
+      window.open(u, "_blank");
+      return;
+    }
+    const a = document.createElement("a");
+    a.href = u;
+    a.download = attachment.filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
   }
   return (
     <button
       type="button"
       onClick={open}
+      title={isSheet ? "ดาวน์โหลด" : undefined}
       className={`flex items-center gap-2 px-3 py-2 rounded-xl text-sm transition-all max-w-[260px] ${
         onUserBubble
           ? "bg-white/15 hover:bg-white/25 text-white"
@@ -2890,15 +2945,20 @@ function AttachmentFile({
     >
       <div
         className={`w-9 h-9 rounded-md flex items-center justify-center flex-shrink-0 ${
-          onUserBubble ? "bg-white/20" : "bg-purple-100 text-purple-600"
+          onUserBubble
+            ? "bg-white/20"
+            : isSheet
+              ? "bg-green-100 text-green-700"
+              : "bg-purple-100 text-purple-600"
         }`}
       >
-        <FileText size={18} />
+        {isSheet ? <Sheet size={18} /> : <FileText size={18} />}
       </div>
       <div className="min-w-0 text-left">
         <p className="truncate">{attachment.filename}</p>
         <p className={`text-xs ${onUserBubble ? "text-white/70" : "text-muted"}`}>
           {(attachment.size_bytes / 1024).toFixed(0)} KB
+          {attachment.generated && " · กดเพื่อดาวน์โหลด"}
         </p>
       </div>
     </button>

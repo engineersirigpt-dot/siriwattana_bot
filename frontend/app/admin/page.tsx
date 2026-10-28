@@ -926,6 +926,9 @@ const SOURCE_LABELS: Record<string, string> = {
   llm: "AI ทั่วไป",
   blocked: "ถูกบล็อก",
   export_offer: "ขอ export",
+  agent: "Agent (ค้นเว็บ/อ่านลิงก์)",
+  code: "Code Interpreter (Python)",
+  code_limit: "Code Interpreter (ครบโควต้า)",
 };
 
 function MetricCard({

@@ -132,6 +132,32 @@ def save_chat_message_pg(
     return message_id
 
 
+def add_usage_to_message_pg(message_id: int, usage: dict) -> None:
+    """Add extra OpenAI usage for a turn to its already-saved row — the safety
+    classifiers, which run before the answer exists. ADDS to the answer's
+    tokens/cost (never replaces); model_used stays the answer model and is
+    filled only when the row had none (a no-LLM reply like an export offer)."""
+    with get_pg_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE chat_history
+                SET prompt_tokens = COALESCE(prompt_tokens, 0) + %s,
+                    completion_tokens = COALESCE(completion_tokens, 0) + %s,
+                    cost_usd = COALESCE(cost_usd, 0) + %s,
+                    model_used = COALESCE(model_used, %s)
+                WHERE id = %s
+                """,
+                (
+                    usage.get("prompt_tokens", 0),
+                    usage.get("completion_tokens", 0),
+                    usage.get("cost_usd", 0.0),
+                    usage.get("model_used"),
+                    message_id,
+                ),
+            )
+
+
 def purge_unsaved_sessions_pg(user_id: int, keep: int) -> tuple[int, list[str]]:
     """
     Delete unsaved chat_sessions for `user_id` beyond the `keep` most-recent.
@@ -253,7 +279,7 @@ def get_session_messages_pg(session_id: int, user_id: int) -> dict | None:
                        a.id, a.filename, a.content_type, a.size_bytes,
                        h.knowledge_id, k.source_file,
                        COALESCE(h.is_forked, false) AS is_forked,
-                       af.vote
+                       af.vote, COALESCE(a.generated, false)
                 FROM chat_history h
                 LEFT JOIN attachments a ON a.message_id = h.id
                 LEFT JOIN knowledge k ON k.id = h.knowledge_id
@@ -290,6 +316,7 @@ def get_session_messages_pg(session_id: int, user_id: int) -> dict | None:
                 "filename": row[6],
                 "content_type": row[7],
                 "size_bytes": row[8],
+                "generated": bool(row[13]),
             })
 
     # turn_count for the per-session quota UI. Excludes:
@@ -763,16 +790,18 @@ def save_attachment_pg(
     size_bytes: int,
     file_path: str,
     extracted_text: str | None = None,
+    generated: bool = False,
 ) -> dict:
     with get_pg_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """
                 INSERT INTO attachments
-                    (message_id, user_id, filename, content_type, size_bytes, file_path, extracted_text)
+                    (message_id, user_id, filename, content_type, size_bytes, file_path,
+                     extracted_text, generated)
                 VALUES
-                    (%s, %s, %s, %s, %s, %s, %s)
-                RETURNING id, filename, content_type, size_bytes
+                    (%s, %s, %s, %s, %s, %s, %s, %s)
+                RETURNING id, filename, content_type, size_bytes, generated
                 """,
                 (
                     message_id,
@@ -782,6 +811,7 @@ def save_attachment_pg(
                     size_bytes,
                     file_path,
                     extracted_text,
+                    generated,
                 ),
             )
             row = cur.fetchone()
@@ -791,6 +821,7 @@ def save_attachment_pg(
         "filename": row[1],
         "content_type": row[2],
         "size_bytes": row[3],
+        "generated": row[4],
     }
 
 
@@ -928,3 +959,47 @@ def get_attachment_pg(aid: int) -> dict | None:
         "content_type": row[2],
         "file_path": row[3],
     }
+
+
+def count_code_runs_today_pg(user_id: int) -> int:
+    """Code Interpreter answers this user got today (Asia/Bangkok) — the daily cap."""
+    with get_pg_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT COUNT(*) FROM chat_history
+                WHERE user_id = %s AND source = 'code'
+                  AND (asked_at AT TIME ZONE 'Asia/Bangkok')::date
+                      = (now() AT TIME ZONE 'Asia/Bangkok')::date
+                """,
+                (user_id,),
+            )
+            return int(cur.fetchone()[0])
+
+
+def get_session_spreadsheets_pg(session_id: int, user_id: int, limit: int = 5) -> list[dict]:
+    """Excel/CSV files the user uploaded earlier in this session (newest first),
+    so a follow-up ("แล้วเดือนไหนขายดีสุด") can be computed on the same data.
+    Only when the session, the message and the file all belong to `user_id` —
+    never another user's chat, a forked copy of a shared chat, or bot output."""
+    with get_pg_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT a.filename, a.file_path
+                FROM attachments a
+                JOIN chat_history h ON h.id = a.message_id
+                JOIN chat_sessions s ON s.id = h.session_id
+                WHERE h.session_id = %s
+                  AND s.user_id = %s AND h.user_id = %s AND a.user_id = %s
+                  AND NOT COALESCE(h.is_forked, false)
+                  AND NOT COALESCE(a.generated, false)
+                  AND (lower(a.filename) LIKE '%%.xlsx' OR lower(a.filename) LIKE '%%.xls'
+                       OR lower(a.filename) LIKE '%%.csv')
+                ORDER BY a.id DESC
+                LIMIT %s
+                """,
+                (session_id, user_id, user_id, user_id, limit),
+            )
+            rows = cur.fetchall()
+    return [{"filename": r[0], "file_path": r[1]} for r in rows]

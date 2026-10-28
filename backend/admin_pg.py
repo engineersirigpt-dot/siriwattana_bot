@@ -116,12 +116,18 @@ def _safety_counts_from_audit(since: datetime, until: datetime) -> dict:
             "blocked_by_category": {},
             "failed_logins": 0,
             "login_blocked_disabled": 0,
+            "blocked_classifier_usd": 0.0,
+            "blocked_classifier_by_model": {},
         }
 
     blocked = 0
     by_category: dict[str, int] = {}
     failed = 0
     blocked_disabled = 0
+    # Safety-classifier cost of BLOCKED questions — they save no chat_history
+    # row, so main.py records the cost on the block's audit entry instead.
+    blocked_usd = 0.0
+    blocked_by_model: dict[str, dict] = {}
 
     try:
         with open(path, "r", encoding="utf-8") as f:
@@ -139,6 +145,13 @@ def _safety_counts_from_audit(since: datetime, until: datetime) -> dict:
                 if ts < since or ts >= until:
                     continue
                 action = e.get("action") or ""
+                cost = (e.get("detail") or {}).get("cost_usd")
+                if cost and action in ("sensitive_blocked_classifier", "sensitive_blocked_stream"):
+                    model = (e.get("detail") or {}).get("model") or "unknown"
+                    blocked_usd += float(cost)
+                    m = blocked_by_model.setdefault(model, {"cost_usd": 0.0, "rows": 0})
+                    m["cost_usd"] += float(cost)
+                    m["rows"] += 1
                 if action == "sensitive_blocked":
                     blocked += 1
                     kw = (e.get("detail") or {}).get("matched_keyword") or "OTHER"
@@ -159,7 +172,20 @@ def _safety_counts_from_audit(since: datetime, until: datetime) -> dict:
         "blocked_by_category": by_category,
         "failed_logins": failed,
         "login_blocked_disabled": blocked_disabled,
+        "blocked_classifier_usd": round(blocked_usd, 6),
+        "blocked_classifier_by_model": blocked_by_model,
     }
+
+
+def _merge_blocked_classifier_cost(by_model: list[dict], blocked_by_model: dict) -> list[dict]:
+    """Add blocked-question classifier cost into the per-model rollup (same
+    model → one slice), keeping it sorted by cost."""
+    merged = {m["model"]: dict(m) for m in by_model}
+    for model, extra in blocked_by_model.items():
+        m = merged.setdefault(model, {"model": model, "cost_usd": 0.0, "rows": 0})
+        m["cost_usd"] += extra["cost_usd"]
+        m["rows"] += extra["rows"]
+    return sorted(merged.values(), key=lambda m: -m["cost_usd"])
 
 
 def _delta_pct(curr: float, prev: float) -> float | None:
@@ -410,12 +436,17 @@ def admin_dashboard_overview_pg(range_label: str = "7d") -> dict:
 
     # Combine: per-row real cost + flat-rate for legacy NULL rows. As more
     # rows accrue real data, the "estimated_usd" share shrinks naturally.
+    # Blocked questions' classifier cost comes from the audit log (no row).
+    safety = _safety_counts_from_audit(since, until)
+    prev_blocked_usd = _safety_counts_from_audit(prev_since, prev_until)["blocked_classifier_usd"]
+    curr_real += safety["blocked_classifier_usd"]
+    prev_real += prev_blocked_usd
+    by_model = _merge_blocked_classifier_cost(by_model, safety["blocked_classifier_by_model"])
     curr_estimated = curr_legacy_rows * COST_USD_PER_QUESTION
     prev_estimated = prev_legacy_rows * COST_USD_PER_QUESTION
     cost_usd = curr_real + curr_estimated
     prev_cost_usd = prev_real + prev_estimated
 
-    safety = _safety_counts_from_audit(since, until)
     translation = _translation_cost(since, until)
 
     return {
