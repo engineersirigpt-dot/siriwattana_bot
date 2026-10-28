@@ -18,9 +18,12 @@ Design:
 
 import json
 import os
+import threading
 from functools import lru_cache
 
 from openai import OpenAI
+
+from pricing import estimate_cost_usd
 
 
 # Reuse the existing classifier model env var so admins can swap models in one place.
@@ -84,12 +87,30 @@ CLASSIFIER_PROMPT = (
 
 _client: OpenAI | None = None
 
+# Usage of the API call made in THIS thread by _classify_cached, if any. Set
+# only when the cached function body really runs, so a cache hit records no
+# cost; thread-local because requests classify concurrently.
+_last_call = threading.local()
+
 
 def _get_client() -> OpenAI:
     global _client
     if _client is None:
         _client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
     return _client
+
+
+def _usage_of(res) -> dict:
+    """One call's usage, shaped for llm.accumulate_usage."""
+    u = getattr(res, "usage", None)
+    p = int(getattr(u, "prompt_tokens", 0) or 0)
+    c = int(getattr(u, "completion_tokens", 0) or 0)
+    return {
+        "model": CLASSIFIER_MODEL,
+        "prompt_tokens": p,
+        "completion_tokens": c,
+        "cost_usd": estimate_cost_usd(CLASSIFIER_MODEL, p, c),
+    }
 
 
 @lru_cache(maxsize=512)
@@ -106,6 +127,7 @@ def _classify_cached(question_normalized: str) -> tuple[str, str]:
             max_tokens=80,
             response_format={"type": "json_object"},
         )
+        _last_call.usage = _usage_of(res)
         text = (res.choices[0].message.content or "").strip()
         data = json.loads(text)
     except Exception:
@@ -144,11 +166,14 @@ FILE_SCOPE_PROMPT = (
 )
 
 
-def classify_file_question(question: str, files: list[dict]) -> tuple[bool, str]:
+def classify_file_question(
+    question: str, files: list[dict], usages: list[dict] | None = None
+) -> tuple[bool, str]:
     """Is this flagged question really analysis of the user's own attached
     spreadsheets? `files` = outlines [{file, sheets: {name: [headers]}}].
     Returns (allowed, reason). Fails CLOSED — it grants an exemption, unlike
-    classify_sensitivity which fails open."""
+    classify_sensitivity which fails open. The call's usage is appended to
+    `usages` for cost tracking."""
     payload = json.dumps(
         {"question": (question or "")[:500], "attached_files": files}, ensure_ascii=False
     )[:6000]
@@ -163,6 +188,8 @@ def classify_file_question(question: str, files: list[dict]) -> tuple[bool, str]
             max_tokens=100,
             response_format={"type": "json_object"},
         )
+        if usages is not None:
+            usages.append(_usage_of(res))
         data = json.loads((res.choices[0].message.content or "").strip())
     except Exception:
         return False, "classifier_error"
@@ -170,7 +197,7 @@ def classify_file_question(question: str, files: list[dict]) -> tuple[bool, str]
     return verdict == "FILE", str(data.get("reason", "")).strip()[:200]
 
 
-def classify_sensitivity(question: str) -> tuple[str, str] | None:
+def classify_sensitivity(question: str, usages: list[dict] | None = None) -> tuple[str, str] | None:
     """
     Classify whether `question` is asking for sensitive info.
 
@@ -179,6 +206,9 @@ def classify_sensitivity(question: str) -> tuple[str, str] | None:
         None if the question is OK or the classifier hit an error.
 
     Categories: PII | PAYROLL | PRICING | CUSTOMER | CREDENTIALS | BANKING
+
+    When an API call was made (not a cache hit), its usage is appended to
+    `usages` for cost tracking.
     """
     if not question or not question.strip():
         return None
@@ -186,7 +216,10 @@ def classify_sensitivity(question: str) -> tuple[str, str] | None:
     # Normalize for cache hit rate: lowercase, collapse whitespace, truncate.
     normalized = " ".join(question.strip().lower().split())[:500]
 
+    _last_call.usage = None
     category, reason = _classify_cached(normalized)
+    if usages is not None and _last_call.usage:
+        usages.append(_last_call.usage)
 
     if category == "OK":
         return None

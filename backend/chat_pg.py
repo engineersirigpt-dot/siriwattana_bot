@@ -132,6 +132,32 @@ def save_chat_message_pg(
     return message_id
 
 
+def add_usage_to_message_pg(message_id: int, usage: dict) -> None:
+    """Add extra OpenAI usage for a turn to its already-saved row — the safety
+    classifiers, which run before the answer exists. ADDS to the answer's
+    tokens/cost (never replaces); model_used stays the answer model and is
+    filled only when the row had none (a no-LLM reply like an export offer)."""
+    with get_pg_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE chat_history
+                SET prompt_tokens = COALESCE(prompt_tokens, 0) + %s,
+                    completion_tokens = COALESCE(completion_tokens, 0) + %s,
+                    cost_usd = COALESCE(cost_usd, 0) + %s,
+                    model_used = COALESCE(model_used, %s)
+                WHERE id = %s
+                """,
+                (
+                    usage.get("prompt_tokens", 0),
+                    usage.get("completion_tokens", 0),
+                    usage.get("cost_usd", 0.0),
+                    usage.get("model_used"),
+                    message_id,
+                ),
+            )
+
+
 def purge_unsaved_sessions_pg(user_id: int, keep: int) -> tuple[int, list[str]]:
     """
     Delete unsaved chat_sessions for `user_id` beyond the `keep` most-recent.

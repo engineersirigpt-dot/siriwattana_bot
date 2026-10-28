@@ -58,15 +58,25 @@ CI_OUTPUT_TYPES = {
     ".csv": "text/csv",
 }
 _THAI_FONT = Path(__file__).parent / "fonts" / "Sarabun-Regular.ttf"
+# Our reviewed helpers (summary-row detection), uploaded with every request.
+_SANDBOX_TOOLS = Path(__file__).parent / "sirigpt_tools.py"
 
 _INSTRUCTIONS = (
     "คุณคือนักวิเคราะห์ข้อมูลของบริษัท ศิริวัฒนาอินเตอร์พริ้นท์ ที่ใช้ Python ใน sandbox (python tool)\n"
     "- คำนวณด้วย Python จริงทุกครั้ง ห้ามคิดเลขในหัว ตรวจผลให้สมเหตุสมผลก่อนตอบ\n"
     "- ไฟล์ที่ผู้ใช้แนบอยู่ใน /mnt/data — Excel ให้อ่านทุก sheet (pd.read_excel(path, sheet_name=None)) "
     "ตรวจหัวตาราง ชนิดข้อมูล และแถวว่างก่อนคำนวณ\n"
-    "- แถวสรุปในตาราง (เช่น 'รวม', 'ยอดรวม', 'Total', 'Subtotal', 'Grand Total' หรือแถวที่ค่าเท่ากับผลรวม"
-    "ของแถวอื่น) ต้องตัดออกก่อนรวม ห้ามนับซ้ำ — หลังคำนวณให้เทียบกับแถวรวมที่มีในไฟล์ (ถ้ามี) ว่าตรงกัน "
-    "และบอกผู้ใช้ว่าตัดแถวใดออก\n"
+    "- แถวสรุป (subtotal/ยอดรวม) ต้องตัดออกก่อนรวมเพื่อไม่นับซ้ำ — อาจอยู่บนสุด กลางตาราง หรือท้ายตาราง "
+    "ตัดสินด้วยตัวเลข ไม่ใช่ด้วยคำ: ใช้ฟังก์ชันที่เตรียมไว้เท่านั้น ห้ามเขียนตรรกะตัดแถวเอง: "
+    "import sys; sys.path.append('/mnt/data'); from sirigpt_tools import drop_summary_rows แล้วทำทีละชีต "
+    "clean, removed = drop_summary_rows(df, '<คอลัมน์ยอดเงิน>') รวมยอดจาก clean เท่านั้น และบอกผู้ใช้ว่าตัดแถวใดออก "
+    "(removed)\n"
+    "- คำว่า 'รวม'/'total' ที่เป็นข้อมูลจริง (เช่น สินค้า 'งานรวมเล่ม' ลูกค้า 'บริษัท รวมมิตร...') ห้ามตัด — "
+    "ห้ามกรองแถวด้วยการค้นคำว่า 'รวม' ในข้อความ\n"
+    "- ค้นหาชื่อลูกค้า/สินค้าแบบยืดหยุ่น ด้วยฟังก์ชันที่เตรียมไว้เท่านั้น ห้ามเทียบชื่อด้วย == เอง: "
+    "from sirigpt_tools import find_rows, closest_names แล้ว rows = find_rows(clean, '<คอลัมน์>', '<ชื่อ>') "
+    "(ไม่สนช่องว่าง ตัวพิมพ์ และคำว่า บริษัท ร้าน หจก. จำกัด) บอกผู้ใช้ว่านับรวมชื่อใดบ้าง — ถ้าไม่พบ "
+    "ให้แสดง closest_names(clean, '<คอลัมน์>', '<ชื่อ>') ก่อนสรุปว่าไม่มี\n"
     "- ถ้าแต่ละ sheet แทนช่วงเวลาหรือกลุ่ม (เช่น ชื่อ sheet เป็นเดือน สาขา แผนก) และไม่มีคอลัมน์วันที่/กลุ่ม "
     "ให้ใช้ชื่อ sheet เป็นกลุ่มนั้นตามลำดับใน workbook\n"
     "- กราฟ: matplotlib บันทึกเป็น PNG ที่ /mnt/data (dpi=150) ถ้ามีตัวอักษรไทยให้ลงทะเบียนฟอนต์ "
@@ -189,7 +199,8 @@ def run_code(
     uploaded: list[str] = []
     container_id = None
     try:
-        for name, path in input_files + ([(_THAI_FONT.name, str(_THAI_FONT))] if _THAI_FONT.exists() else []):
+        support = [(p.name, str(p)) for p in (_THAI_FONT, _SANDBOX_TOOLS) if p.exists()]
+        for name, path in input_files + support:
             with open(path, "rb") as fh:
                 uploaded.append(client.files.create(file=(name, fh), purpose="user_data").id)
 

@@ -1239,9 +1239,34 @@ _FILE_SCOPE_NEVER = {"CREDENTIALS"}
 FILE_SCOPE_FAILED = "ขออภัยค่ะ วิเคราะห์ข้อมูลจากไฟล์ไม่สำเร็จ กรุณาลองถามใหม่อีกครั้ง หรือแนบไฟล์ใหม่ค่ะ"
 
 
+def _safety_cost_detail(usages: list[dict]) -> dict:
+    """Audit-log fields for the classifier calls of a BLOCKED question. A
+    blocked question saves no chat_history row (by design), so its audit entry
+    is where that cost is recorded; the dashboard adds it to the total."""
+    if not usages:
+        return {}
+    u = accumulate_usage(*usages)
+    return {
+        "cost_usd": u["cost_usd"], "model": u["model_used"],
+        "prompt_tokens": u["prompt_tokens"], "completion_tokens": u["completion_tokens"],
+    }
+
+
+def _charge_safety_usage(message_id: int | None, usages: list[dict]) -> None:
+    """Add this turn's classifier usage to the row the turn saved — once: the
+    list is emptied so a second call can't count it again."""
+    if not usages or not message_id or not use_postgres_auth():
+        return
+    from chat_pg import add_usage_to_message_pg
+
+    usage = accumulate_usage(*usages)
+    usages.clear()
+    add_usage_to_message_pg(message_id, usage)
+
+
 def _file_scope_allowed(
     user: dict, question: str, session_id: int | None, mode: str, category: str,
-    request: Request, uploads: list[dict] | None = None,
+    request: Request, uploads: list[dict] | None = None, usages: list[dict] | None = None,
 ) -> bool:
     """The AI classifier flagged `question`. Allow it ONLY as analysis of the
     user's own spreadsheets: Code Interpreter on for this user and under its
@@ -1263,7 +1288,7 @@ def _file_scope_allowed(
     if not files:
         return False
     allowed, reason = classify_file_question(
-        question, [code_interpreter.outline(name, path) for name, path in files]
+        question, [code_interpreter.outline(name, path) for name, path in files], usages
     )
     audit_log(
         "sensitive_file_scope_allowed" if allowed else "sensitive_file_scope_denied",
@@ -1809,6 +1834,25 @@ async def chat(
     files: list[UploadFile] = File([]),
     user: dict = Depends(current_user),
 ):
+    # The safety classifiers run before any answer exists. Their usage is
+    # collected here and added once to whichever row the turn saved (a blocked
+    # turn saves none — its audit entry carries the cost instead).
+    safety_usages: list[dict] = []
+    res = await _chat_turn(request, message, session_id, mode, files, user, safety_usages)
+    if safety_usages and res.message_id:
+        await run_in_threadpool(_charge_safety_usage, res.message_id, safety_usages)
+    return res
+
+
+async def _chat_turn(
+    request: Request,
+    message: str,
+    session_id: int | None,
+    mode: str,
+    files: list[UploadFile],
+    user: dict,
+    safety_usages: list[dict],
+) -> ChatResponse:
     question = message.strip()
     company_only = mode == "company"
 
@@ -1851,14 +1895,15 @@ async def chat(
     file_scoped = False
     pending_scope: str | None = None
     if question and not _is_linsip_query(question, session_id, user):
-        classification = classify_sensitivity(question)
+        classification = classify_sensitivity(question, safety_usages)
         if classification is not None:
             category, reason = classification
             if files and any(code_interpreter.is_ci_input(f.filename or "") for f in files) \
                     and _agent_tools(user, mode)[1]:
                 pending_scope = category
             elif not files and await run_in_threadpool(
-                _file_scope_allowed, user, question, session_id, mode, category, request
+                _file_scope_allowed, user, question, session_id, mode, category, request,
+                usages=safety_usages,
             ):
                 file_scoped = True
             else:
@@ -1870,6 +1915,7 @@ async def chat(
                         "reason": reason,
                         "message_length": len(question),
                         "had_files": bool(files),
+                        **_safety_cost_detail(safety_usages),
                     },
                     request=request,
                 )
@@ -1939,6 +1985,7 @@ async def chat(
             "ได้ค่ะ! กดปุ่มด้านล่างเพื่อบันทึกคำตอบล่าสุดเป็น PDF — "
             "หรือดาวน์โหลดเอกสารต้นฉบับ (ถ้ามี) ก็ได้ค่ะ"
         )
+        offer_mid: int | None = None
         if use_postgres_auth():
             from chat_pg import ensure_session_pg, save_chat_message_pg
 
@@ -1948,7 +1995,7 @@ async def chat(
                 first_question=question,
                 mode=mode,
             )
-            save_chat_message_pg(
+            offer_mid = save_chat_message_pg(
                 user_id=user["id"],
                 session_id=sid,
                 question=question,
@@ -1982,6 +2029,7 @@ async def chat(
             session_id=sid,
             session_title=stitle,
             attachments=[],
+            message_id=offer_mid,
         )
 
     # Image EDIT intent (postgres only — mirrors /chat/stream).
@@ -2134,7 +2182,8 @@ async def chat(
         # of that file (decided now that its sheets/headers can be read).
         if pending_scope is not None:
             if not await run_in_threadpool(
-                _file_scope_allowed, user, question, session_id, mode, pending_scope, request, saved_files
+                _file_scope_allowed, user, question, session_id, mode, pending_scope, request, saved_files,
+                usages=safety_usages,
             ):
                 for sf in saved_files:  # blocked → keep nothing of this upload
                     try:
@@ -2144,7 +2193,10 @@ async def chat(
                 audit_log(
                     "sensitive_blocked_classifier",
                     user=user,
-                    detail={"category": pending_scope, "message_length": len(question), "had_files": True},
+                    detail={
+                        "category": pending_scope, "message_length": len(question), "had_files": True,
+                        **_safety_cost_detail(safety_usages),
+                    },
                     request=request,
                 )
                 return ChatResponse(
@@ -2670,7 +2722,13 @@ async def chat_stream(
     if not question:
         raise HTTPException(400, "empty message")
 
+    # Safety-classifier usage for this question: added once to the row named by
+    # the final `done` event (whatever step saved it). Blocked → audit entry.
+    safety_usages: list[dict] = []
+
     def ev(obj: dict) -> str:
+        if obj.get("type") == "done" and obj.get("message_id"):
+            _charge_safety_usage(obj["message_id"], safety_usages)
         return json.dumps(obj, ensure_ascii=False) + "\n"
 
     def gen():
@@ -2689,15 +2747,15 @@ async def chat_stream(
             keyword_hit = is_sensitive(question) is not None
             flagged = None
             if not keyword_hit and not _is_linsip_query(question, session_id, user):
-                flagged = classify_sensitivity(question)
+                flagged = classify_sensitivity(question, safety_usages)
             file_scoped = flagged is not None and _file_scope_allowed(
-                user, question, session_id, mode, flagged[0], request
+                user, question, session_id, mode, flagged[0], request, usages=safety_usages
             )
             if keyword_hit or (flagged is not None and not file_scoped):
                 audit_log(
                     "sensitive_blocked_stream",
                     user=user,
-                    detail={"message_length": len(question)},
+                    detail={"message_length": len(question), **_safety_cost_detail(safety_usages)},
                     request=request,
                 )
                 yield ev({"type": "delta", "v": BLOCKED_RESPONSE})

@@ -109,10 +109,10 @@ def test_run_code_uses_isolated_sandbox_and_cleans_up(xlsx):
     tool = kw["tools"][0]
     assert tool["type"] == "code_interpreter"
     assert tool["container"]["network_policy"] == {"type": "disabled"}
-    assert tool["container"]["file_ids"] == ["file-1", "file-2"]       # workbook + Thai font
+    assert tool["container"]["file_ids"] == ["file-1", "file-2", "file-3"]  # workbook + font + tools
     assert kw["tool_choice"] == "required" and kw["max_tool_calls"] == ci.CI_MAX_TOOL_CALLS
     assert kw["timeout"] == ci.CI_TIMEOUT_S
-    assert [u[0] for u in client.uploaded] == ["sales.xlsx", "Sarabun-Regular.ttf"]
+    assert [u[0] for u in client.uploaded] == ["sales.xlsx", "Sarabun-Regular.ttf", "sirigpt_tools.py"]
     assert all(u[1] == "user_data" for u in client.uploaded)
 
     assert "sandbox:" not in r.answer and "summary.xlsx" in r.answer
@@ -128,7 +128,7 @@ def test_run_code_uses_isolated_sandbox_and_cleans_up(xlsx):
     )
     # nothing left behind on OpenAI's side
     assert client.deleted_containers == ["cntr_1"]
-    assert client.deleted_files == ["file-1", "file-2"]
+    assert client.deleted_files == ["file-1", "file-2", "file-3"]
 
 
 def test_run_code_cleans_up_when_api_fails(xlsx):
@@ -137,7 +137,7 @@ def test_run_code_cleans_up_when_api_fails(xlsx):
     with pytest.raises(ci.CIError):
         ci.run_code("q", "t", [], [xlsx], client=client)
 
-    assert client.deleted_files == ["file-1", "file-2"]
+    assert client.deleted_files == ["file-1", "file-2", "file-3"]
 
 
 @pytest.mark.parametrize("name", ["report.pdf", "evil.exe", "photo.png", "noext"])
@@ -182,6 +182,19 @@ def test_timeout_never_exceeds_the_ci_limit():
     ci.run_code("q", "t", [], [], client=client, timeout=10_000)
     ci.run_code("q", "t", [], [], client=client, timeout=30)
     assert [r["timeout"] for r in client.requests] == [ci.CI_TIMEOUT_S, 30]
+
+
+def test_instructions_send_summary_rows_to_the_tested_helper():
+    # The model kept re-inventing summary-row logic (double counts / dropped
+    # real "รวม" rows in ~1 of 5 runs); it must now call our helper, whose
+    # behaviour is pinned in tests/test_sirigpt_tools.py.
+    text = ci._INSTRUCTIONS
+    assert "from sirigpt_tools import drop_summary_rows" in text
+    assert "ห้ามเขียนตรรกะตัดแถวเอง" in text
+    assert "ห้ามกรองแถวด้วยการค้นคำว่า 'รวม'" in text
+    assert "ค้นหาชื่อลูกค้า/สินค้าแบบยืดหยุ่น" in text
+    assert "from sirigpt_tools import find_rows, closest_names" in text   # no hand-written == matching
+    assert ci._SANDBOX_TOOLS.exists()
 
 
 def test_safe_name_strips_paths():
@@ -563,8 +576,11 @@ def scope(monkeypatch, glue, tmp_path):
     glue.state.session_sheets = [{"filename": "sales.xlsx", "file_path": path}]
     seen = NS(calls=[], verdict=True)
 
-    def fake_classify(question, files):
+    def fake_classify(question, files, usages=None):
         seen.calls.append((question, files))
+        if usages is not None:
+            usages.append({"model": "gpt-4o-mini", "prompt_tokens": 300, "completion_tokens": 20,
+                           "cost_usd": 0.0001})
         return seen.verdict, "r"
 
     monkeypatch.setattr(sc, "classify_file_question", fake_classify)
@@ -642,17 +658,28 @@ def test_scoped_turn_without_code_answer_sends_nothing(monkeypatch, glue):
 
 # ── wiring of the safety gate in /chat/stream ───────────────────────────────
 
+CLS_USAGE = {"model": "gpt-4o-mini", "prompt_tokens": 1000, "completion_tokens": 30, "cost_usd": 0.000168}
+SCOPE_USAGE = {"model": "gpt-4o-mini", "prompt_tokens": 500, "completion_tokens": 20, "cost_usd": 0.000087}
+
+
 def _stream(monkeypatch, *, keyword=None, flagged=None, scope_ok=False, user=ADMIN):
-    calls = NS(scope=[], scoped_turn=[], normal=False)
+    calls = NS(scope=[], scoped_turn=[], normal=False, charged=[], audits=[])
     monkeypatch.setattr(main, "use_postgres_auth", lambda: True)
     monkeypatch.setattr(main, "is_sensitive", lambda q: keyword)
-    monkeypatch.setattr(main, "classify_sensitivity", lambda q: flagged)
+
+    def fake_classify(q, usages=None):
+        usages.append(dict(CLS_USAGE))       # a real (non-cached) classifier call
+        return flagged
+
+    monkeypatch.setattr(main, "classify_sensitivity", fake_classify)
     monkeypatch.setattr(main, "_is_linsip_query", lambda *a: False)
     monkeypatch.setattr(main, "_count_session_turns", lambda sid: 1)
-    monkeypatch.setattr(main, "audit_log", lambda *a, **kw: None)
+    monkeypatch.setattr(main, "audit_log", lambda action, **kw: calls.audits.append((action, kw.get("detail"))))
+    monkeypatch.setattr(chat_pg, "add_usage_to_message_pg", lambda mid, u: calls.charged.append((mid, u)))
 
-    def fake_scope(*a, **kw):
+    def fake_scope(*a, usages=None, **kw):
         calls.scope.append(a)
+        usages.append(dict(SCOPE_USAGE))     # the second, file-aware check
         return scope_ok
 
     def fake_turn(u, q, sid, mode, req, uploads=None, scoped=False):
@@ -694,3 +721,147 @@ def test_stream_keyword_hit_is_blocked_without_any_exemption(monkeypatch):
     events, calls = _stream(monkeypatch, keyword="เงินเดือน", scope_ok=True)
     assert events[-1]["source"] == "blocked"
     assert calls.scope == [] and calls.scoped_turn == []
+    assert calls.charged == []
+    assert "cost_usd" not in calls.audits[0][1]                      # no classifier ran → no cost
+
+
+# ---------------------------------------------------------------------------
+# Cost tracking for the safety classifiers (layer 2 + the file-scope check)
+# ---------------------------------------------------------------------------
+
+class _FakeCls(_FakeChat):
+    def _create(self, **kw):
+        self.sent.append(kw)
+        if self._error:
+            raise self._error
+        return NS(choices=[NS(message=NS(content=self._content))],
+                  usage=NS(prompt_tokens=1200, completion_tokens=25))
+
+
+def test_classifier_records_usage_only_for_a_real_call(monkeypatch):
+    fake = _FakeCls('{"category": "OK", "reason": ""}')
+    monkeypatch.setattr(sc, "_get_client", lambda: fake)
+    sc._classify_cached.cache_clear()
+    first, second = [], []
+
+    r1 = sc.classify_sensitivity("ยอดขายเดือนนี้ทดสอบ cost", first)
+    r2 = sc.classify_sensitivity("ยอดขายเดือนนี้ทดสอบ   COST", second)   # same after normalising → cache hit
+
+    assert r1 is None and r2 is None                                 # verdict logic unchanged
+    assert len(fake.sent) == 1
+    assert first == [{"model": sc.CLASSIFIER_MODEL, "prompt_tokens": 1200, "completion_tokens": 25,
+                      "cost_usd": sc.estimate_cost_usd(sc.CLASSIFIER_MODEL, 1200, 25)}]
+    assert second == []                                              # cache hit costs nothing
+    sc._classify_cached.cache_clear()
+
+
+def test_classifier_error_records_no_usage_and_still_fails_open(monkeypatch):
+    monkeypatch.setattr(sc, "_get_client", lambda: _FakeCls(error=TimeoutError()))
+    sc._classify_cached.cache_clear()
+    usages = []
+    assert sc.classify_sensitivity("คำถามทดสอบ error", usages) is None
+    assert usages == []
+    sc._classify_cached.cache_clear()
+
+
+def test_flagged_verdict_unchanged_when_tracking_usage(monkeypatch):
+    monkeypatch.setattr(sc, "_get_client", lambda: _FakeCls('{"category": "PII", "reason": "ชื่อพนักงาน"}'))
+    sc._classify_cached.cache_clear()
+    usages = []
+    assert sc.classify_sensitivity("ข้อมูลส่วนตัวของคุณทดสอบ", usages) == ("PII", "ชื่อพนักงาน")
+    assert len(usages) == 1
+    sc._classify_cached.cache_clear()
+
+
+def test_file_question_classifier_records_usage(monkeypatch):
+    monkeypatch.setattr(sc, "_get_client", lambda: _FakeCls('{"verdict": "FILE"}'))
+    usages = []
+    assert sc.classify_file_question("q", [], usages)[0] is True
+    assert usages[0]["prompt_tokens"] == 1200
+
+
+def test_charge_adds_once_and_never_twice(monkeypatch):
+    monkeypatch.setattr(main, "use_postgres_auth", lambda: True)
+    charged = []
+    monkeypatch.setattr(chat_pg, "add_usage_to_message_pg", lambda mid, u: charged.append((mid, u)))
+    usages = [dict(CLS_USAGE), dict(SCOPE_USAGE)]
+
+    main._charge_safety_usage(9, usages)
+    main._charge_safety_usage(9, usages)                            # e.g. a repeated done event
+
+    assert len(charged) == 1
+    mid, u = charged[0]
+    assert mid == 9 and u["prompt_tokens"] == 1500 and u["completion_tokens"] == 50
+    assert u["cost_usd"] == pytest.approx(0.000255)
+    main._charge_safety_usage(None, [dict(CLS_USAGE)])               # nothing saved → nothing charged
+    assert len(charged) == 1
+
+
+def test_stream_answered_turn_charges_both_classifiers_to_its_row(monkeypatch):
+    events, calls = _stream(monkeypatch, flagged=("CUSTOMER", "r"), scope_ok=True)
+    assert events[-1]["message_id"] == 9
+    assert len(calls.charged) == 1
+    mid, usage = calls.charged[0]
+    assert mid == 9 and usage["prompt_tokens"] == 1500                # layer 2 + file-scope check
+    assert usage["cost_usd"] == pytest.approx(CLS_USAGE["cost_usd"] + SCOPE_USAGE["cost_usd"])
+
+
+def test_stream_blocked_turn_puts_cost_on_audit_entry(monkeypatch):
+    events, calls = _stream(monkeypatch, flagged=("PII", "r"), scope_ok=False)
+    assert events[-1]["source"] == "blocked" and calls.charged == []
+    action, detail = calls.audits[-1]
+    assert action == "sensitive_blocked_stream"
+    assert detail["cost_usd"] == pytest.approx(CLS_USAGE["cost_usd"] + SCOPE_USAGE["cost_usd"])
+    assert detail["model"] == "gpt-4o-mini" and detail["prompt_tokens"] == 1500
+
+
+def test_chat_endpoint_charges_classifier_to_the_saved_row(monkeypatch):
+    charged, saved = [], []
+    monkeypatch.setattr(main, "use_postgres_auth", lambda: True)
+    monkeypatch.setattr(main, "is_sensitive", lambda q: None)
+    monkeypatch.setattr(main, "classify_sensitivity", lambda q, usages=None: usages.append(dict(CLS_USAGE)))
+    monkeypatch.setattr(main, "_is_linsip_query", lambda *a: False)
+    monkeypatch.setattr(main, "_is_export_request", lambda q: True)  # a turn that saves a no-LLM row
+    monkeypatch.setattr(main, "audit_log", lambda *a, **kw: None)
+    monkeypatch.setattr(chat_pg, "ensure_session_pg", lambda **kw: (7, "t"))
+    monkeypatch.setattr(chat_pg, "save_chat_message_pg", lambda **kw: saved.append(kw) or 42)
+    monkeypatch.setattr(chat_pg, "add_usage_to_message_pg", lambda mid, u: charged.append((mid, u)))
+    main.app.dependency_overrides[main.current_user] = lambda: ADMIN
+    try:
+        r = TestClient(main.app).post("/chat", data={"message": "ขอเป็น PDF"})
+    finally:
+        main.app.dependency_overrides.pop(main.current_user, None)
+
+    assert r.status_code == 200 and r.json()["message_id"] == 42
+    assert len(saved) == 1 and len(charged) == 1
+    assert charged[0][0] == 42 and charged[0][1]["cost_usd"] == pytest.approx(CLS_USAGE["cost_usd"])
+
+
+def test_dashboard_adds_blocked_classifier_cost_from_audit(monkeypatch, tmp_path):
+    import admin_pg
+    import audit
+    from datetime import datetime, timezone
+
+    log = tmp_path / "audit.log"
+    rows = [
+        ("2026-10-27T03:00:00Z", "sensitive_blocked_classifier", {"cost_usd": 0.0002, "model": "gpt-4o-mini"}),
+        ("2026-10-27T04:00:00Z", "sensitive_blocked_stream", {"cost_usd": 0.0003, "model": "gpt-4o-mini"}),
+        ("2026-10-27T05:00:00Z", "sensitive_blocked", {"matched_keyword": "เงินเดือน"}),        # no classifier
+        ("2026-10-27T06:00:00Z", "sensitive_file_scope_denied", {"cost_usd": 9.9}),           # not a block event
+        ("2026-10-20T06:00:00Z", "sensitive_blocked_stream", {"cost_usd": 0.5, "model": "x"}),  # out of range
+    ]
+    log.write_text("\n".join(json.dumps({"timestamp": t, "action": a, "detail": d}) for t, a, d in rows),
+                   encoding="utf-8")
+    monkeypatch.setattr(audit, "AUDIT_LOG_PATH", log)
+
+    s = admin_pg._safety_counts_from_audit(
+        datetime(2026, 10, 27, tzinfo=timezone.utc), datetime(2026, 10, 28, tzinfo=timezone.utc))
+
+    assert s["blocked_classifier_usd"] == pytest.approx(0.0005)
+    assert s["blocked_classifier_by_model"] == {"gpt-4o-mini": {"cost_usd": pytest.approx(0.0005), "rows": 2}}
+    # existing block counts unchanged (they never included sensitive_blocked_stream)
+    assert s["blocked_total"] == 2
+    merged = admin_pg._merge_blocked_classifier_cost(
+        [{"model": "gpt-5", "cost_usd": 1.0, "rows": 10}, {"model": "gpt-4o-mini", "cost_usd": 0.1, "rows": 4}],
+        s["blocked_classifier_by_model"])
+    assert merged[1] == {"model": "gpt-4o-mini", "cost_usd": pytest.approx(0.1005), "rows": 6}

@@ -170,6 +170,56 @@ def defects_csv() -> bytes:
     return buf.getvalue().encode("utf-8-sig")
 
 
+# Summary rows at the TOP (ม.ค.), in the MIDDLE as group subtotals + a grand
+# total at the bottom (ก.พ.), and at the BOTTOM in English (มี.ค.) — plus real
+# data that contains "รวม" (the bookbinding service "งานรวมเล่ม", customers
+# "รวมมิตร…", "ร้านรวมใจ") which must be KEPT. Correct: 30,400 / 26,000 /
+# 22,000 → 78,400; งานรวมเล่ม 10,000+4,000+3,200 = 17,200; รวมมิตร 7,500.
+TRICKY_SHEETS = {
+    "ม.ค.": [
+        ["รายการ", "จำนวน", "ราคาต่อหน่วย", "ยอดขาย"],
+        ["ยอดรวม", None, None, 30400],
+        ["งานรวมเล่ม", 20, 500, 10000],
+        ["กล่องลูกฟูก", 10, 1200, 12000],
+        ["ฉลากสินค้า", 16, 525, 8400],
+    ],
+    "ก.พ.": [
+        ["รายการ", "จำนวน", "ราคาต่อหน่วย", "ยอดขาย"],
+        ["กล่องลูกฟูก", 5, 1200, 6000],
+        ["งานรวมเล่ม", 8, 500, 4000],
+        ["รวมกลุ่ม A", None, None, 10000],
+        ["แคตตาล็อก", 3, 2300, 6900],
+        ["ฉลากสินค้า", 20, 455, 9100],
+        ["รวมกลุ่ม B", None, None, 16000],
+        ["รวมทั้งสิ้น", None, None, 26000],
+    ],
+    "มี.ค.": [
+        ["ลูกค้า", "รายการ", "ยอดขาย"],
+        ["บริษัท รวมมิตรการพิมพ์ จำกัด", "โบรชัวร์", 7500],
+        ["ร้านรวมใจ", "งานรวมเล่ม", 3200],
+        ["บริษัท สยามแพ็ค จำกัด", "กล่องลูกฟูก", 11300],
+        ["Total", None, 22000],
+    ],
+}
+TRICKY_MONTHS = (30400, 26000, 22000)
+TRICKY_TOTAL = 78400
+# Wrong totals: double counts (156,800 all; 60,800 ม.ค.; 78,000 ก.พ.; 44,000 มี.ค.)
+# or dropping every row that contains "รวม" (20,400 ม.ค.; 11,300 มี.ค.; 53,700 all)
+TRICKY_WRONG = (156800, 60800, 78000, 44000, 20400, 11300, 53700)
+
+
+def tricky_xlsx() -> bytes:
+    wb = openpyxl.Workbook()
+    wb.remove(wb.active)
+    for title, rows in TRICKY_SHEETS.items():
+        ws = wb.create_sheet(title)
+        for r in rows:
+            ws.append(r)
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
 def customers_csv() -> bytes:   # top customer: บริษัท ก = 16,000
     rows = [("บริษัท ก", 12000), ("บริษัท ข", 8500), ("บริษัท ก", 4000), ("บริษัท ค", 15000)]
     buf = io.StringIO()
@@ -264,6 +314,26 @@ def phase_on(tok: dict[str, str]) -> None:
         ok = ("ม.ค" in res["answer"] or "มกราคม" in res["answer"]) and "19050" in digits(res["answer"])
         record("excel_follow_up_same_session", ok, res)
     guarded("excel_follow_up_same_session", run_follow_up)
+
+    # 3a) Summary rows at the top/middle/bottom + real data containing "รวม"
+    def run_tricky_totals():
+        res = upload_chat(trial, "รวมยอดขายทุก sheet ให้หน่อย แยกตามเดือน และยอดรวมทั้งหมด",
+                          [("sales_q1.xlsx", tricky_xlsx(), XLSX)])
+        state["tricky"] = res
+        d = digits(res["answer"])
+        wrong = [w for w in TRICKY_WRONG if str(w) in d]
+        ok = res["source"] == "code" and str(TRICKY_TOTAL) in d \
+            and all(str(v) in d for v in TRICKY_MONTHS) and not wrong
+        record("excel_summary_rows_top_middle_bottom", ok, res, wrong_totals_seen=wrong)
+    guarded("excel_summary_rows_top_middle_bottom", run_tricky_totals)
+
+    def run_tricky_real_rows():
+        sid = state["tricky"]["session_id"]
+        res = stream_chat(trial, "งานรวมเล่มทั้งไตรมาสขายได้กี่บาท และบริษัท รวมมิตรการพิมพ์ จำกัด "
+                                 "มียอดเท่าไหร่", sid)
+        d = digits(res["answer"])
+        record("excel_real_rows_with_word_ruam_kept", "17200" in d and "7500" in d, res)
+    guarded("excel_real_rows_with_word_ruam_kept", run_tricky_real_rows)
 
     # 3b) Security around the file-scoped exemption
     def run_unauthorized_in_file_chat():
