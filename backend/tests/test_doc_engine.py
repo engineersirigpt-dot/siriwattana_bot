@@ -323,8 +323,34 @@ def test_make_document_offered_only_when_enabled():
     assert "make_document" not in tool_names(client.calls[0])
     client = FakeClient(resp(call("use_standard_answer")))
     run(client, doc_enabled=True, web_enabled=False)
-    assert tool_names(client.calls[0]) == ["make_document", "use_standard_answer"]
-    assert "make_document:" in client.calls[0]["instructions"]
+    assert tool_names(client.calls[0]) == ["make_document", "ask_user", "use_standard_answer"]
+    assert "make_document:" in client.calls[0]["instructions"] and "ask_user:" in client.calls[0]["instructions"]
+    client = FakeClient(resp(call("use_standard_answer")))
+    run(client, ci_enabled=True)
+    assert "ask_user" not in tool_names(client.calls[0])                # only with the document engine
+
+
+def test_missing_data_is_asked_for_instead_of_a_zero_template(fake_doc):
+    # On prod, "ทำรายงาน Word สรุปยอดขาย 3 เดือน" with no figures came back as a
+    # template full of 0s and an empty chart.
+    q = "ขอยอดขายรายเดือนของทั้ง 3 เดือนครับ พิมพ์ตัวเลขมาหรือแนบไฟล์ Excel ได้ หรือจะเอาแม่แบบเปล่าก็ได้"
+    client = FakeClient(resp(call("ask_user", question=q)))
+    events = run(client, doc_enabled=True)
+    kind, result = events[-1]
+    assert kind == "done" and result.answer == q and ("delta", q) in events
+    assert fake_doc == [] and not result.used_document and len(client.calls) == 1   # router call only
+    assert result.tools == [{"tool": "ask_user", "arg": q, "ok": True}]
+
+
+def test_ask_user_next_to_a_document_call_is_ignored(fake_doc):
+    client = FakeClient(resp(call("make_document", task="t", format="pptx"), call("ask_user", question="?")))
+    kind, result = run(client, doc_enabled=True)[-1]
+    assert kind == "done" and result.used_document and len(client.calls) == 1
+
+
+def test_instructions_forbid_made_up_or_zero_data():
+    assert "ห้ามใส่ 0 แทนข้อมูลที่ไม่มี" in de._INSTRUCTIONS
+    assert "ห้ามทำกราฟจากข้อมูลว่าง" in de._INSTRUCTIONS
 
 
 def test_make_document_runs_and_answers_directly(fake_doc):
@@ -415,6 +441,19 @@ def test_uploaded_document_goes_to_the_engine(monkeypatch, docs_on):
     assert [n for n, _ in seen[0]["doc_files"]] == ["คู่มือ.pdf"]
     assert [a["filename"] for a in docs_on.attached][0] == "คู่มือ.pdf"   # the upload is kept too
     assert out[-1][1]["source"] == "document"
+
+
+def test_question_back_about_an_upload_is_the_answer(monkeypatch, docs_on):
+    # "ทำรายงานยอดขายตามแม่แบบนี้" with no figures: asking beats the plain file answer.
+    _, _, size, path = att.save_generated_file(b"docx", "แม่แบบ.docx", "x")
+    up = [{"filename": "แม่แบบ.docx", "content_type": DOCX_CT, "size": size, "file_path": path}]
+    q = "ขอยอดขายแต่ละเดือนด้วยครับ"
+    res = agent.AgentResult(answer=q, steps=1, tools=[{"tool": "ask_user", "arg": q, "ok": True}],
+                            usage=[{"model": "gpt-5-mini", "prompt_tokens": 900, "completion_tokens": 40,
+                                    "cost_usd": 0.0003}])
+    out = _turn(monkeypatch, [("delta", q), ("done", res)], [], question="ทำรายงานยอดขายตามแม่แบบนี้", uploads=up)
+    assert out[-1][0] != "fallback" and out[-1][1]["source"] == "agent"
+    assert docs_on.saved[0]["answer"].startswith(q)
 
 
 def test_daily_cap_is_shared_with_code_interpreter(monkeypatch, docs_on):
