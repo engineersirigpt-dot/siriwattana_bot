@@ -432,6 +432,58 @@ def init_pg_schema() -> None:
                 """
             )
 
+            # V4.1 model routing: how each chat answer was routed and how long
+            # it took (NULL for rows from other features / before V4).
+            cur.execute(
+                """
+                ALTER TABLE ai_usage_log
+                ADD COLUMN IF NOT EXISTS route TEXT,
+                ADD COLUMN IF NOT EXISTS route_reason TEXT,
+                ADD COLUMN IF NOT EXISTS reasoning_effort TEXT,
+                ADD COLUMN IF NOT EXISTS latency_ms INT,
+                ADD COLUMN IF NOT EXISTS first_token_ms INT;
+                """
+            )
+
+            # V4.2 context: rolling summary of the turns that left the recent
+            # window (context_manager.py). summary_upto = last folded message id.
+            cur.execute(
+                """
+                ALTER TABLE chat_sessions
+                ADD COLUMN IF NOT EXISTS context_summary TEXT,
+                ADD COLUMN IF NOT EXISTS summary_upto BIGINT;
+                """
+            )
+
+            # V4.2 long-term memory (memory.py): saved only on the user's own
+            # command; every query is by user_id. Settings row = consent / pause.
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS user_memories (
+                    id BIGSERIAL PRIMARY KEY,
+                    user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    content TEXT NOT NULL,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    source_session_id BIGINT
+                );
+                """
+            )
+            cur.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_user_memories_user
+                ON user_memories(user_id, id);
+                """
+            )
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS user_memory_settings (
+                    user_id BIGINT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+                    enabled BOOLEAN NOT NULL DEFAULT false,
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                );
+                """
+            )
+
 
 def smoke_test_pg() -> None:
     init_pg_schema()

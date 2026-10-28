@@ -45,6 +45,18 @@ type UsageReport = {
   })[];
   features: (Sums & { feature: string; label: string })[];
   models: (Sums & { model: string })[];
+  // V4.1 model routing — chat answers by route / model / effort (usage_log.build_routing)
+  routing?: {
+    route: string;
+    label: string;
+    model: string;
+    reasoning_effort: string;
+    requests: number;
+    avg_latency_ms: number | null;
+    avg_first_token_ms: number | null;
+    cost_thb: number;
+    avg_cost_thb: number;
+  }[];
 };
 
 type Preset = "month" | "3m" | "6m" | "year";
@@ -306,6 +318,23 @@ function UsageReportView({ data }: { data: UsageReport }) {
           rows={data.models.map((m) => [m.model, fmtInt(m.requests), fmtTokens(m.total_tokens), fmtThb(m.cost_thb)])}
         />
       </div>
+
+      {!!data.routing?.length && (
+        <Table
+          title="การเลือกโมเดลของแชททั่วไป (Smart Routing) — เทียบกับแบบเดิม"
+          head={["เส้นทาง", "โมเดล", "Effort", "ครั้ง", "เวลาเฉลี่ย", "คำแรก", "฿/ครั้ง", "฿ รวม"]}
+          rows={data.routing.map((r) => [
+            r.label,
+            r.model,
+            r.reasoning_effort,
+            fmtInt(r.requests),
+            r.avg_latency_ms == null ? "-" : `${(r.avg_latency_ms / 1000).toFixed(1)} วิ`,
+            r.avg_first_token_ms == null ? "-" : `${(r.avg_first_token_ms / 1000).toFixed(1)} วิ`,
+            r.avg_cost_thb.toFixed(3),
+            fmtThb(r.cost_thb),
+          ])}
+        />
+      )}
     </>
   );
 }

@@ -37,6 +37,7 @@ _FEATURE_OF_SOURCE = {
     "web": "web_search", "url": "read_link", "agent": "agent",
     "code": "code_interpreter", "code_limit": "code_interpreter", "document": "document_engine",
     "linsip": "linsip",
+    "memory_scoped": "chat",      # V4.2: a question about the user, answered from their memory
 }
 FEATURE_LABELS = {
     "chat": "แชททั่วไป / ฐานความรู้",
@@ -50,6 +51,7 @@ FEATURE_LABELS = {
     "linsip": "ค้นงาน linsip",
     "translation": "แปลเอกสาร",
     "safety": "ตัวตรวจข้อมูลอ่อนไหว",
+    "context": "สรุปบริบทแชทยาว",
 }
 
 
@@ -79,12 +81,16 @@ def insert_usage(
         INSERT INTO ai_usage_log
             (created_at, user_id, username, feature, source, model,
              prompt_tokens, completion_tokens, cost_usd,
-             session_id, message_id, ref, backfilled)
+             session_id, message_id, ref, backfilled,
+             route, route_reason, reasoning_effort, latency_ms, first_token_ms)
         VALUES (COALESCE(%s, now()), %s, (SELECT username FROM users WHERE id = %s), %s, %s, %s,
-                %s, %s, %s, %s, %s, %s, %s)
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """,
         (created_at, user_id, user_id, feature, source, model, p, c, cost,
-         session_id, message_id, ref, backfilled),
+         session_id, message_id, ref, backfilled,
+         # V4.1: set on chat answers (model_router / main._route_stats)
+         usage.get("route"), usage.get("route_reason"), usage.get("reasoning_effort"),
+         usage.get("latency_ms"), usage.get("first_token_ms")),
     )
 
 
@@ -122,8 +128,41 @@ def log_usage_pg(
 
 def _is_request(feature: str, source: str | None) -> bool:
     """A user request. The safety classifiers of an ANSWERED turn are an add-on
-    to that request; a BLOCKED turn is a request of its own."""
+    to that request; a BLOCKED turn is a request of its own. A long chat's
+    context summary (V4.2) is always an add-on."""
+    if feature == "context":
+        return False
     return feature != "safety" or source == "blocked"
+
+
+ROUTE_LABELS = {
+    "legacy": "เดิม (ตัวจัดหมวด AI)",
+    "light": "เบา — ทักทาย/ขอบคุณ",
+    "standard": "มาตรฐาน",
+    "calc": "คำนวณ",
+    "deep": "วิเคราะห์เชิงลึก",
+}
+
+
+def build_routing(rows: list[dict], usd_to_thb: float = USD_TO_THB) -> list[dict]:
+    """V4.1 model-routing stats per (route, model, effort). Pure — unit-tested.
+    rows: [{route, model, reasoning_effort, n, latency_ms_sum, latency_n,
+            first_token_ms_sum, first_token_n, prompt_tokens, completion_tokens, cost_usd}]"""
+    out = []
+    for r in rows:
+        n = int(r["n"])
+        cost = float(r["cost_usd"] or 0)
+        out.append({
+            "route": r["route"], "label": ROUTE_LABELS.get(r["route"], r["route"]),
+            "model": r.get("model") or "(ไม่ระบุ)", "reasoning_effort": r.get("reasoning_effort") or "-",
+            "requests": n,
+            "avg_latency_ms": round(r["latency_ms_sum"] / r["latency_n"]) if r.get("latency_n") else None,
+            "avg_first_token_ms": round(r["first_token_ms_sum"] / r["first_token_n"]) if r.get("first_token_n") else None,
+            "prompt_tokens": int(r["prompt_tokens"] or 0), "completion_tokens": int(r["completion_tokens"] or 0),
+            "cost_usd": round(cost, 6), "cost_thb": round(cost * usd_to_thb, 2),
+            "avg_cost_thb": round(cost * usd_to_thb / n, 4) if n else 0.0,
+        })
+    return sorted(out, key=lambda x: (x["route"] != "legacy", -x["requests"]))
 
 
 def months_between(since: date, until: date) -> list[str]:
@@ -252,7 +291,23 @@ def usage_report_pg(since: date, until: date, seat_usd: float) -> dict:
         keys = ("month", "user_id", "username", "feature", "source", "model", "n",
                 "prompt_tokens", "completion_tokens", "cost_usd")
         rows = [dict(zip(keys, r)) for r in cur.fetchall()]
-    return build_report(rows, since=since, until=until, seat_usd=seat_usd)
+        cur.execute(
+            f"""
+            SELECT route, model, reasoning_effort, count(*),
+                   sum(latency_ms), count(latency_ms), sum(first_token_ms), count(first_token_ms),
+                   sum(prompt_tokens), sum(completion_tokens), sum(cost_usd)
+            FROM ai_usage_log
+            WHERE {_RANGE_SQL} AND route IS NOT NULL
+            GROUP BY 1, 2, 3
+            """,
+            (since, until),
+        )
+        rkeys = ("route", "model", "reasoning_effort", "n", "latency_ms_sum", "latency_n",
+                 "first_token_ms_sum", "first_token_n", "prompt_tokens", "completion_tokens", "cost_usd")
+        routing = [dict(zip(rkeys, r)) for r in cur.fetchall()]
+    report = build_report(rows, since=since, until=until, seat_usd=seat_usd)
+    report["routing"] = build_routing(routing, report["usd_to_thb"])
+    return report
 
 
 def usage_rows_pg(since: date, until: date, limit: int = RAW_EXPORT_LIMIT) -> list[tuple]:
@@ -337,6 +392,14 @@ def build_usage_xlsx(report: dict, raw_rows: list[tuple]) -> bytes:
     sheet("ตามโมเดล", ["โมเดล", "คำขอ", "Token ขาเข้า", "Token ขาออก", "ค่าใช้จ่าย (USD)", "ค่าใช้จ่าย (บาท)"],
           [[m["model"], m["requests"], m["prompt_tokens"], m["completion_tokens"], m["cost_usd"], m["cost_thb"]]
            for m in report["models"]])
+    if report.get("routing"):
+        sheet("การเลือกโมเดล", ["เส้นทาง", "โมเดล", "Reasoning effort", "คำขอ", "เวลาเฉลี่ย (ms)",
+                                "คำแรกเฉลี่ย (ms)", "Token ขาเข้า", "Token ขาออก", "ค่าใช้จ่าย (บาท)",
+                                "เฉลี่ยต่อคำขอ (บาท)"],
+              [[r["label"], r["model"], r["reasoning_effort"], r["requests"], r["avg_latency_ms"],
+                r["avg_first_token_ms"], r["prompt_tokens"], r["completion_tokens"], r["cost_thb"],
+                r["avg_cost_thb"]] for r in report["routing"]],
+              [26, 16, 16, 10, 16, 16, 14, 14, 16, 18])
     sheet("รายการทั้งหมด", ["เวลา", "ผู้ใช้", "ฟีเจอร์", "ประเภท", "โมเดล", "Token ขาเข้า", "Token ขาออก",
                             "ค่าใช้จ่าย (USD)", "ค่าใช้จ่าย (บาท)", "ข้อมูลย้อนหลัง"],
           [[ts.replace(tzinfo=None) if hasattr(ts, "replace") else ts, user,

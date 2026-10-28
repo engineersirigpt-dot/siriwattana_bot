@@ -307,6 +307,50 @@ export async function shareSession(
   };
 }
 
+// ── V4.2 long-term memory (the user's own; available only when MEMORY_MODE is on) ──
+export type MemoryItem = { id: number; content: string; created_at: string | null };
+export type MemoryState = {
+  available: boolean;
+  enabled: boolean;
+  items: MemoryItem[];
+  limit: number;
+};
+
+export function getMemory(): Promise<MemoryState> {
+  return api<MemoryState>("/memory");
+}
+
+// Throws an Error whose message is the server's Thai reason (e.g. a password isn't kept).
+export async function addMemory(content: string): Promise<string> {
+  try {
+    const r = await api<{ message: string }>("/memory", {
+      method: "POST",
+      body: JSON.stringify({ content }),
+    });
+    return r.message;
+  } catch (e) {
+    let msg = e instanceof Error ? e.message : String(e);
+    try {
+      msg = JSON.parse(msg).detail ?? msg;
+    } catch {
+      /* not JSON */
+    }
+    throw new Error(msg);
+  }
+}
+
+export async function deleteMemory(id: number): Promise<void> {
+  await api(`/memory/${id}`, { method: "DELETE" });
+}
+
+export async function clearMemory(): Promise<void> {
+  await api("/memory", { method: "DELETE" });
+}
+
+export async function setMemoryEnabled(enabled: boolean): Promise<void> {
+  await api("/memory/settings", { method: "PUT", body: JSON.stringify({ enabled }) });
+}
+
 export async function revokeSessionShare(sessionId: number): Promise<void> {
   await api(`/chat/sessions/${sessionId}/share`, { method: "DELETE" });
 }

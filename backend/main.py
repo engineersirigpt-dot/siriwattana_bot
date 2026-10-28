@@ -1215,6 +1215,155 @@ def _agent_enabled(user: dict, mode: str) -> bool:
     return any(_agent_tools(user, mode)) or _doc_enabled(user, mode)
 
 
+# ── V4.1 model routing / V4.2 memory & context — both flags off → legacy ────
+
+def _route_for(user: dict, question: str, company_only: bool):
+    """V4.1 (MODEL_ROUTING_MODE): model + effort for the normal answer from
+    cheap rules, or None when off for this user — the legacy classifier picks."""
+    import model_router
+
+    return model_router.pick(question, company=company_only) if model_router.routing_enabled_for(user) else None
+
+
+def _route_grounded(route):
+    """An answer grounded in company knowledge (RAG / AI Brain hit) gets at least the standard tier."""
+    import model_router
+
+    return model_router.for_context(route) if route else None
+
+
+def _effort_kw(route) -> dict:
+    # unrouted → the llm call keeps its exact legacy arguments
+    return {"effort": route.effort} if route and route.effort else {}
+
+
+def _route_stats(route, category: str, model: str, answer_usage: dict, started: float,
+                 first_token: float | None = None) -> dict:
+    """How this answer was routed and how long it took, for the usage log —
+    also when routing is off ("legacy"), as the before/after baseline."""
+    import model_router
+    from llm import LLM_REASONING_EFFORT
+
+    if route is None:
+        stats = {"route": "legacy", "route_reason": f"classifier: {category}",
+                 "reasoning_effort": model_router.effort_for(model, LLM_REASONING_EFFORT)}
+    else:
+        stats = {**route.meta(), "reasoning_effort": answer_usage.get("reasoning_effort", route.effort)}
+        if answer_usage.get("fallback_from"):
+            stats["route_reason"] = (f"{route.reason} | API rejected {answer_usage['fallback_from']} "
+                                     f"→ {answer_usage.get('model')}")[:200]
+    stats["latency_ms"] = int((time.monotonic() - started) * 1000)
+    if first_token is not None:
+        stats["first_token_ms"] = int((first_token - started) * 1000)
+    return stats
+
+
+def _turn_history(user: dict, session_id: int | None, legacy: list[dict] | None = None) -> list[dict]:
+    """History for the model. V4.2 (MEMORY_MODE): this user's saved memories,
+    a summary of the older turns, then the recent turns (earlier ones trimmed).
+    Off — or on any error — the legacy history: `legacy` if already loaded,
+    else the last HISTORY_TURNS turns."""
+    import memory
+    from chat_pg import get_session_history_pg
+
+    def old() -> list[dict]:
+        if legacy is not None:
+            return legacy
+        return get_session_history_pg(session_id=session_id, user_id=user["id"], limit=HISTORY_TURNS)
+
+    if not memory.memory_enabled_for(user):
+        return old()
+    try:
+        import context_manager
+
+        mem = memory.prompt_message(user["id"])
+        return ([mem] if mem else []) + context_manager.history(session_id, user["id"])
+    except Exception as e:  # noqa: BLE001 — memory must never cost an answer
+        audit_log("memory_context_failed", user=user, detail={"error": f"{type(e).__name__}: {e}"[:300]})
+        return old()
+
+
+def _after_answer(user: dict, session_id: int | None) -> None:
+    """V4.2: fold turns that left the recent window into the session summary —
+    in the background, so the reply never waits."""
+    import memory
+
+    if session_id and memory.memory_enabled_for(user):
+        import context_manager
+
+        context_manager.schedule_summary(session_id, user["id"])
+
+
+def _memory_reply(user: dict, question: str, session_id: int | None, mode: str,
+                  request: Request | None = None) -> dict | None:
+    """V4.2: a memory command typed by the user ("จำไว้ว่า…", "ลืมข้อมูลนี้",
+    "ดูความจำ" …) is carried out here — no AI call — and saved as a chat turn.
+    None → not a memory command (or memory is off for this user)."""
+    import memory
+
+    if not (use_postgres_auth() and memory.memory_enabled_for(user)):
+        return None
+    cmd = memory.parse_command(question)
+    if cmd is None or (session_id and _count_session_turns(session_id) >= MAX_TURNS_PER_SESSION):
+        return None                       # a full chat gets the usual turn-limit answer
+    from chat_pg import ensure_session_pg, get_session_history_pg, save_chat_message_pg
+
+    previous = None
+    if cmd.kind == "save" and not cmd.content and session_id:
+        # "จำข้อมูลนี้" → the user's previous message (their own text, never a file or web page)
+        hist = get_session_history_pg(session_id=session_id, user_id=user["id"], limit=1)
+        previous = next((m["content"] for m in hist if m["role"] == "user"), None)
+    sid, stitle = ensure_session_pg(user_id=user["id"], session_id=session_id, first_question=question, mode=mode)
+    answer = memory.handle(user["id"], cmd, session_id=sid, previous_question=previous)
+    mid = save_chat_message_pg(user_id=user["id"], session_id=sid, question=question, answer=answer,
+                               source="memory", knowledge_id=None, mode=mode)
+    audit_log("memory_command", user=user, detail={"kind": cmd.kind, "session_id": sid}, request=request)
+    return {"answer": answer, "source": "memory", "session_id": sid, "session_title": stitle, "message_id": mid}
+
+
+def _memory_chat_response(r: dict) -> "ChatResponse":
+    return ChatResponse(
+        answer=r["answer"], source=r["source"], similarity=None, session_id=r["session_id"],
+        session_title=r["session_title"], attachments=[], turn_count=_count_session_turns(r["session_id"]),
+        turn_limit=MAX_TURNS_PER_SESSION, message_id=r["message_id"],
+    )
+
+
+def _memory_done_event(r: dict) -> dict:
+    return {"type": "done", "source": r["source"], "session_id": r["session_id"],
+            "session_title": r["session_title"], "message_id": r["message_id"],
+            "turn_count": _count_session_turns(r["session_id"]), "turn_limit": MAX_TURNS_PER_SESSION}
+
+
+def _memory_scoped_reply(user: dict, question: str, session_id: int | None, mode: str,
+                         request: Request | None = None) -> dict | None:
+    """V4.2: a question about the user themself ("ฉันอยู่ฝ่ายไหน") that the
+    safety classifier flagged is answered from THIS user's saved memories only
+    — the model gets nothing else, so nothing else can leak (the same idea as
+    Code Interpreter's file-scoped turns). None → blocked as before: memory off,
+    nothing saved, or not a question about the user."""
+    import memory
+
+    if not (use_postgres_auth() and memory.memory_enabled_for(user)) or not memory.about_self(question):
+        return None
+    if session_id and _count_session_turns(session_id) >= MAX_TURNS_PER_SESSION:
+        return None
+    msg = memory.prompt_message(user["id"])
+    if msg is None:
+        return None
+    from chat_pg import ensure_session_pg, save_chat_message_pg
+
+    answer, usage = memory.answer_from_memory(question, msg)
+    sid, stitle = ensure_session_pg(user_id=user["id"], session_id=session_id, first_question=question, mode=mode)
+    mid = save_chat_message_pg(user_id=user["id"], session_id=sid, question=question, answer=answer,
+                               source="memory_scoped", knowledge_id=None, mode=mode,
+                               usage=accumulate_usage(usage))
+    audit_log("memory_scoped_answer", user=user, detail={"session_id": sid, "prompt": question[:200]},
+              request=request)
+    return {"answer": answer, "source": "memory_scoped", "session_id": sid, "session_title": stitle,
+            "message_id": mid}
+
+
 def _owned_documents(
     user: dict, session_id: int | None, uploads: list[dict] | None = None
 ) -> list[tuple[str, str]]:
@@ -1426,7 +1575,6 @@ def _agent_turn(
         count_code_runs_today_pg,
         count_web_searches_today_pg,
         ensure_session_pg,
-        get_session_history_pg,
         record_web_search_pg,
         save_attachment_pg,
         save_chat_message_pg,
@@ -1465,9 +1613,7 @@ def _agent_turn(
             )
 
     started = time.monotonic()
-    history = get_session_history_pg(
-        session_id=session_id, user_id=user["id"], limit=HISTORY_TURNS,
-    )
+    history = _turn_history(user, session_id)
     quota_left = max(0, WEB_SEARCH_DAILY_LIMIT - count_web_searches_today_pg(user["id"])) if web else 0
     prompt = question or "ช่วยวิเคราะห์ไฟล์ที่แนบ"
     emitted = False
@@ -1562,6 +1708,7 @@ def _agent_turn(
         },
         request=request,
     )
+    _after_answer(user, sid)
     yield "done", {
         "answer": answer, "tail": tail, "source": source, "session_id": sid,
         "session_title": stitle, "message_id": mid, "attachments": rows,
@@ -1990,6 +2137,14 @@ async def _chat_turn(
             attachments=[],
         )
 
+    # V4.2 memory command ("จำไว้ว่า…" / "ลืมข้อมูลนี้" / "ดูความจำ") — the
+    # user's own typed text (never with files), carried out without an AI call,
+    # so before the AI classifier; it has its own refusal of sensitive data.
+    if question and not files:
+        mr = await run_in_threadpool(_memory_reply, user, question, session_id, mode, request)
+        if mr is not None:
+            return _memory_chat_response(mr)
+
     # A classifier flag on analysis of the user's OWN spreadsheets doesn't block:
     # the turn becomes file-scoped (sandbox over those files only — see
     # _file_scope_decision), or gets the daily-quota reply when no runs are
@@ -2016,6 +2171,11 @@ async def _chat_turn(
                 )
             file_scoped = decision == "allowed"
             code_limited = decision == "quota"
+            if decision == "denied" and not files:
+                # V4.2: about the user themself → from their own memories only
+                ms = await run_in_threadpool(_memory_scoped_reply, user, question, session_id, mode, request)
+                if ms is not None:
+                    return _memory_chat_response(ms)
             if decision == "denied":
                 audit_log(
                     "sensitive_blocked_classifier",
@@ -2490,8 +2650,16 @@ async def _chat_turn(
                 similarity = None
 
             else:
-                category, classify_usage = classify_query(question)
-                chosen_model = LLM_MODEL_CALC if category == "calc" else LLM_MODEL
+                # V4.1/V4.2 (flags off → exactly the legacy history and classifier)
+                history = _turn_history(user, session_id, history)
+                t_answer = time.monotonic()
+                route = _route_for(user, question, company_only)
+                if route is None:
+                    category, classify_usage = classify_query(question)
+                    chosen_model = LLM_MODEL_CALC if category == "calc" else LLM_MODEL
+                else:
+                    category, classify_usage = route.category, {}
+                    chosen_model = route.model
 
                 # Layer 1: ask the colleague's company-ai-brain first.
                 # Cheaper (no OpenAI embed call) and centralised — if it has
@@ -2532,12 +2700,15 @@ async def _chat_turn(
                         },
                         request=request,
                     )
+                    route = _route_grounded(route)
+                    chosen_model = route.model if route else chosen_model
                     answer, answer_usage = answer_from_context(
                         question,
                         "เอกสารส่วนกลาง (AI Brain)",
                         build_brain_context(brain_results),
                         model=chosen_model,
                         history=history,
+                        **_effort_kw(route),
                     )
                     source = "brain" if category == "general" else "brain-calc"
                     knowledge_id = None
@@ -2545,8 +2716,9 @@ async def _chat_turn(
                     source_file_hit = top.get("source")
                     usage_row = accumulate_usage(
                         classify_usage, answer_usage, agent_router_usage,
-                        primary_model=chosen_model,
+                        primary_model=answer_usage.get("model") or chosen_model,
                     )
+                    usage_row.update(_route_stats(route, category, chosen_model, answer_usage, t_answer))
                 else:
                     # Layer 2: fall back to local pgvector (admin Q&A +
                     # kb_import in company mode).
@@ -2558,12 +2730,15 @@ async def _chat_turn(
                     )
 
                     if hit:
+                        route = _route_grounded(route)
+                        chosen_model = route.model if route else chosen_model
                         answer, answer_usage = answer_from_context(
                             question,
                             hit["question"],
                             hit["answer"],
                             model=chosen_model,
                             history=history,
+                            **_effort_kw(route),
                         )
                         source = "rag" if category == "general" else "rag-calc"
                         knowledge_id = hit["id"]
@@ -2581,7 +2756,7 @@ async def _chat_turn(
 
                         answer, answer_usage = answer_freely(
                             question, model=chosen_model, history=history,
-                            company_only=company_only,
+                            company_only=company_only, **_effort_kw(route),
                         )
                         source = "llm" if category == "general" else "llm-calc"
                         knowledge_id = None
@@ -2589,8 +2764,9 @@ async def _chat_turn(
                         source_file_hit = None
                     usage_row = accumulate_usage(
                         classify_usage, answer_usage, agent_router_usage,
-                        primary_model=chosen_model,
+                        primary_model=answer_usage.get("model") or chosen_model,
                     )
+                    usage_row.update(_route_stats(route, category, chosen_model, answer_usage, t_answer))
 
             # Honesty note for an ungrounded answer to a company-specific factual
             # question (no-op otherwise).
@@ -2606,6 +2782,7 @@ async def _chat_turn(
                 mode=mode,
                 usage=usage_row,
             )
+            _after_answer(user, sid)
 
             attachment_rows: list[dict] = []
 
@@ -2865,7 +3042,6 @@ async def chat_stream(
     def gen():
         from chat_pg import (
             ensure_session_pg,
-            get_session_history_pg,
             save_chat_message_pg,
         )
 
@@ -2877,6 +3053,14 @@ async def chat_stream(
             #    user's own spreadsheets becomes a file-scoped turn (2.5) — or the
             #    daily-quota reply when no runs are left — instead.
             keyword_hit = is_sensitive(question) is not None
+            # V4.2 memory command — the user's own text, no AI call, its own
+            # refusal of sensitive data → after the keyword filter, before the
+            # AI classifier (MEMORY_MODE).
+            mr = None if keyword_hit else _memory_reply(user, question, session_id, mode, request)
+            if mr is not None:
+                yield ev({"type": "delta", "v": mr["answer"]})
+                yield ev(_memory_done_event(mr))
+                return
             flagged = None
             if not keyword_hit and not _is_linsip_query(question, session_id, user):
                 flagged = classify_sensitivity(question, safety_usages)
@@ -2885,6 +3069,13 @@ async def chat_stream(
             )
             file_scoped = decision == "allowed"
             code_limited = decision == "quota"
+            if flagged is not None and decision == "denied" and not keyword_hit:
+                # V4.2: about the user themself → from their own memories only
+                ms = _memory_scoped_reply(user, question, session_id, mode, request)
+                if ms is not None:
+                    yield ev({"type": "delta", "v": ms["answer"]})
+                    yield ev(_memory_done_event(ms))
+                    return
             if keyword_hit or (flagged is not None and decision == "denied"):
                 audit_log(
                     "sensitive_blocked_stream",
@@ -3104,9 +3295,7 @@ async def chat_stream(
                 user_id=user["id"], session_id=session_id,
                 first_question=question, mode=mode,
             )
-            history = get_session_history_pg(
-                session_id=session_id, user_id=user["id"], limit=HISTORY_TURNS,
-            )
+            history = _turn_history(user, session_id)
             knowledge_id: int | None = None
             source_file_hit: str | None = None
             similarity = None
@@ -3116,8 +3305,16 @@ async def chat_stream(
             # Layer-1 retrieval source (see the brain_results_s block below).
             # Anything that was sent with mode="brain" by older clients now
             # gets the same flow as mode="normal".
-            category, classify_usage = classify_query(question)
-            chosen_model = LLM_MODEL_CALC if category == "calc" else LLM_MODEL
+            # V4.1: with model routing on, rules pick model + effort (no
+            # classifier call); off → the classifier, as before.
+            t_answer = time.monotonic()
+            route = _route_for(user, question, company_only)
+            if route is None:
+                category, classify_usage = classify_query(question)
+                chosen_model = LLM_MODEL_CALC if category == "calc" else LLM_MODEL
+            else:
+                category, classify_usage = route.category, {}
+                chosen_model = route.model
             # Streaming usage is captured into this holder by the LLM stream
             # functions (populated on the final chunk). We then accumulate it
             # with the classifier usage and persist once the stream finishes.
@@ -3159,6 +3356,8 @@ async def chat_stream(
                     },
                     request=request,
                 )
+                route = _route_grounded(route)
+                chosen_model = route.model if route else chosen_model
                 tokens = stream_from_context(
                     question,
                     "เอกสารส่วนกลาง (AI Brain)",
@@ -3166,6 +3365,7 @@ async def chat_stream(
                     model=chosen_model,
                     history=history,
                     usage_holder=stream_usage,
+                    **_effort_kw(route),
                 )
                 source = "brain" if category == "general" else "brain-calc"
                 knowledge_id = None
@@ -3180,10 +3380,12 @@ async def chat_stream(
                 )
 
                 if hit:
+                    route = _route_grounded(route)
+                    chosen_model = route.model if route else chosen_model
                     tokens = stream_from_context(
                         question, hit["question"], hit["answer"],
                         model=chosen_model, history=history,
-                        usage_holder=stream_usage,
+                        usage_holder=stream_usage, **_effort_kw(route),
                     )
                     source = "rag" if category == "general" else "rag-calc"
                     knowledge_id = hit["id"]
@@ -3200,11 +3402,15 @@ async def chat_stream(
                     tokens = stream_freely(
                         question, model=chosen_model, history=history,
                         company_only=company_only, usage_holder=stream_usage,
+                        **_effort_kw(route),
                     )
                     source = "llm" if category == "general" else "llm-calc"
 
             parts: list[str] = []
+            first_token_at: float | None = None
             for delta in tokens:
+                if first_token_at is None:
+                    first_token_at = time.monotonic()
                 parts.append(delta)
                 yield ev({"type": "delta", "v": delta})
             answer = "".join(parts).strip()
@@ -3221,14 +3427,16 @@ async def chat_stream(
             # call so cost_usd reflects all OpenAI work for this question.
             usage_row = accumulate_usage(
                 classify_usage, stream_usage, agent_router_usage,
-                primary_model=chosen_model,
+                primary_model=stream_usage.get("model") or chosen_model,   # ≠ chosen if the API rejected a route
             )
+            usage_row.update(_route_stats(route, category, chosen_model, stream_usage, t_answer, first_token_at))
 
             mid = save_chat_message_pg(
                 user_id=user["id"], session_id=sid, question=question,
                 answer=answer, source=source, knowledge_id=knowledge_id,
                 mode=mode, usage=usage_row,
             )
+            _after_answer(user, sid)
             audit_log(
                 "chat_message",
                 user=user,
@@ -3262,6 +3470,71 @@ async def chat_stream(
         # as they're produced rather than all at once at the end.
         headers={"X-Accel-Buffering": "no", "Cache-Control": "no-cache"},
     )
+
+
+# ── V4.2 long-term memory: the user's own list (MEMORY_MODE) ────────────────
+
+class MemoryIn(BaseModel):
+    content: str
+
+
+class MemorySettingsIn(BaseModel):
+    enabled: bool
+
+
+def _memory_for(user: dict):
+    import memory
+
+    if not (use_postgres_auth() and memory.memory_enabled_for(user)):
+        raise HTTPException(404, "memory is not available")
+    return memory
+
+
+@app.get("/memory")
+def get_memory(user: dict = Depends(current_user)):
+    """This user's memories. available=False → the UI hides the menu."""
+    import memory
+
+    if not (use_postgres_auth() and memory.memory_enabled_for(user)):
+        return {"available": False, "enabled": False, "items": [], "limit": memory.MAX_ITEMS}
+    return {"available": True, "enabled": memory.STORE.enabled(user["id"]),
+            "items": memory.STORE.items(user["id"]), "limit": memory.MAX_ITEMS}
+
+
+@app.post("/memory")
+@limiter.limit("30/minute")
+def add_memory(body: MemoryIn, request: Request, user: dict = Depends(current_user)):
+    memory = _memory_for(user)
+    ok, msg = memory.save(user["id"], body.content)
+    if not ok:
+        raise HTTPException(400, msg)
+    audit_log("memory_saved", user=user, detail={"via": "menu"}, request=request)
+    return {"ok": True, "message": msg}
+
+
+@app.delete("/memory/{memory_id}")
+def delete_memory(memory_id: int, request: Request, user: dict = Depends(current_user)):
+    memory = _memory_for(user)
+    if not memory.STORE.delete(user["id"], memory_id):      # another user's id → not found
+        raise HTTPException(404, "not found")
+    audit_log("memory_deleted", user=user, detail={"memory_id": memory_id}, request=request)
+    return {"ok": True}
+
+
+@app.delete("/memory")
+def clear_memory(request: Request, user: dict = Depends(current_user)):
+    memory = _memory_for(user)
+    n = memory.STORE.clear(user["id"])
+    audit_log("memory_cleared", user=user, detail={"deleted": n}, request=request)
+    return {"ok": True, "deleted": n}
+
+
+@app.put("/memory/settings")
+def memory_settings(body: MemorySettingsIn, request: Request, user: dict = Depends(current_user)):
+    memory = _memory_for(user)
+    memory.STORE.set_enabled(user["id"], body.enabled)
+    audit_log("memory_settings", user=user, detail={"enabled": body.enabled}, request=request)
+    return {"ok": True, "enabled": body.enabled}
 
 
 class FeedbackIn(BaseModel):
