@@ -61,7 +61,8 @@ MODEL_CAPS: dict[str, dict] = {
     "gpt-5.1":       {"efforts": _EFFORTS_GPT51, "caps": _CHAT_TOOLS, "verified": False},
     "gpt-5.2":       {"efforts": _EFFORTS_GPT51, "caps": _CHAT_TOOLS, "verified": False},
     "gpt-5.4":       {"efforts": _EFFORTS_GPT51, "caps": _CHAT_TOOLS, "verified": False},
-    "gpt-5.5":       {"efforts": _EFFORTS_GPT51, "caps": _CHAT_TOOLS, "verified": False},
+    # chat at effort medium checked 2026-10-28 (deep-tier comparison with gpt-5)
+    "gpt-5.5":       {"efforts": _EFFORTS_GPT51, "caps": _CHAT_TOOLS, "verified": True},
     "gpt-5.6":       {"efforts": _EFFORTS_GPT51, "caps": _CHAT_TOOLS, "verified": False},
     "gpt-5.6-terra": {"efforts": _EFFORTS_GPT51, "caps": _CHAT_TOOLS, "verified": True},
     "gpt-4.1":       {"efforts": (), "caps": _CHAT_TOOLS, "verified": True},

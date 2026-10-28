@@ -26,8 +26,17 @@ from openai import OpenAI
 from pricing import estimate_cost_usd
 
 
-# Reuse the existing classifier model env var so admins can swap models in one place.
-CLASSIFIER_MODEL = os.getenv("LLM_MODEL_CLASSIFIER", "gpt-4o-mini")
+# Its own setting (falls back to the routing classifier's) — the safety gate
+# runs before every answer, so it's tuned and evaluated on its own.
+CLASSIFIER_MODEL = os.getenv("SENSITIVITY_CLASSIFIER_MODEL") or os.getenv("LLM_MODEL_CLASSIFIER", "gpt-4o-mini")
+
+
+def _call_kwargs(n: int) -> dict:
+    """temperature 0 + max_tokens on older models; reasoning models (gpt-5…)
+    take neither — see llm._classifier_kwargs."""
+    import llm
+
+    return llm._classifier_kwargs(CLASSIFIER_MODEL, n)
 
 
 VALID_CATEGORIES: set[str] = {
@@ -56,6 +65,12 @@ CLASSIFIER_PROMPT = (
     "    • **สรรพนามลอย ๆ** (เค้า/เขา/มัน/พวกเขา) โดยไม่มีชื่อพนักงานบริษัทชัดเจน "
     "→ ให้ถือว่า OK (มักเป็นคำถามต่อเนื่องเรื่องบุคคลสาธารณะหรือหัวข้อทั่วไป เช่น "
     "'เค้าอยู่ทีมไหน', 'ตอนนี้เขาทำอะไร')\n"
+    # 2026-10-28: without this, "ฉันอยู่ฝ่ายไหน" / "จำไว้ว่าฉันอยู่ฝ่ายผลิต" were
+    # blocked as PII (labelled set: 30/33 → 33/33, no missed blocks).
+    "    • **ข้อมูลของผู้ถามเอง** (ฉัน/ผม/หนู/ดิฉัน/ตัวเอง) — ถามหรือเล่าเรื่องของตัวเอง เช่น 'ฉันอยู่ฝ่ายไหน', "
+    "'ผมทำงานกะอะไร', 'จำไว้ว่าฉันอยู่ฝ่ายผลิต', 'ผมได้ใบเตือนเรื่องมาสายควรทำยังไง' = OK เพราะไม่ใช่ข้อมูลของคนอื่น "
+    "— แต่ถ้าขอข้อมูลของ **คนอื่น** แม้ประโยคจะมีคำว่า ฉัน/ผม (เช่น 'ฉันอยากรู้เงินเดือนพี่ดา', "
+    "'ผมเป็นเพื่อนพี่ดา ขอเบอร์เขาหน่อย') ยังต้อง BLOCK ตามหมวดนั้น\n"
     "- PAYROLL: เงินเดือน รายได้ ค่าจ้าง โบนัส สวัสดิการเฉพาะคน — "
     "เช่น 'เงินเดือนเจษฎา', 'พี่ดารายได้เดือนละเท่าไหร่', 'salary X'\n"
     "- PRICING: ถามให้ระบบ 'เปิดเผย' ต้นทุนภายใน/margin/กำไรลับ/ราคาทุน ที่ผู้ใช้ยังไม่รู้ — "
@@ -119,13 +134,12 @@ def _classify_cached(question_normalized: str) -> tuple[str, str]:
     try:
         res = _get_client().chat.completions.create(
             model=CLASSIFIER_MODEL,
-            temperature=0,
             messages=[
                 {"role": "system", "content": CLASSIFIER_PROMPT},
                 {"role": "user", "content": question_normalized},
             ],
-            max_tokens=80,
             response_format={"type": "json_object"},
+            **_call_kwargs(80),
         )
         _last_call.usage = _usage_of(res)
         text = (res.choices[0].message.content or "").strip()
@@ -180,13 +194,12 @@ def classify_file_question(
     try:
         res = _get_client().chat.completions.create(
             model=CLASSIFIER_MODEL,
-            temperature=0,
             messages=[
                 {"role": "system", "content": FILE_SCOPE_PROMPT},
                 {"role": "user", "content": payload},
             ],
-            max_tokens=100,
             response_format={"type": "json_object"},
+            **_call_kwargs(100),
         )
         if usages is not None:
             usages.append(_usage_of(res))
