@@ -27,6 +27,7 @@ import {
 import { API_BASE, api, getRole, getToken } from "@/lib/api";
 import { ConfirmModal } from "@/components/Modal";
 import { DashboardPanel } from "@/components/admin/DashboardPanel";
+import { UsagePanel } from "@/components/admin/UsagePanel";
 
 type Pending = {
   id: number;
@@ -109,7 +110,7 @@ type Analytics = {
   top_users: { username: string; count: number }[];
 };
 
-type Tab = "dashboard" | "pending" | "knowledge" | "history" | "users";
+type Tab = "dashboard" | "usage" | "pending" | "knowledge" | "history" | "users";
 
 export default function AdminPage() {
   const router = useRouter();
@@ -323,6 +324,12 @@ export default function AdminPage() {
             label="ภาพรวม"
           />
           <TabButton
+            active={tab === "usage"}
+            onClick={() => setTab("usage")}
+            icon={<BarChart3 size={18} />}
+            label="การใช้งาน AI"
+          />
+          <TabButton
             active={tab === "pending"}
             onClick={() => setTab("pending")}
             icon={<HelpCircle size={18} />}
@@ -354,6 +361,9 @@ export default function AdminPage() {
 
         {/* Pro KPI Dashboard — handoff view */}
         {tab === "dashboard" && <DashboardPanel />}
+
+        {/* AI usage log: tokens + cost vs ChatGPT Business */}
+        {tab === "usage" && <UsagePanel />}
 
         {/* Pending tab */}
         {tab === "pending" && (

@@ -391,6 +391,47 @@ def init_pg_schema() -> None:
                 """
             )
 
+            # AI usage log — one row per billed OpenAI use (an answer, the
+            # safety classifiers, a translation job). Append-only and NOT tied
+            # to chat_history: deleting a chat (or the unsaved-chat purge)
+            # removes the conversation but keeps the tokens and cost, so the
+            # usage report stays complete. No question text — metadata only.
+            # See usage_log.py.
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS ai_usage_log (
+                    id BIGSERIAL PRIMARY KEY,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    user_id BIGINT,
+                    username TEXT,
+                    feature TEXT NOT NULL,
+                    source TEXT,
+                    model TEXT,
+                    prompt_tokens INT NOT NULL DEFAULT 0,
+                    completion_tokens INT NOT NULL DEFAULT 0,
+                    cost_usd NUMERIC(12, 6) NOT NULL DEFAULT 0,
+                    session_id BIGINT,
+                    message_id BIGINT,
+                    ref TEXT,
+                    backfilled BOOLEAN NOT NULL DEFAULT false
+                );
+                """
+            )
+
+            cur.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_ai_usage_log_created
+                ON ai_usage_log(created_at);
+                """
+            )
+
+            cur.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_ai_usage_log_user_created
+                ON ai_usage_log(user_id, created_at);
+                """
+            )
+
 
 def smoke_test_pg() -> None:
     init_pg_schema()

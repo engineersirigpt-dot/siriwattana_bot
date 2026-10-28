@@ -31,6 +31,7 @@ def pg_user():
         uid = cur.fetchone()[0]
     yield uid
     with get_pg_conn() as conn, conn.cursor() as cur:
+        cur.execute("DELETE FROM ai_usage_log WHERE user_id = %s", (uid,))
         cur.execute("DELETE FROM chat_history WHERE user_id = %s", (uid,))
         cur.execute("DELETE FROM chat_sessions WHERE user_id = %s", (uid,))
         cur.execute("DELETE FROM users WHERE id = %s", (uid,))

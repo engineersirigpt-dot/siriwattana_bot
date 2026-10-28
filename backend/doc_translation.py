@@ -251,6 +251,16 @@ def _run(job_id: str, pdf_path: str, out_dir: str, base: str) -> None:
         )
         _update(job_id, **done_fields)
         _db_update(job_id, **done_fields)
+        # ค่าใช้จ่ายเข้า AI usage log ด้วย (ไม่หายแม้ลบงานแปล) — ดู usage_log.py
+        if _db_on():
+            import usage_log
+
+            usage_log.log_usage_pg(
+                job.get("user_id"), "translation", "translation",
+                {"model": tm.MODEL, "prompt_tokens": res.get("tokens_in", 0),
+                 "completion_tokens": res.get("tokens_out", 0), "cost_usd": res["cost_usd"]},
+                ref=job_id,
+            )
     except Exception as e:  # noqa: BLE001 — เก็บ error ไว้ให้ frontend แสดง ไม่ให้ worker ตาย
         _update(job_id, status="error", error=str(e)[:300])
         _db_update(job_id, status="error", error=str(e)[:300])
