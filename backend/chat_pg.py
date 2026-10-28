@@ -116,6 +116,16 @@ def save_chat_message_pg(
             )
             message_id = cur.fetchone()[0]
 
+            # Same cost into the AI usage log, which outlives the chat (see
+            # usage_log.py) — so deleting this conversation keeps its tokens.
+            if usage:
+                from usage_log import feature_for, insert_usage_safe
+
+                insert_usage_safe(
+                    conn, cur, user_id=user_id, feature=feature_for(source), source=source,
+                    usage=usage, session_id=session_id, message_id=message_id,
+                )
+
             # Sync session-level state on every message: timestamp + the mode the
             # user is currently in. The UI uses `mode` to restore the toggle when
             # the session is reopened.
@@ -147,6 +157,7 @@ def add_usage_to_message_pg(message_id: int, usage: dict) -> None:
                     cost_usd = COALESCE(cost_usd, 0) + %s,
                     model_used = COALESCE(model_used, %s)
                 WHERE id = %s
+                RETURNING user_id, session_id
                 """,
                 (
                     usage.get("prompt_tokens", 0),
@@ -156,6 +167,14 @@ def add_usage_to_message_pg(message_id: int, usage: dict) -> None:
                     message_id,
                 ),
             )
+            row = cur.fetchone()
+            if row:
+                from usage_log import insert_usage_safe
+
+                insert_usage_safe(
+                    conn, cur, user_id=row[0], feature="safety", source="classifier",
+                    usage=usage, session_id=row[1], message_id=message_id,
+                )
 
 
 def purge_unsaved_sessions_pg(user_id: int, keep: int) -> tuple[int, list[str]]:

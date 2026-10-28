@@ -1255,6 +1255,16 @@ def _safety_cost_detail(usages: list[dict]) -> dict:
     }
 
 
+def _log_blocked_usage(user: dict, usages: list[dict]) -> None:
+    """A blocked turn saves no chat row, so its classifier usage goes straight
+    to the AI usage log (as its own request)."""
+    if not usages or not use_postgres_auth():
+        return
+    from usage_log import log_usage_pg
+
+    log_usage_pg(user["id"], "safety", "blocked", accumulate_usage(*usages))
+
+
 def _charge_safety_usage(message_id: int | None, usages: list[dict]) -> None:
     """Add this turn's classifier usage to the row the turn saved — once: the
     list is emptied so a second call can't count it again."""
@@ -1972,6 +1982,7 @@ async def _chat_turn(
                     },
                     request=request,
                 )
+                _log_blocked_usage(user, safety_usages)
                 return ChatResponse(
                     answer=BLOCKED_RESPONSE,
                     source="blocked",
@@ -2264,6 +2275,7 @@ async def _chat_turn(
                     },
                     request=request,
                 )
+                _log_blocked_usage(user, safety_usages)
                 return ChatResponse(
                     answer=BLOCKED_RESPONSE,
                     source="blocked",
@@ -2826,6 +2838,7 @@ async def chat_stream(
                     detail={"message_length": len(question), **_safety_cost_detail(safety_usages)},
                     request=request,
                 )
+                _log_blocked_usage(user, safety_usages)
                 yield ev({"type": "delta", "v": BLOCKED_RESPONSE})
                 yield ev({
                     "type": "done",
@@ -4523,6 +4536,72 @@ def admin_dashboard_export_pdf(
         headers={
             "Content-Disposition": f'attachment; filename="{safe_filename}"',
             "Content-Length": str(len(pdf_bytes)),
+        },
+    )
+
+
+def _usage_period(since: str | None, until: str | None) -> tuple:
+    """Parse the usage-report range (Bangkok calendar days, both inclusive).
+    Default: the current month so far."""
+    from datetime import date as _date, datetime as _dt, timedelta as _td, timezone as _tz
+
+    today = _dt.now(_tz(_td(hours=7))).date()
+    try:
+        start = _date.fromisoformat(since) if since else today.replace(day=1)
+        end = _date.fromisoformat(until) if until else today
+    except ValueError:
+        raise HTTPException(400, "since/until must be YYYY-MM-DD")
+    if start > end or (end - start).days > 800:
+        raise HTTPException(400, "invalid range (since ≤ until, at most ~2 years)")
+    return start, end
+
+
+@app.get("/admin/usage/report")
+def admin_usage_report(
+    since: str | None = Query(None, description="YYYY-MM-DD (Bangkok), default 1st of this month"),
+    until: str | None = Query(None, description="YYYY-MM-DD (Bangkok, inclusive), default today"),
+    seat_usd: float | None = Query(None, ge=0, le=1000, description="ChatGPT Business USD/user/month"),
+    user: dict = Depends(require_admin),
+):
+    """AI usage (requests, tokens, cost) by month / user / feature / model,
+    compared with ChatGPT Business seats. Reads the AI usage log."""
+    if not use_postgres_auth():
+        raise HTTPException(501, "Usage report requires postgres deployment")
+    import usage_log
+
+    start, end = _usage_period(since, until)
+    seat = usage_log.CHATGPT_BUSINESS_SEAT_USD if seat_usd is None else seat_usd
+    return usage_log.usage_report_pg(start, end, seat)
+
+
+@app.get("/admin/usage/export.xlsx")
+def admin_usage_export(
+    request: Request,
+    since: str | None = Query(None),
+    until: str | None = Query(None),
+    seat_usd: float | None = Query(None, ge=0, le=1000),
+    user: dict = Depends(require_admin),
+):
+    """The usage report as an Excel workbook (summary, monthly, per user,
+    per feature, per model, every log row)."""
+    if not use_postgres_auth():
+        raise HTTPException(501, "Usage report requires postgres deployment")
+    import usage_log
+
+    start, end = _usage_period(since, until)
+    seat = usage_log.CHATGPT_BUSINESS_SEAT_USD if seat_usd is None else seat_usd
+    data = usage_log.build_usage_xlsx(
+        usage_log.usage_report_pg(start, end, seat), usage_log.usage_rows_pg(start, end)
+    )
+    audit_log("usage_report_export", user=user,
+              detail={"since": start.isoformat(), "until": end.isoformat()}, request=request)
+    filename = f"SiriChat_AI_usage_{start.isoformat()}_{end.isoformat()}.xlsx"
+    return StreamingResponse(
+        iter([data]),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Content-Length": str(len(data)),
         },
     )
 
