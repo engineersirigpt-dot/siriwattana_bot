@@ -483,6 +483,63 @@ export async function fetchAttachmentBlobUrl(id: number): Promise<string> {
   return URL.createObjectURL(blob);
 }
 
+// ── V5 chat UI ──────────────────────────────────────────────────────────────
+
+// Which chat page this user gets (backend UI_V5_MODE). Any failure → classic.
+export async function getUiConfig(): Promise<{ ui_v5: boolean }> {
+  return api<{ ui_v5: boolean }>("/ui/config");
+}
+
+// A user on V5 can go back to the classic page; kept per browser.
+const UI_PREF_KEY = "siri_ui";
+export function getUiPreference(): "classic" | null {
+  try {
+    return localStorage.getItem(UI_PREF_KEY) === "classic" ? "classic" : null;
+  } catch {
+    return null;
+  }
+}
+export function setUiPreference(pref: "classic" | null) {
+  try {
+    if (pref) localStorage.setItem(UI_PREF_KEY, pref);
+    else localStorage.removeItem(UI_PREF_KEY);
+  } catch {
+    /* storage blocked — the server default applies */
+  }
+}
+
+// An attachment fetch that says WHY it failed (gone / not yours / other), so a
+// file card can show a useful message instead of failing silently.
+export class AttachmentError extends Error {
+  constructor(public status: number) {
+    super(
+      status === 404 || status === 410
+        ? "ไฟล์นี้ไม่มีแล้ว (อาจถูกลบหรือหมดอายุ)"
+        : status === 403
+          ? "คุณไม่มีสิทธิ์เปิดไฟล์นี้"
+          : "เปิดไฟล์ไม่สำเร็จ ลองใหม่อีกครั้ง",
+    );
+  }
+}
+
+export async function fetchAttachment(id: number): Promise<Blob> {
+  const token = getToken();
+  let res: Response;
+  try {
+    res = await fetch(attachmentUrl(id), {
+      headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+    });
+  } catch {
+    throw new AttachmentError(0);
+  }
+  if (!res.ok) throw new AttachmentError(res.status);
+  return res.blob();
+}
+
+export function saveBlob(blob: Blob, filename: string) {
+  triggerDownload(blob, filename);
+}
+
 export async function register(username: string, password: string) {
   const body = new URLSearchParams({ username, password });
   const res = await fetch(`${API_BASE}/auth/register`, {

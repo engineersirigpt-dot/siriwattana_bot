@@ -12,7 +12,8 @@ export function Modal({
   open,
   onClose,
   children,
-}: BaseProps & { children: React.ReactNode }) {
+  wide = false,
+}: BaseProps & { children: React.ReactNode; wide?: boolean }) {
   useEffect(() => {
     if (!open) return;
     const onKey = (e: KeyboardEvent) => {
@@ -30,8 +31,10 @@ export function Modal({
       onClick={onClose}
     >
       <div
-        className="relative bg-surface rounded-2xl shadow-2xl w-full max-w-md overflow-hidden animate-in zoom-in-95 duration-150"
+        className={`relative bg-surface rounded-2xl shadow-2xl w-full ${wide ? "max-w-5xl" : "max-w-md"} overflow-hidden animate-in zoom-in-95 duration-150`}
         onClick={(e) => e.stopPropagation()}
+        role="dialog"
+        aria-modal="true"
       >
         <button
           onClick={onClose}

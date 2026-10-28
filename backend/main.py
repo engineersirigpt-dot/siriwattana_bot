@@ -520,6 +520,21 @@ def me(user: dict = Depends(current_user)):
     return user
 
 
+# V5 chat UI rollout: UI_V5_MODE=off|admin|all (+ UI_V5_USERS), default off →
+# everyone keeps the classic chat page. Purely which page the frontend shows;
+# no data or permissions depend on it.
+UI_V5_MODE = os.getenv("UI_V5_MODE", "off").strip().lower()
+UI_V5_USERS = {u.strip() for u in os.getenv("UI_V5_USERS", "").split(",") if u.strip()}
+
+
+@app.get("/ui/config")
+def ui_config(user: dict = Depends(current_user)):
+    v5 = UI_V5_MODE == "all" or (
+        UI_V5_MODE == "admin" and (user.get("role") == "admin" or user.get("username") in UI_V5_USERS)
+    )
+    return {"ui_v5": v5}
+
+
 @app.post("/transcribe")
 @limiter.limit("30/minute")
 async def transcribe(

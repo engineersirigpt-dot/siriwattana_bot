@@ -39,6 +39,43 @@ body {
   font-family: var(--font-noto-thai), "Noto Sans Thai Looped", ui-sans-serif, system-ui, sans-serif;
 }
 
+/* ─── V5 chat UI building blocks ──────────────────────────────────────────
+   One set of button/chip styles for the new chat components (the classic page
+   keeps its own inline classes). Visible keyboard focus everywhere. */
+@layer components {
+  .ui-btn {
+    @apply inline-flex items-center justify-center gap-1.5 rounded-xl px-3 py-1.5 text-sm font-medium
+      transition-colors disabled:cursor-not-allowed disabled:opacity-50
+      focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-purple-500 focus-visible:ring-offset-1;
+  }
+  .ui-btn-primary { @apply bg-purple-600 text-white hover:bg-purple-700; }
+  .ui-btn-ghost { @apply border border-line bg-surface text-content2 hover:bg-surface2; }
+  .ui-btn-danger { @apply bg-red-500 text-white hover:bg-red-600; }
+  .ui-icon-btn {
+    @apply inline-flex items-center justify-center rounded-lg p-1.5 text-muted transition-colors
+      hover:bg-surface3 hover:text-content disabled:opacity-50
+      focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-purple-500;
+  }
+  .ui-icon-btn-on-color {
+    @apply inline-flex items-center justify-center rounded-lg p-1.5 text-white/85 transition-colors
+      hover:bg-white/15 hover:text-white disabled:opacity-50
+      focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white;
+  }
+  .ui-chip {
+    @apply inline-flex items-center gap-1.5 rounded-full border border-line bg-surface px-2.5 py-1 text-xs text-content2;
+  }
+  .ui-side-btn {
+    @apply flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm text-white transition-all hover:bg-white/10
+      focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70;
+  }
+  /* V5 typing caret at the end of a streaming answer (Markdown live) */
+  .md-live > p:last-child::after,
+  .md-live > :is(ul, ol):last-child > li:last-child::after {
+    content: "";
+    @apply ml-0.5 inline-block h-4 w-0.5 animate-pulse bg-purple-500 align-middle;
+  }
+}
+
 /* Shimmer sweep for the "creating image" placeholder (image generation). */
 @keyframes shimmer {
   100% { transform: translateX(100%); }
