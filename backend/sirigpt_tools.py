@@ -1,5 +1,6 @@
 """
-Helpers uploaded into the Code Interpreter sandbox as /mnt/data/sirigpt_tools.py.
+Helpers uploaded into the Code Interpreter sandbox (it lands there as
+/mnt/data/file-<id>-sirigpt_tools.py, hence code_interpreter._TOOLS_LOADER).
 
 Our own reviewed code, so summary-row handling is the same on every request
 instead of being re-invented by the model (which double-counted or dropped
@@ -7,7 +8,7 @@ rows in ~1 of 5 runs). Runs only inside OpenAI's sandbox — never on our
 server — and its pure-Python core is unit-tested in tests/test_sirigpt_tools.py.
 
 Sandbox use:
-    import sys; sys.path.append("/mnt/data")
+    <code_interpreter._TOOLS_LOADER>
     from sirigpt_tools import drop_summary_rows, find_rows, closest_names
     clean, removed = drop_summary_rows(df, "ยอดขาย")
     rows = find_rows(clean, "ลูกค้า", "รวมมิตรการพิมพ์")

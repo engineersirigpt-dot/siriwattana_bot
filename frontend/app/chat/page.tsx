@@ -261,6 +261,7 @@ const AGENT_STATUS_LABELS: Record<string, string> = {
   agent_searching: "กำลังค้นข้อมูลจากเว็บ…",
   agent_reading: "กำลังอ่านลิงก์…",
   agent_coding: "กำลังคำนวณ/วิเคราะห์ข้อมูลด้วย Python…",
+  agent_document: "กำลังจัดทำเอกสารและตรวจไฟล์… (อาจใช้เวลา 1–2 นาที)",
   agent_writing: "กำลังเรียบเรียงคำตอบ…",
 };
 
@@ -274,8 +275,12 @@ function isImageSource(source: string | undefined): boolean {
   return source === "image_gen" || source === "image_edit";
 }
 
+// Spreadsheets and documents may go to the sandbox (Code Interpreter / Document
+// Engine), which takes a while — say so instead of a bare "thinking".
+const DATA_FILE_RE = /\.(xlsx|xls|csv|docx|pptx|pdf)$/i;
+
 function hasSpreadsheet(msg: Msg | undefined): boolean {
-  return msg?.role === "user" && !!msg.attachments?.some((a) => SPREADSHEET_RE.test(a.filename));
+  return msg?.role === "user" && !!msg.attachments?.some((a) => DATA_FILE_RE.test(a.filename));
 }
 
 // Split a saved row's attachments: the user's uploads stay on their bubble;
@@ -2086,7 +2091,7 @@ export default function ChatPage() {
                     {isProofreading(messages[messages.length - 1])
                       ? "กำลังตรวจคำผิดอย่างละเอียด (อาจใช้เวลา 1–2 นาที)…"
                       : hasSpreadsheet(messages[messages.length - 1])
-                        ? "กำลังอ่านและวิเคราะห์ไฟล์ (อาจใช้เวลาสักครู่)…"
+                        ? "กำลังอ่านและจัดการไฟล์ (อาจใช้เวลา 1–2 นาที)…"
                         : "กำลังคิด…"}
                   </span>
                 </div>

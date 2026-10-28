@@ -25,6 +25,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     # ── LibreOffice Writer — headless .docx → .pdf for document translation ──
     libreoffice-writer \
     libreoffice-core \
+    # ── LibreOffice Impress — renders .pptx so the Document Engine can check
+    #    slide layout and show a preview (never runs model code) ──
+    libreoffice-impress \
     # ── Tesseract OCR (Thai+English) — literal text for proofreading images ──
     tesseract-ocr \
     tesseract-ocr-tha \

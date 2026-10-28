@@ -981,19 +981,45 @@ def get_attachment_pg(aid: int) -> dict | None:
 
 
 def count_code_runs_today_pg(user_id: int) -> int:
-    """Code Interpreter answers this user got today (Asia/Bangkok) — the daily cap."""
+    """Sandbox answers this user got today (Asia/Bangkok) — Code Interpreter
+    and Document Engine share one daily cap."""
     with get_pg_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """
                 SELECT COUNT(*) FROM chat_history
-                WHERE user_id = %s AND source = 'code'
+                WHERE user_id = %s AND source IN ('code', 'document')
                   AND (asked_at AT TIME ZONE 'Asia/Bangkok')::date
                       = (now() AT TIME ZONE 'Asia/Bangkok')::date
                 """,
                 (user_id,),
             )
             return int(cur.fetchone()[0])
+
+
+def get_session_documents_pg(session_id: int, user_id: int, limit: int = 5) -> list[dict]:
+    """The newest Word/Excel/PowerPoint/PDF/CSV files of this session — the
+    user's uploads AND the ones the bot generated — one per file name, for a
+    follow-up edit ("แก้สไลด์ 3 ให้สั้นลง"). Only when the session, the message
+    and the file all belong to `user_id`; never a forked copy of a shared chat."""
+    with get_pg_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT DISTINCT ON (a.filename) a.filename, a.file_path, a.id
+                FROM attachments a
+                JOIN chat_history h ON h.id = a.message_id
+                JOIN chat_sessions s ON s.id = h.session_id
+                WHERE h.session_id = %s
+                  AND s.user_id = %s AND h.user_id = %s AND a.user_id = %s
+                  AND NOT COALESCE(h.is_forked, false)
+                  AND lower(a.filename) ~ '\\.(docx|xlsx|xls|csv|pptx|pdf)$'
+                ORDER BY a.filename, a.id DESC
+                """,
+                (session_id, user_id, user_id, user_id),
+            )
+            rows = sorted(cur.fetchall(), key=lambda r: -r[2])[:limit]
+    return [{"filename": r[0], "file_path": r[1]} for r in rows]
 
 
 def get_session_spreadsheets_pg(session_id: int, user_id: int, limit: int = 5) -> list[dict]:

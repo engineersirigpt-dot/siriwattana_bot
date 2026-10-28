@@ -8,6 +8,9 @@ E2E script (tests/e2e_code_interpreter.py).
 """
 
 import json
+import os
+import subprocess
+import sys
 from types import SimpleNamespace as NS
 
 import pytest
@@ -253,6 +256,34 @@ def test_instructions_send_summary_rows_to_the_tested_helper():
     assert "from sirigpt_tools import find_rows, closest_names" in text   # no hand-written == matching
     assert "ห้ามแปลงเป็นวันที่หรือเติมปีที่ไม่มีในไฟล์" in text            # "ม.ค." became "2026-01"
     assert ci._SANDBOX_TOOLS.exists()
+
+
+def run_loader(loader: str, then: str, tmp_path, uploads: dict[str, str | bytes]) -> list[str]:
+    """Run a sandbox loader line against a folder laid out like the real
+    sandbox (every upload stored as file-<id>-<name>); returns `then`'s output."""
+    data, scratch = tmp_path / "data", tmp_path / "scratch"
+    data.mkdir()
+    scratch.mkdir()
+    for i, (name, src) in enumerate(uploads.items()):
+        target = data / f"file-{i}AbCdEfGh{i}123456-{name}"
+        target.write_bytes(src if isinstance(src, bytes) else open(src, "rb").read())
+    code = loader.replace("'/tmp", f"'{scratch}").replace("/mnt/data", str(data))
+    out = subprocess.run([sys.executable, "-c", f"{code}\n{then}"], cwd=tmp_path, capture_output=True,
+                         encoding="utf-8", env={**os.environ, "PYTHONIOENCODING": "utf-8"})
+    assert out.returncode == 0, out.stderr
+    return out.stdout.replace(str(data), "<data>").replace(str(scratch), "<scratch>").splitlines()
+
+
+def test_sandbox_helper_loads_from_a_prefixed_upload(tmp_path):
+    # Seen on the real sandbox: uploads land as /mnt/data/file-<id>-<name>,
+    # so "sys.path.append('/mnt/data'); from sirigpt_tools import …" failed.
+    out = run_loader(ci._TOOLS_LOADER, "import sirigpt_tools; from sirigpt_tools import drop_summary_rows, "
+                                       "find_rows; print(sirigpt_tools.__file__)",
+                     tmp_path, {"sirigpt_tools.py": str(ci._SANDBOX_TOOLS)})
+    assert out == ["<scratch>/sirigpt_tools.py"]
+    assert ci._TOOLS_LOADER in ci._INSTRUCTIONS
+    assert "glob.glob('/mnt/data/*Sarabun-Regular.ttf')" in ci._INSTRUCTIONS
+    assert "sys.path.append('/mnt/data')" not in ci._INSTRUCTIONS
 
 
 def test_safe_name_strips_paths():

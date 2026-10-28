@@ -86,6 +86,10 @@ _TOOL_GUIDE = {
     "run_python": "- run_python: เมื่อต้องคำนวณหลายขั้นหรือต้องแม่นยำ (สูตร การเงิน ดอกเบี้ย สถิติ), "
     "วิเคราะห์ข้อมูลตารางหรือไฟล์ Excel/CSV ที่แนบ, สร้างกราฟ หรือสร้างไฟล์ Excel/CSV/PNG — ใส่ task "
     "ให้ครบพร้อมตัวเลขที่ต้องใช้\n",
+    "make_document": "- make_document: เมื่อผู้ใช้ขอให้ 'สร้าง/ทำ/แก้ไข/แปลง/จัดรูปแบบ' ไฟล์เอกสาร Word, "
+    "Excel, PowerPoint หรือ PDF (รายงาน จดหมาย สไลด์ ตาราง Excel ที่มีสูตร) หรือแก้ไฟล์เอกสารที่แนบ/"
+    "ที่สร้างไว้ก่อนหน้า หรือใช้ไฟล์แนบเป็นแม่แบบ — ใส่ task ให้ครบ (เนื้อหา โครงสร้าง ตัวเลข) และ format "
+    "ถ้าแค่ถามเนื้อหาในไฟล์ (สรุป แปล ถามข้อมูล) ไม่ต้องใช้\n",
     "use_standard_answer": "- use_standard_answer: เมื่อไม่ต้องใช้เครื่องมืออื่นข้างบน — คำถามเกี่ยวกับบริษัท"
     "เราเอง (HR สวัสดิการ เครื่องจักร ขั้นตอน ฯลฯ ระบบภายในตอบได้ดีกว่า), ความรู้ทั่วไป, เขียน/แปล/สรุป/"
     "โค้ด, คิดเลขง่าย ๆ, ทักทาย, หรือคำถามต่อเนื่องที่ตอบได้จากประวัติ\n",
@@ -153,6 +157,20 @@ TOOL_RUN_PYTHON = _fn(
     {"task": {"type": "string", "description": "what to compute/analyse/produce, with every number needed"}},
     ["task"],
 )
+TOOL_MAKE_DOCUMENT = _fn(
+    "make_document",
+    "Create, edit or convert a document file for the user: Word (.docx) reports and "
+    "letters, Excel (.xlsx) workbooks with formulas and charts, PowerPoint (.pptx) "
+    "slides, PDF; edit an attached or earlier-generated document; use an attached "
+    "file as a template. Not for questions that only ask about a file's content.",
+    {
+        "task": {"type": "string", "description": "the document to produce or the edit to make: content, "
+                                                  "structure, numbers, style — everything needed"},
+        "format": {"type": "string", "enum": ["docx", "xlsx", "pptx", "pdf", "auto"],
+                   "description": "output file type (auto = same as the attached file / best fit)"},
+    },
+    ["task", "format"],
+)
 
 
 class AgentError(RuntimeError):
@@ -166,8 +184,9 @@ class AgentResult:
     usage: list[dict] = field(default_factory=list)   # per-call dicts for llm.accumulate_usage
     tools: list[dict] = field(default_factory=list)   # [{"tool", "arg", "ok"}] for the audit log
     steps: int = 0
-    files: list = field(default_factory=list)         # code_interpreter.CIFile from run_python
+    files: list = field(default_factory=list)         # code_interpreter.CIFile from run_python / make_document
     used_code: bool = False
+    used_document: bool = False
 
 
 def agent_enabled_for(user: dict) -> bool:
@@ -223,22 +242,29 @@ def run_agent(
     input_files: list[tuple[str, str]] | None = None,
     file_note: str = "",
     allow_standard: bool = True,
+    doc_enabled: bool = False,
+    doc_files: list[tuple[str, str]] | None = None,
 ) -> Iterator[tuple[str, Any]]:
     """Run one agent turn. Yields:
-        ("status", "agent_searching" | "agent_reading" | "agent_coding" | "agent_writing")
+        ("status", "agent_searching" | "agent_reading" | "agent_coding" | "agent_document"
+                   | "agent_writing")
         ("delta", text)            — answer text, streamed
         ("standard", usage_dict)   — no tool needed; caller runs its normal pipeline
         ("done", AgentResult)      — finished (text already yielded as deltas)
     Raises AgentError on API failure/timeout. Tool failures don't raise — they're
     reported to the model as tool output so it can answer from what it has.
     `on_web_search(query, cost_usd)` is called once per search (quota logging).
-    `web_enabled` / `ci_enabled` pick the tools offered (web_search+read_url /
-    run_python); `input_files` [(name, path)] go into the Python sandbox and
-    `file_note` tells the router what is attached. `allow_standard=False` drops
+    `web_enabled` / `ci_enabled` / `doc_enabled` pick the tools offered
+    (web_search+read_url / run_python / make_document); `input_files` go into
+    run_python's sandbox, `doc_files` into make_document's, and `file_note`
+    tells the router what is attached. `allow_standard=False` drops
     use_standard_answer, so the turn can only be answered with the offered tools.
     """
+    import doc_engine
+
     client = client or llm._get_client()
-    budget = AGENT_TIMEOUT_S + (code_interpreter.CI_TIMEOUT_S if ci_enabled else 0)
+    budget = AGENT_TIMEOUT_S + max(code_interpreter.CI_TIMEOUT_S if ci_enabled else 0,
+                                   doc_engine.DOC_TIMEOUT_S if doc_enabled else 0)
     deadline = time.monotonic() + budget
     reasoning = (
         {"reasoning": {"effort": AGENT_REASONING_EFFORT}} if llm._is_reasoning_model(AGENT_MODEL) else {}
@@ -257,6 +283,8 @@ def run_agent(
         out = (([TOOL_WEB_SEARCH] if can_search() else []) + [TOOL_READ_URL]) if web_enabled else []
         if ci_enabled and code_runs < AGENT_MAX_CODE_RUNS:
             out.append(TOOL_RUN_PYTHON)
+        if doc_enabled and code_runs < AGENT_MAX_CODE_RUNS:
+            out.append(TOOL_MAKE_DOCUMENT)
         return out + [TOOL_STANDARD] if first and allow_standard else out
 
     def create(**kw: Any) -> Any:
@@ -305,7 +333,7 @@ def run_agent(
                 arg = str(args.get("query") or "").strip()[:300]
             elif call.name == "read_url":
                 arg = str(args.get("url") or "").strip()
-            elif call.name == "run_python":
+            elif call.name in ("run_python", "make_document"):
                 arg = str(args.get("task") or "").strip()[:4000]
             else:
                 arg = ""
@@ -372,6 +400,27 @@ def run_agent(
                         }
                     except Exception as e:
                         out = {"error": f"รันโค้ดไม่สำเร็จ ({e if isinstance(e, code_interpreter.CIError) else type(e).__name__})"}
+            elif call.name == "make_document" and doc_enabled:
+                if code_runs >= AGENT_MAX_CODE_RUNS:
+                    out = {"error": "สร้างเอกสารครบจำนวนที่อนุญาตแล้ว — ให้ตอบจากข้อมูลที่มี"}
+                else:
+                    yield "status", "agent_document"
+                    code_runs += 1
+                    try:
+                        doc = doc_engine.run_document(
+                            question + file_note, arg, str(args.get("format") or "auto"), history,
+                            doc_files, client=client, timeout=remaining(),
+                        )
+                        result.usage.append(doc.usage)
+                        result.files.extend(doc.files)
+                        result.used_document = True
+                        step_code.append(doc.answer)
+                        out = {
+                            "result": doc.answer[:AGENT_TOOL_TEXT_CHARS],
+                            "files_attached_for_user": [f.name for f in doc.files],
+                        }
+                    except Exception as e:
+                        out = {"error": f"สร้างเอกสารไม่สำเร็จ ({e if isinstance(e, code_interpreter.CIError) else type(e).__name__})"}
             else:
                 out = {"error": f"ไม่รู้จักเครื่องมือ {call.name}"}
 
@@ -384,10 +433,10 @@ def run_agent(
                 "output": json.dumps(out, ensure_ascii=False),
             })
 
-        # run_python already returns a finished Thai answer. When it was the only
-        # tool this turn, show it as-is — a rewrite costs one more model call.
+        # run_python / make_document already return a finished Thai answer. When
+        # only they ran this turn, show it as-is — a rewrite costs one more call.
         if step_code and all(
-            t["tool"] == "use_standard_answer" or (t["tool"] == "run_python" and t["ok"])
+            t["tool"] == "use_standard_answer" or (t["tool"] in ("run_python", "make_document") and t["ok"])
             for t in result.tools
         ):
             result.answer = "\n\n".join(step_code)
