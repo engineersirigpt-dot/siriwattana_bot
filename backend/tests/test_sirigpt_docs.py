@@ -184,6 +184,8 @@ def test_excel_formula_errors_are_issues(tmp_path):
     ("=IF(A1>3,1,1/0)", 1), ("=ROUND(2.5,0)", 3), ("=ROUND(-2.5,0)", -3), ("=ROUNDDOWN(2.99,1)", 2.9),
     ("=AVERAGE(A1:A3)", 5), ("=COUNT(A1:A3)", 1), ("=COUNTA(A1:A3)", 1), ("=MAX(A1:A3)+MIN(A1:A3)", 10),
     ("=COUNTIF(A1:A3,\">4\")", 1), ("=ABS(-3)", 3), ("=TRUE", True),
+    # an error inside ( ) in the branch not taken (prod: =IF(ROW()=2,"-",IF(B1=0,"",(B2-B1)/B1)), B1 a header)
+    ("=IF(A1>3,1,(A1-\"x\")/2)", 1), ("=IF(A1>3,\"-\",IF(A1=0,\"\",(A1-\"x\")/A1))", "-"),
 ])
 def test_formula_evaluator(tmp_path, formula, expected):
     import openpyxl
@@ -195,6 +197,58 @@ def test_formula_evaluator(tmp_path, formula, expected):
     rep = sd.formula_report(str(tmp_path / "f.xlsx"))
     assert rep["errors"] == [] and rep["unverified"] == [], rep
     assert rep["values"]["Sheet!B1"] == expected
+
+
+def test_lookup_and_conditional_functions(tmp_path):
+    # A prod dashboard used ROW / INDEX+MATCH and was reported as "ตรวจผลสูตรไม่ได้ 7 ช่อง".
+    import openpyxl
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "ข้อมูล"
+    for row in [["เดือน", "สาขา", "ยอดขาย"], ["ส.ค.", "กทม", 1250000], ["ก.ย.", "กทม", 1420000],
+                ["ต.ค.", "ชลบุรี", 1580000]]:
+        ws.append(row)
+    cases = {
+        "E1": ('=IF(ROW()=1,"-",C1-C0)', "-"), "E3": ("=IF(ROW()=2,\"-\",C3-C2)", 170000),
+        "F1": ("=COLUMN()", 6),
+        "E5": ("=INDEX(A2:A4,MATCH(MAX(C2:C4),C2:C4,0))", "ต.ค."),
+        "E6": ("=INDEX(A1:C4,3,3)", 1420000), "E7": ("=MATCH(1500000,C2:C4,1)", 2),
+        "E8": ('=VLOOKUP("ก.ย.",A2:C4,3,FALSE)', 1420000), "E9": ("=VLOOKUP(\"ก.ย.\",A2:C4,2,0)", "กทม"),
+        "E10": ('=SUMIFS(C2:C4,B2:B4,"กทม")', 2670000), "E11": ('=COUNTIFS(B2:B4,"กทม",C2:C4,">1300000")', 1),
+        "E12": ('=AVERAGEIFS(C2:C4,B2:B4,"กทม")', 1335000), "E13": ("=MEDIAN(C2:C4)", 1420000),
+        "E14": ("=AND(C2>0,C3>C2)", True), "E15": ("=OR(C2>2000000,NOT(C3>0))", False),
+        "E16": ('=LEN(B4)&"-"&CONCAT(A2,"/",B2)', "6-ส.ค./กทม"),
+    }
+    for cell, (f, _) in cases.items():
+        ws[cell] = f
+    ws["E2"] = '=MATCH("ธ.ค.",A2:A4,0)'                                 # not found → #N/A
+    wb.save(tmp_path / "l.xlsx")
+    rep = sd.formula_report(str(tmp_path / "l.xlsx"))
+    assert rep["errors"] == [{"cell": "ข้อมูล!E2", "error": "#N/A"}]
+    assert [u["cell"] for u in rep["unverified"]] == ["ข้อมูล!E1"]       # C0 is not a cell
+    for cell, (_, want) in cases.items():
+        if cell != "E1":
+            assert rep["values"][f"ข้อมูล!{cell}"] == want, (cell, rep["values"][f"ข้อมูล!{cell}"])
+
+
+def test_style_table_keeps_percent_and_fits_numbers(tmp_path):
+    # Seen on prod: a "(%)" column of ratios was shown as 0.14, and a 10.5-wide
+    # column held 1,250,000.00 (Excel shows ####).
+    import openpyxl
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.append(["เดือน", "ยอดขาย (บาท)", "เปลี่ยนแปลง (%)", "สัดส่วน (%)", "ร้อยละ (คิดแล้ว)"])
+    ws.append(["ส.ค.", 1250000, "-", 0.3, 30])
+    ws.append(["ก.ย.", 1420000, "=(B3-B2)/B2", 0.7, "=B3/B2*100"])
+    ws["B3"].number_format = "#,##0"                                     # set by the model: kept
+    sd.style_table(ws)
+    assert ws["C3"].number_format == "0.00%" and ws["D2"].number_format == "0.00%"
+    assert ws["E2"].number_format == "#,##0.00" and ws["E3"].number_format == "#,##0.00"   # already ×100
+    assert ws["B2"].number_format == "#,##0.00" and ws["B3"].number_format == "#,##0"
+    assert ws.column_dimensions["B"].width >= len("1,250,000.00") * 1.1
+    assert ws.column_dimensions["C"].width < 20                          # not sized by the formula text
 
 
 def test_circular_reference_is_unverified_not_a_crash(tmp_path):

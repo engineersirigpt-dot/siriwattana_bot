@@ -669,28 +669,58 @@ def prepare_workbook(wb) -> None:
     wb.calculation.fullCalcOnLoad = True
 
 
-def style_table(ws, header_row: int = 1, number_format: str = "#,##0.00", font: str = DOCX_FONT) -> None:
-    """Bold shaded header, number format, column widths, frozen header."""
+def style_table(ws, header_row: int = 1, number_format: str = "#,##0.00", font: str = DOCX_FONT,
+                percent_format: str = "0.00%") -> None:
+    """Bold shaded header, number formats, column widths, frozen header.
+    A number format already set on a cell is kept; a column whose header says
+    % / ร้อยละ and holds ratios (≤ 1, or a division formula) gets percent_format.
+    Widths follow numbers as shown (1,250,000.00), so Excel shows no ####."""
     from openpyxl.styles import Alignment, Font, PatternFill
     from openpyxl.utils import get_column_letter
 
+    headers = {c.column: str(c.value or "") for c in ws[header_row]}
     widths: dict[int, float] = {}
+    shown_nums: dict[int, int] = {}
+    formula_cols: dict[int, bool] = {}                 # column → holds a percent formula
     for row in ws.iter_rows():
         for c in row:
             if c.value is None:
                 continue
             c.font = Font(name=font, bold=c.row == header_row, size=11)
+            number = isinstance(c.value, (int, float)) and not isinstance(c.value, bool)
+            formula = isinstance(c.value, str) and c.value.startswith("=")
             if c.row == header_row:
                 c.fill = PatternFill("solid", fgColor="E4DDF1")
                 c.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-            elif isinstance(c.value, (int, float)) and not isinstance(c.value, bool):
-                c.number_format = number_format
-            elif isinstance(c.value, str) and c.value.startswith("="):
-                c.number_format = number_format
+            elif (number or formula) and c.row > header_row:
+                if c.number_format == "General":
+                    head = headers.get(c.column, "")
+                    ratio = abs(c.value) <= 1 if number else "/" in c.value and "*100" not in c.value.replace(" ", "")
+                    pct = ("%" in head or "ร้อยละ" in head) and ratio
+                    c.number_format = percent_format if pct else number_format
+                if number:
+                    shown_nums[c.column] = max(shown_nums.get(c.column, 0), len(_shown(c.value, c.number_format)))
+                    continue
+                formula_cols[c.column] = formula_cols.get(c.column, False) or "%" in c.number_format
+                continue
             widths[c.column] = max(widths.get(c.column, 0), min(50, text_width_em(str(c.value)) * 1.3 + 2))
+    for col in set(shown_nums) | set(formula_cols):
+        chars = shown_nums.get(col, 0)
+        if col in formula_cols:                        # value unknown here: room for a total
+            chars = max(chars + 2, 7 if formula_cols[col] else 13)
+        widths[col] = max(widths.get(col, 0), min(50, chars * 1.1 + 2))
     for col, wdt in widths.items():
         ws.column_dimensions[get_column_letter(col)].width = max(8, wdt)
     ws.freeze_panes = ws.cell(row=header_row + 1, column=1)
+
+
+def _shown(v: float, fmt: str) -> str:
+    """Roughly how Excel shows a number in these formats."""
+    m = re.search(r"\.(0+)", fmt)
+    digits = len(m.group(1)) if m else 0
+    if "%" in fmt:
+        return f"{v * 100:,.{digits}f}%"
+    return f"{v:,.{digits}f}" if "#,##" in fmt else f"{v:.{digits}f}"
 
 
 # ── a small formula evaluator, to check the numbers a workbook will show ────
@@ -754,7 +784,7 @@ class _Evaluator:
                 raise _Unsupported("circular reference")
             self.busy.add(key)
             try:
-                v = self.formula(sheet, v[1:])
+                v = self.formula(sheet, v[1:], key[1])
             finally:
                 self.busy.discard(key)
         elif not isinstance(v, (int, float, str, bool)) and v is not None:
@@ -769,21 +799,24 @@ class _Evaluator:
             raise _Unsupported("range too large")
         from openpyxl.utils import get_column_letter
 
-        return [self.cell(sheet, f"{get_column_letter(c)}{r}")
-                for r in range(min(r1, r2), max(r1, r2) + 1) for c in range(min(c1, c2), max(c1, c2) + 1)]
+        rows, cols = range(min(r1, r2), max(r1, r2) + 1), range(min(c1, c2), max(c1, c2) + 1)
+        out = _Range(self.cell(sheet, f"{get_column_letter(c)}{r}") for r in rows for c in cols)
+        out.shape = (len(rows), len(cols))
+        return out
 
     # parser (precedence: compare < & < +- < */ < ^ < unary < %) -----------
-    def formula(self, sheet: str, text: str):
+    def formula(self, sheet: str, text: str, at: str | None = None):
         # a referenced cell's formula is parsed in the middle of this one
-        saved = (getattr(self, "sheet", None), getattr(self, "toks", None), getattr(self, "i", 0))
-        self.sheet, self.toks, self.i = sheet, _tokens(text), 0
+        saved = (getattr(self, "sheet", None), getattr(self, "toks", None), getattr(self, "i", 0),
+                 getattr(self, "at", None))
+        self.sheet, self.toks, self.i, self.at = sheet, _tokens(text), 0, at
         try:
             val = self.compare()
             if self.i != len(self.toks):
                 raise _Unsupported("unexpected text in formula")
             return val
         finally:
-            self.sheet, self.toks, self.i = saved
+            self.sheet, self.toks, self.i, self.at = saved
 
     def peek(self):
         return self.toks[self.i] if self.i < len(self.toks) else (None, None)
@@ -865,7 +898,7 @@ class _Evaluator:
                 sheet = sheet[1:-1].replace("''", "'") if sheet.startswith("'") else sheet
             if ":" in ref:
                 a, b = ref.split(":")
-                return _Range(self.range(sheet, a, b))
+                return self.range(sheet, a, b)
             return self.cell(sheet, ref)
         if kind == "func":
             name = val.upper()
@@ -889,11 +922,13 @@ class _Evaluator:
 
     def lazy_arg(self):
         """IF/IFERROR arguments: evaluate now, but keep an error as a value."""
+        start = self.i
         try:
             return self.compare()
         except _XLError as e:
-            depth = 0
-            while self.i < len(self.toks):            # skip the rest of this argument
+            # the error may come from inside "( … )": find the argument's end from its start
+            self.i, depth = start, 0
+            while self.i < len(self.toks):
                 kind, t = self.peek()
                 if depth == 0 and t in (",", ";", ")"):
                     break
@@ -956,11 +991,108 @@ class _Evaluator:
             if not hn:
                 raise _XLError("#DIV/0!")
             return sum(hn) / len(hn)
+        if name in ("SUMIFS", "COUNTIFS", "AVERAGEIFS"):
+            first = 0 if name == "COUNTIFS" else 1
+            pairs = args[first:]
+            if not pairs or len(pairs) % 2:
+                raise _Unsupported(f"{name} arguments")
+            ranges = [_flat([pairs[k]]) for k in range(0, len(pairs), 2)]
+            tests = [_criteria(pairs[k + 1]) for k in range(0, len(pairs), 2)]
+            target = _flat([args[0]]) if first else ranges[0]
+            if any(len(r) != len(target) for r in ranges):
+                raise _XLError("#VALUE!")
+            hits = [t for i, t in enumerate(target) if all(f(r[i]) for f, r in zip(tests, ranges))]
+            if name == "COUNTIFS":
+                return float(len(hits))
+            hn = [h for h in hits if isinstance(h, (int, float)) and not isinstance(h, bool)]
+            if name == "SUMIFS":
+                return float(sum(hn))
+            if not hn:
+                raise _XLError("#DIV/0!")
+            return sum(hn) / len(hn)
+        if name == "MEDIAN":
+            import statistics
+
+            xs = nums()
+            if not xs:
+                raise _XLError("#NUM!")
+            return float(statistics.median(xs))
+        if name in ("AND", "OR"):
+            vals = [_truthy(x) for x in _flat(args) if x not in (None, "")]
+            return all(vals) if name == "AND" else any(vals)
+        if name == "NOT":
+            return not _truthy(args[0])
+        if name == "LEN":
+            return float(len(_s(args[0])))
+        if name in ("CONCAT", "CONCATENATE"):
+            return "".join(_s(x) for x in _flat(args))
+        if name in ("ROW", "COLUMN"):                  # of the cell being evaluated
+            if args or not getattr(self, "at", None):
+                raise _Unsupported(f"function {name} with a reference")
+            r, c = _cell_xy(self.at)
+            return float(r if name == "ROW" else c)
+        if name == "INDEX":
+            rng = args[0]
+            if not isinstance(rng, _Range):
+                raise _Unsupported("INDEX of a single value")
+            rows, cols = rng.shape
+            r = int(_n(args[1])) if len(args) > 1 else 1
+            c = int(_n(args[2])) if len(args) > 2 else 1
+            if rows == 1 and len(args) == 2:           # INDEX(A1:E1, n) counts along the row
+                r, c = 1, r
+            if r == 0 or c == 0:
+                raise _Unsupported("INDEX of a whole row/column")
+            if not (1 <= r <= rows and 1 <= c <= cols):
+                raise _XLError("#REF!")
+            return rng[(r - 1) * cols + c - 1]
+        if name == "MATCH":
+            return float(_match(args[0], _flat([args[1]]), int(_n(args[2])) if len(args) > 2 else 1))
+        if name == "VLOOKUP":
+            table = args[1]
+            if not isinstance(table, _Range):
+                raise _Unsupported("VLOOKUP of a single value")
+            rows, cols = table.shape
+            col = int(_n(args[2]))
+            if not 1 <= col <= cols:
+                raise _XLError("#REF!")
+            exact = len(args) > 3 and not _truthy(args[3])
+            r = _match(args[0], [table[i * cols] for i in range(rows)], 0 if exact else 1)
+            return table[(r - 1) * cols + col - 1]
         raise _Unsupported(f"function {name}")
 
 
 class _Range(list):
-    pass
+    shape: tuple[int, int] = (0, 0)
+
+
+def _match(x, values: list, kind: int) -> int:
+    """MATCH's 1-based position: kind 0 exact (text ignores case), 1 = largest
+    ≤ x in ascending data, -1 = smallest ≥ x in descending data."""
+    if isinstance(x, str) and kind == 0 and any(ch in x for ch in "*?~"):
+        raise _Unsupported("MATCH wildcard")
+
+    def key(v):
+        return v.lower() if isinstance(v, str) else float(v) if isinstance(v, (int, float)) else v
+
+    if kind == 0:
+        for i, v in enumerate(values, 1):
+            if type(key(v)) is type(key(x)) and key(v) == key(x):
+                return i
+        raise _XLError("#N/A")
+    best = None
+    for i, v in enumerate(values, 1):
+        if v is None or v == "":
+            continue
+        a, b = key(v), key(x)
+        if type(a) is not type(b):
+            raise _Unsupported("MATCH over mixed types")
+        if (a <= b) if kind > 0 else (a >= b):
+            best = i
+        else:
+            break                                      # sorted data: past the target
+    if best is None:
+        raise _XLError("#N/A")
+    return best
 
 
 def _flat(args) -> list:
