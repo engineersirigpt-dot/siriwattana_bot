@@ -35,7 +35,17 @@ from openai import OpenAI
 HERE = Path(__file__).resolve().parent
 load_dotenv(HERE / ".env")
 
-MODEL = os.getenv("LLM_MODEL", "gpt-4.1")
+# โมเดลแปลเอกสารแยกจาก LLM_MODEL (แชท) — เปลี่ยนแชทเป็น gpt-5 ได้โดยการแปลไม่กระทบ
+MODEL = os.getenv("TRANSLATE_MODEL", "gpt-4.1")
+
+
+def _gen_kwargs(temperature: float, n: int) -> dict:
+    """gpt-4.1 & co.: temperature + max_tokens. Reasoning models (gpt-5…) reject
+    both: max_completion_tokens (with room for reasoning) + effort low."""
+    if MODEL.lower().startswith(("gpt-5", "o1", "o3", "o4")):
+        return {"max_completion_tokens": n + 4000, "reasoning_effort": "low"}
+    return {"temperature": temperature, "max_tokens": n}
+
 TEXT_LAYER_MIN = 60   # ตัวอักษรขั้นต่ำในหน้า ถึงจะถือว่าเป็น "หน้าดิจิทัล" (ใช้ไฮบริด)
 # gpt-4.1 ราคาโดยประมาณ (USD ต่อ 1M tokens) — ใช้ประเมินต้นทุนเท่านั้น
 PRICE_IN = 2.0
@@ -222,8 +232,7 @@ def translate_image(b64: str, source_text: str | None = None) -> tuple[str, int,
     """แปลภาพหน้า -> markdown. ถ้ามี source_text จะใช้โหมดไฮบริด (ตัวอักษรแม่นยำ)"""
     resp = client.chat.completions.create(
         model=MODEL,
-        temperature=0.2,
-        max_tokens=12000,
+        **_gen_kwargs(0.2, 12000),
         messages=[
             {"role": "system", "content": SYSTEM_PROMPT},
             {
@@ -264,8 +273,7 @@ def verify_image(b64: str, md: str, source_text: str | None = None) -> tuple[str
     user_text = _with_source(VERIFY_PROMPT, source_text) + "\n\n=== คำแปลที่ต้องตรวจ ===\n" + md
     resp = client.chat.completions.create(
         model=MODEL,
-        temperature=0,
-        max_tokens=14000,
+        **_gen_kwargs(0, 14000),
         response_format={"type": "json_object"},
         messages=[
             {"role": "system", "content": VERIFY_SYSTEM},

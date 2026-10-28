@@ -505,6 +505,19 @@ def _model_kwargs(model: str, n: int, effort: str | None = None) -> dict:
     return {"max_tokens": n}
 
 
+def _classifier_kwargs(model: str, n: int) -> dict:
+    """Kwargs for a short deterministic call (a yes/no, a label, a small JSON).
+    Older chat models: temperature 0 + max_tokens, as always. Reasoning models
+    reject both, and think before answering: the lowest effort they accept,
+    plus room for those reasoning tokens."""
+    if _is_reasoning_model(model):
+        import model_router
+
+        effort = model_router.effort_for(model, "minimal")
+        return {"max_completion_tokens": n + 600, **({"reasoning_effort": effort} if effort else {})}
+    return {"temperature": 0, "max_tokens": n}
+
+
 def _chat_create(model: str, messages: list[dict], n: int, effort: str | None = None, **extra):
     """chat.completions.create for an answer. Returns (response, model, effort used).
 
@@ -883,12 +896,11 @@ def classify_query(question: str) -> tuple[str, dict]:
     try:
         res = _get_client().chat.completions.create(
             model=LLM_MODEL_CLASSIFIER,
-            temperature=0,
             messages=[
                 {"role": "system", "content": CLASSIFY_PROMPT},
                 {"role": "user", "content": question},
             ],
-            **_model_kwargs(LLM_MODEL_CLASSIFIER, 5),
+            **_classifier_kwargs(LLM_MODEL_CLASSIFIER, 5),
         )
         text = (res.choices[0].message.content or "").strip().lower()
         category = "calc" if "calc" in text else "general"
@@ -925,12 +937,11 @@ def wants_web_search(question: str) -> bool:
     try:
         res = _get_client().chat.completions.create(
             model=LLM_MODEL_CLASSIFIER,
-            temperature=0,
             messages=[
                 {"role": "system", "content": _WEB_DECIDE_PROMPT},
                 {"role": "user", "content": q},
             ],
-            **_model_kwargs(LLM_MODEL_CLASSIFIER, 3),
+            **_classifier_kwargs(LLM_MODEL_CLASSIFIER, 3),
         )
         return "yes" in (res.choices[0].message.content or "").strip().lower()
     except Exception:
@@ -959,12 +970,11 @@ def wants_image_generation(question: str) -> bool:
     try:
         res = _get_client().chat.completions.create(
             model=LLM_MODEL_CLASSIFIER,
-            temperature=0,
             messages=[
                 {"role": "system", "content": _IMAGE_DECIDE_PROMPT},
                 {"role": "user", "content": q},
             ],
-            **_model_kwargs(LLM_MODEL_CLASSIFIER, 3),
+            **_classifier_kwargs(LLM_MODEL_CLASSIFIER, 3),
         )
         return "yes" in (res.choices[0].message.content or "").strip().lower()
     except Exception:
