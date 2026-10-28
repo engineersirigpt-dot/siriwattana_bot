@@ -728,6 +728,16 @@ def _add_table(doc, header: list[str], rows: list[list[str]], next_image=None):
 
 # ---------------------------------------------------------------- embed fonts
 
+# What Word itself writes for Sarabun (from the font's OS/2 table: Thai code
+# page 874 and the Thai Unicode range). Without it, Word in Protected View —
+# where embedded fonts are not loaded — picked a non-Thai stand-in and showed
+# the Thai text as boxes until "Enable Editing".
+_SARABUN_FONT_INFO = (
+    '<w:panose1 w:val="00000500000000000000"/><w:charset w:val="DE"/><w:family w:val="auto"/>'
+    '<w:pitch w:val="variable"/><w:sig w:usb0="21000007" w:usb1="00000001" w:usb2="00000000" '
+    'w:usb3="00000000" w:csb0="20010193" w:csb1="00000000"/>'
+)
+
 def _obfuscate_font(guid: str, data: bytes) -> bytes:
     """ทำให้ TTF เป็น .odttf ตามสเปก OOXML — XOR 32 ไบต์แรกด้วย mask จาก GUID (กลับลำดับ)"""
     h = guid.replace("-", "").replace("{", "").replace("}", "")
@@ -771,7 +781,7 @@ def embed_fonts_in_docx(docx_path) -> bool:
             embed_children.append(
                 f'<w:{tag} r:id="{rid}" w:fontKey="{{{guid}}}" w:subsetted="false"/>'
             )
-        font_el = '<w:font w:name="Sarabun">' + "".join(embed_children) + "</w:font>"
+        font_el = '<w:font w:name="Sarabun">' + _SARABUN_FONT_INFO + "".join(embed_children) + "</w:font>"
 
         # fontTable.xml — เพิ่มรายการฟอนต์ Sarabun ที่ฝัง
         ft = "word/fontTable.xml"

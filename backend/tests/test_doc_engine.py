@@ -168,6 +168,11 @@ def test_good_docx_is_delivered_with_embedded_thai_font(tmp_path, monkeypatch):
     assert [f.name for f in files] == ["รายงาน.docx", "chart.png"]
     with zipfile.ZipFile(io.BytesIO(files[0].data)) as z:
         assert any(n.startswith("word/fonts/") for n in z.namelist())   # Sarabun embedded
+        font_table = z.read("word/fontTable.xml").decode()
+    # …and declared Thai, so Word's stand-in in Protected View (no embedded
+    # fonts there) is a Thai font, not boxes. Schema order: info before embeds.
+    sarabun = font_table[font_table.index('<w:font w:name="Sarabun">'):]
+    assert sarabun.index('<w:charset w:val="DE"/>') < sarabun.index('w:csb0="20010193"') < sarabun.index("<w:embedRegular")
     r = reports[0]
     assert r.ok and r.stats["tables"] == 1
     assert "ยังไม่ได้ตรวจหน้าตาเอกสาร (แปลงไฟล์เพื่อแสดงผลไม่ได้)" in r.warnings
