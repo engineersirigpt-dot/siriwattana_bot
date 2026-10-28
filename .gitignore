@@ -53,3 +53,6 @@ Thumbs.db
 
 backups/
 *.sql
+# frontend build/test output
+*.tsbuildinfo
+frontend/e2e-ui/test-results/

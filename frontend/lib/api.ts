@@ -207,6 +207,9 @@ export async function sendChatStream(
     // Progress signal before any token (e.g. "generating_image" during the
     // slow image-generation step). Optional.
     onStatus?: (state: string) => void;
+    // The chat the answer goes into, sent before the answer starts — a new
+    // chat that is stopped mid-answer is still that chat. Optional.
+    onSession?: (s: { session_id: number; session_title: string }) => void;
   },
 ): Promise<void> {
   const fd = new FormData();
@@ -241,6 +244,8 @@ export async function sendChatStream(
     }
     if (evt.type === "delta") handlers.onDelta(String(evt.v ?? ""));
     else if (evt.type === "status") handlers.onStatus?.(String(evt.state ?? ""));
+    else if (evt.type === "session")
+      handlers.onSession?.({ session_id: Number(evt.session_id), session_title: String(evt.session_title ?? "") });
     else if (evt.type === "done") handlers.onDone(evt as unknown as StreamDone);
     else if (evt.type === "error")
       handlers.onError(String(evt.detail ?? "เกิดข้อผิดพลาด"), evt.code as string | undefined);
@@ -481,6 +486,63 @@ export async function fetchAttachmentBlobUrl(id: number): Promise<string> {
   if (!res.ok) throw new Error("download failed");
   const blob = await res.blob();
   return URL.createObjectURL(blob);
+}
+
+// ── V5 chat UI ──────────────────────────────────────────────────────────────
+
+// Which chat page this user gets (backend UI_V5_MODE). Any failure → classic.
+export async function getUiConfig(): Promise<{ ui_v5: boolean }> {
+  return api<{ ui_v5: boolean }>("/ui/config");
+}
+
+// A user on V5 can go back to the classic page; kept per browser.
+const UI_PREF_KEY = "siri_ui";
+export function getUiPreference(): "classic" | null {
+  try {
+    return localStorage.getItem(UI_PREF_KEY) === "classic" ? "classic" : null;
+  } catch {
+    return null;
+  }
+}
+export function setUiPreference(pref: "classic" | null) {
+  try {
+    if (pref) localStorage.setItem(UI_PREF_KEY, pref);
+    else localStorage.removeItem(UI_PREF_KEY);
+  } catch {
+    /* storage blocked — the server default applies */
+  }
+}
+
+// An attachment fetch that says WHY it failed (gone / not yours / other), so a
+// file card can show a useful message instead of failing silently.
+export class AttachmentError extends Error {
+  constructor(public status: number) {
+    super(
+      status === 404 || status === 410
+        ? "ไฟล์นี้ไม่มีแล้ว (อาจถูกลบหรือหมดอายุ)"
+        : status === 403
+          ? "คุณไม่มีสิทธิ์เปิดไฟล์นี้"
+          : "เปิดไฟล์ไม่สำเร็จ ลองใหม่อีกครั้ง",
+    );
+  }
+}
+
+export async function fetchAttachment(id: number): Promise<Blob> {
+  const token = getToken();
+  let res: Response;
+  try {
+    res = await fetch(attachmentUrl(id), {
+      headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+    });
+  } catch {
+    throw new AttachmentError(0);
+  }
+  if (!res.ok) throw new AttachmentError(res.status);
+  return res.blob();
+}
+
+export function saveBlob(blob: Blob, filename: string) {
+  triggerDownload(blob, filename);
 }
 
 export async function register(username: string, password: string) {
