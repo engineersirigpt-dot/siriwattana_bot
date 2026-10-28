@@ -13,6 +13,7 @@ from sirigpt_tools import (
     find_rows,
     is_summary_label,
     name_matches,
+    names_in_query,
     summary_row_flags,
 )
 
@@ -130,6 +131,36 @@ def test_negative_lines_such_as_credit_notes():
 ])
 def test_name_matches(value, query, expected):
     assert name_matches(value, query) is expected
+
+
+ITEMS = ["งานรวมเล่ม", "กล่องลูกฟูก", "กล่อง", "ฉลากสินค้า", "งานรวมเล่ม", None]
+
+
+@pytest.mark.parametrize("query,expected", [
+    # E2E miss: Thai has no spaces, the model searched "item + ทั้งไตรมาส"
+    ("งานรวมเล่มทั้งไตรมาส", {"งานรวมเล่ม"}),
+    ("ยอดงานรวมเล่มเดือนนี้", {"งานรวมเล่ม"}),
+    # longest only: not every generic "กล่อง" row as well
+    ("กล่องลูกฟูกทั้งปี", {"กล่องลูกฟูก"}),
+    ("กล่องทั้งหมด", {"กล่อง"}),
+    ("แคตตาล็อกทั้งไตรมาส", set()),
+])
+def test_names_in_query(query, expected):
+    assert names_in_query(ITEMS, query) == expected
+
+
+def test_names_in_query_ignores_very_short_values():
+    assert names_in_query(["ก", "ขข"], "กขขค") == set()
+
+
+def test_find_rows_falls_back_to_names_inside_the_query():
+    pd = pytest.importorskip("pandas")
+    df = pd.DataFrame({"รายการ": ["งานรวมเล่ม", "กล่องลูกฟูก", "งานรวมเล่ม", "กล่อง"],
+                       "ยอดขาย": [10000, 12000, 4000, 500]})
+    assert find_rows(df, "รายการ", "งานรวมเล่มทั้งไตรมาส")["ยอดขาย"].sum() == 14000
+    assert find_rows(df, "รายการ", "กล่องลูกฟูกทั้งปี")["ยอดขาย"].sum() == 12000
+    # a direct match still wins: "กล่อง" is inside "กล่องลูกฟูก" → both are boxes
+    assert find_rows(df, "รายการ", "กล่อง")["ยอดขาย"].sum() == 12500
 
 
 def test_find_rows_and_closest_names():

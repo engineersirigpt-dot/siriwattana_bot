@@ -78,7 +78,8 @@ _INSTRUCTIONS = (
     "(ไม่สนช่องว่าง ตัวพิมพ์ และคำว่า บริษัท ร้าน หจก. จำกัด) บอกผู้ใช้ว่านับรวมชื่อใดบ้าง — ถ้าไม่พบ "
     "ให้แสดง closest_names(clean, '<คอลัมน์>', '<ชื่อ>') ก่อนสรุปว่าไม่มี\n"
     "- ถ้าแต่ละ sheet แทนช่วงเวลาหรือกลุ่ม (เช่น ชื่อ sheet เป็นเดือน สาขา แผนก) และไม่มีคอลัมน์วันที่/กลุ่ม "
-    "ให้ใช้ชื่อ sheet เป็นกลุ่มนั้นตามลำดับใน workbook\n"
+    "ให้ใช้ชื่อ sheet เป็นกลุ่มนั้นตามลำดับใน workbook และแสดงด้วยชื่อ sheet ตามเดิม (เช่น 'ม.ค.') "
+    "ห้ามแปลงเป็นวันที่หรือเติมปีที่ไม่มีในไฟล์\n"
     "- กราฟ: matplotlib บันทึกเป็น PNG ที่ /mnt/data (dpi=150) ถ้ามีตัวอักษรไทยให้ลงทะเบียนฟอนต์ "
     "/mnt/data/Sarabun-Regular.ttf ด้วย matplotlib.font_manager.fontManager.addfont(...) แล้วตั้ง "
     "rcParams['font.family'] = 'Sarabun'\n"
@@ -169,6 +170,23 @@ def outline(name: str, path: str) -> dict:
     return out
 
 
+_FINISH_PROMPT = (
+    "สรุปคำตอบสุดท้ายให้ผู้ใช้จากผลที่คำนวณไว้แล้วด้านบน ตามกฎเดิมทั้งหมด (ห้ามรันโค้ดเพิ่ม) "
+    "ถ้าผลยังไม่ครบ ให้บอกตรง ๆ ว่าส่วนไหนยังคำนวณไม่ได้"
+)
+
+
+def _needs_final_answer(resp: Any) -> bool:
+    """True when the run ended after a code call with no answer after it, or
+    was cut off (status "incomplete")."""
+    if getattr(resp, "status", None) == "incomplete":
+        return True
+    kinds = [getattr(o, "type", None) for o in (getattr(resp, "output", None) or [])]
+    last_msg = max((i for i, k in enumerate(kinds) if k == "message"), default=-1)
+    last_call = max((i for i, k in enumerate(kinds) if k == "code_interpreter_call"), default=-1)
+    return last_call > last_msg
+
+
 def _safe_name(path: str) -> str:
     name = re.sub(r"[^\w.\-ก-๙ ]", "_", Path(path).name).strip() or "result"
     return name[:120]
@@ -240,6 +258,27 @@ def run_code(
         calls = [o for o in (resp.output or []) if getattr(o, "type", None) == "code_interpreter_call"]
         container_id = next((c.container_id for c in calls if getattr(c, "container_id", None)), None)
         answer = _clean_answer(getattr(resp, "output_text", "") or "")
+        responses = [resp]
+        if container_id and _needs_final_answer(resp):
+            # The run stopped right after a code call (e.g. at the run cap) with
+            # only its opening line ("กำลังคำนวณ…"). Ask once for the answer from
+            # the results already computed — same container, no more code.
+            try:
+                final = client.responses.create(
+                    model=CI_MODEL,
+                    previous_response_id=resp.id,
+                    input=[{"role": "user", "content": _FINISH_PROMPT}],
+                    tools=[{"type": "code_interpreter", "container": container_id}],
+                    tool_choice="none",
+                    max_output_tokens=CI_MAX_OUTPUT_TOKENS,
+                    timeout=min(timeout, 90),
+                    **kwargs,
+                )
+            except Exception as e:
+                # an opening line alone is no answer — report a failed run
+                raise CIError(f"no final answer ({type(e).__name__})") from e
+            responses.append(final)
+            answer = _clean_answer(getattr(final, "output_text", "") or "")
         if not answer:
             raise CIError("no answer text")
 
@@ -255,8 +294,11 @@ def run_code(
                 if len(data) <= CI_MAX_OUTPUT_BYTES:
                     files.append(CIFile(_safe_name(cf.path), CI_OUTPUT_TYPES[ext], data))
 
-        u = getattr(resp, "usage", None)
-        p, c = int(getattr(u, "input_tokens", 0) or 0), int(getattr(u, "output_tokens", 0) or 0)
+        p = c = 0
+        for r in responses:
+            u = getattr(r, "usage", None)
+            p += int(getattr(u, "input_tokens", 0) or 0)
+            c += int(getattr(u, "output_tokens", 0) or 0)
         usage = {
             "model": CI_MODEL,
             "prompt_tokens": p,

@@ -19,6 +19,7 @@ import argparse
 import csv
 import io
 import json
+import re
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -98,12 +99,35 @@ def upload_chat(tok: str, msg: str, files: list[tuple[str, bytes, str]], sid: in
     }
 
 
+def text_chat(tok: str, msg: str, sid: int | None = None) -> dict:
+    """Non-stream /chat without files."""
+    t0 = time.monotonic()
+    data = {"message": msg}
+    if sid:
+        data["session_id"] = str(sid)
+    r = httpx.post(f"{BASE}/chat", data=data, headers=hdr(tok), timeout=400)
+    r.raise_for_status()
+    j = r.json()
+    return {
+        "answer": j["answer"], "source": j["source"], "attachments": j.get("attachments") or [],
+        "session_id": j["session_id"], "message_id": j.get("message_id"),
+        "statuses": [], "first_s": None, "total_s": round(time.monotonic() - t0, 2),
+    }
+
+
 def download(tok: str, aid: int) -> httpx.Response:
     return httpx.get(f"{BASE}/attachments/{aid}", headers=hdr(tok), timeout=60)
 
 
 def digits(text: str) -> str:
     return text.replace(",", "").replace(" ", "")
+
+
+def invented_year(text: str) -> bool:
+    """The test workbooks have month sheets but no year — a result labelled
+    with a year was made up (seen: "2026-01 = 41,650" for sheet "ม.ค.").
+    Only labels count: offering "เช่น 2026-01" as an example is fine."""
+    return re.search(r"(?:20|25)\d\d-\d{1,2}\s*[:=]", text) is not None
 
 
 def record(case: str, ok: bool, res: dict | None = None, **extra) -> bool:
@@ -304,14 +328,16 @@ def phase_on(tok: dict[str, str]) -> None:
                           [("sales.xlsx", sales_xlsx(), XLSX)])
         state["sales"] = res
         ok = res["source"] == "code" and str(SALES_TOTAL) in digits(res["answer"]) \
-            and all(str(v) in digits(res["answer"]) for v in (41650, 33400, 22600))
+            and all(str(v) in digits(res["answer"]) for v in (41650, 33400, 22600)) \
+            and not invented_year(res["answer"])
         record("excel_multisheet_total", ok, res)
     guarded("excel_multisheet_total", run_sales)
 
     def run_follow_up():
         sid = state["sales"]["session_id"]
         res = stream_chat(trial, "แล้วเดือนไหนยอดขายสูงสุด และสูงกว่าเดือนที่ต่ำสุดกี่บาท", sid)
-        ok = ("ม.ค" in res["answer"] or "มกราคม" in res["answer"]) and "19050" in digits(res["answer"])
+        ok = ("ม.ค" in res["answer"] or "มกราคม" in res["answer"]) and "19050" in digits(res["answer"]) \
+            and not invented_year(res["answer"])
         record("excel_follow_up_same_session", ok, res)
     guarded("excel_follow_up_same_session", run_follow_up)
 
@@ -474,6 +500,61 @@ def phase_on(tok: dict[str, str]) -> None:
     guarded("regression_proofreading_v11", run_reg_proofread)
 
 
+# ── Phase "quota" (backend restarted with CODE_INTERPRETER_DAILY_LIMIT=1, so
+#    e2e_trial — who already used Code Interpreter today — has no runs left) ──
+
+CODE_LIMIT_TEXT = "คุณใช้สิทธิ์วิเคราะห์ข้อมูลครบจำนวนครั้งที่กำหนดสำหรับวันนี้แล้ว กรุณาลองใหม่ในวันถัดไป"
+BLOCKED_PREFIX = "ข้อมูลนี้เป็นข้อมูลส่วนบุคคล"
+FLAGGED_FOLLOW_UP = "แล้วเดือนไหนยอดขายสูงสุด และสูงกว่าเดือนที่ต่ำสุดกี่บาท"   # the classifier flags it
+
+
+def phase_quota(tok: dict[str, str]) -> None:
+    trial, other = tok["e2e_trial"], tok["e2e_other"]
+    state: dict = {}
+
+    def run_setup():
+        # out of runs → no sandbox; the normal file answer still works
+        res = upload_chat(trial, "สรุปไฟล์นี้ให้หน่อย", [("sales.xlsx", sales_xlsx(), XLSX)])
+        state["sid"] = res["session_id"]
+        record("quota_upload_falls_back_to_file_answer", res["source"] in ("files", "code_limit"), res)
+    guarded("quota_setup", run_setup)
+
+    def run_follow_up_stream():
+        res = stream_chat(trial, FLAGGED_FOLLOW_UP, state["sid"])
+        record("quota_follow_up_stream_says_quota",
+               res["source"] == "code_limit" and res["answer"] == CODE_LIMIT_TEXT, res)
+    guarded("quota_follow_up_stream", run_follow_up_stream)
+
+    def run_follow_up_chat():
+        res = text_chat(trial, FLAGGED_FOLLOW_UP + " ครับ", state["sid"])
+        record("quota_follow_up_chat_says_quota",
+               res["source"] == "code_limit" and res["answer"] == CODE_LIMIT_TEXT, res)
+    guarded("quota_follow_up_chat", run_follow_up_chat)
+
+    def run_sensitive_still_blocked():
+        for name, q in (("classifier", UNAUTHORIZED[0]), ("keyword", UNAUTHORIZED[2])):
+            res = stream_chat(trial, q, state["sid"])
+            record(f"quota_sensitive_still_blocked_{name}",
+                   res["source"] == "blocked" and res["answer"].startswith(BLOCKED_PREFIX), res)
+    guarded("quota_sensitive_still_blocked", run_sensitive_still_blocked)
+
+    def run_upload_flagged():
+        res = upload_chat(trial, "ลูกค้ารายไหนมียอดขายรวมสูงสุดในไฟล์นี้ และเท่าไหร่",
+                          [("customers.csv", customers_csv(), "text/csv")])
+        ok = res["source"] in ("code_limit", "files") and not res["answer"].startswith(BLOCKED_PREFIX)
+        if res["source"] == "code_limit":   # the upload stays attached for tomorrow
+            ok = ok and res["answer"] == CODE_LIMIT_TEXT and len(res["attachments"]) == 1
+        record("quota_upload_flagged_question_not_called_sensitive", ok, res)
+    guarded("quota_upload_flagged", run_upload_flagged)
+
+    def run_not_entitled():
+        # e2e_other has no Code Interpreter at all → the sensitive block stands
+        res = upload_chat(other, "สรุปไฟล์นี้ให้หน่อย", [("sales.xlsx", sales_xlsx(), XLSX)])
+        res2 = stream_chat(other, FLAGGED_FOLLOW_UP, res["session_id"])
+        record("quota_reply_only_for_entitled_users", res2["source"] == "blocked", res2)
+    guarded("quota_not_entitled", run_not_entitled)
+
+
 # ── Phase "off" (backend restarted with both flags off) ─────────────────────
 
 def phase_off(tok: dict[str, str]) -> None:
@@ -486,8 +567,12 @@ def phase_off(tok: dict[str, str]) -> None:
 
     def run_xlsx_off():
         res = upload_chat(admin, "รวมยอดขายทุก sheet", [("sales.xlsx", sales_xlsx(), XLSX)])
+        # pre-V2 behaviour: the file answer — or, now and then, the original
+        # classifier blocking "ยอดขาย" as internal data (no file exemption
+        # without Code Interpreter). Never the sandbox.
         record("flag_off_excel_uses_files_path",
-               res["source"] == "files" and not any(a.get("generated") for a in res["attachments"]), res)
+               res["source"] in ("files", "blocked")
+               and not any(a.get("generated") for a in res["attachments"]), res)
     guarded("flag_off_excel_uses_files_path", run_xlsx_off)
 
 
@@ -495,7 +580,7 @@ def main() -> int:
     global BASE
     ap = argparse.ArgumentParser()
     ap.add_argument("--base", required=True)
-    ap.add_argument("--phase", choices=("on", "off"), default="on")
+    ap.add_argument("--phase", choices=("on", "off", "quota"), default="on")
     ap.add_argument("--setup", action="store_true")
     ap.add_argument("--only", nargs="*", default=[], help="run only cases containing these names")
     args = ap.parse_args()
@@ -509,7 +594,7 @@ def main() -> int:
         return 0
 
     tok = {u: login(u) for u in USERS}
-    (phase_on if args.phase == "on" else phase_off)(tok)
+    {"on": phase_on, "off": phase_off, "quota": phase_quota}[args.phase](tok)
     failed = [r["case"] for r in results if not r["ok"]]
     print(f"\n{len(results) - len(failed)}/{len(results)} PASS" + (f" — FAILED: {failed}" if failed else ""))
     return 1 if failed else 0

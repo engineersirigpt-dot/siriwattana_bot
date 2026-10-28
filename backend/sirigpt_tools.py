@@ -147,9 +147,27 @@ def name_matches(value, query) -> bool:
     return bool(q) and q in normalize_name(value)
 
 
+def names_in_query(values, query) -> set[str]:
+    """Fallback when no value contains `query`: the longest values that appear
+    INSIDE it. Thai has no spaces, so "งานรวมเล่มทั้งไตรมาส" (item + "whole
+    quarter") still finds "งานรวมเล่ม" — and "กล่องลูกฟูกทั้งปี" finds
+    "กล่องลูกฟูก", not every generic "กล่อง" row too."""
+    q = normalize_name(query)
+    inside = {str(v) for v in values if len(normalize_name(v)) >= 3 and normalize_name(v) in q}
+    if not inside:
+        return set()
+    longest = max(len(normalize_name(v)) for v in inside)
+    return {v for v in inside if len(normalize_name(v)) == longest}
+
+
 def find_rows(df, col, query):
-    """Rows of `df` whose `col` names `query` (see name_matches)."""
-    return df[df[col].map(lambda v: name_matches(v, query))].copy()
+    """Rows of `df` whose `col` names `query` (see name_matches); if none,
+    rows whose value appears inside the query (see names_in_query)."""
+    hits = df[df[col].map(lambda v: name_matches(v, query))]
+    if hits.empty:
+        inside = names_in_query(df[col].tolist(), query)
+        hits = df[df[col].map(lambda v: str(v) in inside)]
+    return hits.copy()
 
 
 def closest_names(df, col, query, n: int = 3) -> list[str]:

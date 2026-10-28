@@ -172,6 +172,63 @@ def test_run_code_caps_output_files_and_size(monkeypatch):
     assert "huge.xlsx" not in [f.name for f in r.files]
 
 
+class FakeCIStops(FakeCI):
+    """First response ends right after a code call, with only an opening line
+    (seen in E2E when the model used up its code runs)."""
+
+    def __init__(self, final_text="ม.ค. 41,650 บาท สูงสุด", final_error=None, status=None, **kw):
+        super().__init__(answer="กำลังอ่านไฟล์และคำนวณ…", **kw)
+        self.final_text, self.final_error, self.status = final_text, final_error, status
+
+    def _create(self, **kw):
+        self.requests.append(kw)
+        if "previous_response_id" in kw:
+            if self.final_error:
+                raise self.final_error
+            return NS(id="r2", output=[NS(type="message")], output_text=self.final_text,
+                      usage=NS(input_tokens=300, output_tokens=100))
+        out = [NS(type="message"), NS(type="code_interpreter_call", container_id="cntr_1"),
+               NS(type="code_interpreter_call", container_id="cntr_1")]
+        if self.status:                                  # cut off, but a message came last
+            out = out[1:] + [NS(type="message")]
+        return NS(id="r1", status=self.status, output=out, output_text=self._answer,
+                  usage=NS(input_tokens=2000, output_tokens=1000))
+
+
+def test_run_without_final_answer_asks_once_for_it():
+    client = FakeCIStops()
+    r = ci.run_code("q", "t", [], [], client=client)
+
+    assert r.answer == "ม.ค. 41,650 บาท สูงสุด"                       # not the opening line
+    first, final = client.requests
+    assert final["previous_response_id"] == "r1" and final["tool_choice"] == "none"
+    assert final["tools"] == [{"type": "code_interpreter", "container": "cntr_1"}]  # same container
+    assert r.usage["prompt_tokens"] == 2300 and r.usage["completion_tokens"] == 1100
+    assert r.usage["cost_usd"] == pytest.approx(
+        ci.estimate_cost_usd(ci.CI_MODEL, 2300, 1100) + ci.CI_CONTAINER_USD)   # one container fee
+    assert client.deleted_containers == ["cntr_1"]
+
+
+def test_incomplete_status_also_asks_for_the_final_answer():
+    client = FakeCIStops(status="incomplete")
+    assert ci.run_code("q", "t", [], [], client=client).answer == "ม.ค. 41,650 บาท สูงสุด"
+    assert len(client.requests) == 2
+
+
+@pytest.mark.parametrize("kw", [{"final_error": TimeoutError()}, {"final_text": ""}])
+def test_no_final_answer_is_a_failed_run_not_an_opening_line(kw):
+    client = FakeCIStops(**kw)
+    with pytest.raises(ci.CIError):
+        ci.run_code("q", "t", [], [], client=client)
+    assert client.deleted_containers == ["cntr_1"]                     # still cleaned up
+
+
+def test_complete_run_is_not_asked_again():
+    client = FakeCI()                                                # message after the calls
+    ci.run_code("q", "t", [], [], client=client)
+    assert len(client.requests) == 1
+
+
 def test_run_code_empty_answer_is_an_error():
     with pytest.raises(ci.CIError):
         ci.run_code("q", "t", [], [], client=FakeCI(answer=""))
@@ -194,6 +251,7 @@ def test_instructions_send_summary_rows_to_the_tested_helper():
     assert "ห้ามกรองแถวด้วยการค้นคำว่า 'รวม'" in text
     assert "ค้นหาชื่อลูกค้า/สินค้าแบบยืดหยุ่น" in text
     assert "from sirigpt_tools import find_rows, closest_names" in text   # no hand-written == matching
+    assert "ห้ามแปลงเป็นวันที่หรือเติมปีที่ไม่มีในไฟล์" in text            # "ม.ค." became "2026-01"
     assert ci._SANDBOX_TOOLS.exists()
 
 
@@ -587,12 +645,12 @@ def scope(monkeypatch, glue, tmp_path):
     return seen
 
 
-def _allowed(category="CUSTOMER", session_id=5, user=ADMIN, uploads=None):
-    return main._file_scope_allowed(user, "แล้วเดือนไหนยอดขายสูงสุด", session_id, "normal", category, None, uploads)
+def _decide(category="CUSTOMER", session_id=5, user=ADMIN, uploads=None):
+    return main._file_scope_decision(user, "แล้วเดือนไหนยอดขายสูงสุด", session_id, "normal", category, None, uploads)
 
 
 def test_scope_allowed_for_own_spreadsheet(scope, glue):
-    assert _allowed() is True
+    assert _decide() == "allowed"
     question, files = scope.calls[0]
     assert files[0]["file"] == "sales.xlsx" and "ม.ค." in files[0]["sheets"]
     assert "sensitive_file_scope_allowed" in glue.audits
@@ -600,34 +658,75 @@ def test_scope_allowed_for_own_spreadsheet(scope, glue):
 
 def test_scope_denied_when_second_check_says_block(scope, glue):
     scope.verdict = False
-    assert _allowed() is False
+    assert _decide() == "denied"
     assert "sensitive_file_scope_denied" in glue.audits
 
 
-@pytest.mark.parametrize("case", ["credentials", "ci_off", "no_files", "no_session", "quota", "company_mode"])
+@pytest.mark.parametrize("case", ["credentials", "ci_off", "no_files", "no_session", "company_mode"])
 def test_scope_never_granted_outside_its_conditions(monkeypatch, scope, glue, case):
+    glue.state.code_runs_today = ci.CI_DAILY_LIMIT        # no runs left must not change the verdict
     if case == "credentials":
-        assert _allowed(category="CREDENTIALS") is False
+        assert _decide(category="CREDENTIALS") == "denied"
     elif case == "ci_off":
         monkeypatch.setattr(ci, "CODE_INTERPRETER_MODE", "off")
-        assert _allowed() is False
+        assert _decide() == "denied"
     elif case == "no_files":
         glue.state.session_sheets = []
-        assert _allowed() is False
+        assert _decide() == "denied"
     elif case == "no_session":
-        assert _allowed(session_id=None) is False
-    elif case == "quota":
-        glue.state.code_runs_today = ci.CI_DAILY_LIMIT
-        assert _allowed() is False
+        assert _decide(session_id=None) == "denied"
     elif case == "company_mode":
-        assert main._file_scope_allowed(ADMIN, "q", 5, "company", "CUSTOMER", None) is False
+        assert main._file_scope_decision(ADMIN, "q", 5, "company", "CUSTOMER", None) == "denied"
     assert scope.calls == []                                        # never even asked
+    assert "code_limit_hit" not in glue.audits                      # never shown the quota reply
 
 
 def test_scope_ignores_non_spreadsheets_and_purged_files(scope, glue):
     glue.state.session_sheets = [{"filename": "gone.xlsx", "file_path": "missing.xlsx"},
                                  {"filename": "notes.pdf", "file_path": "x.pdf"}]
-    assert _allowed() is False and scope.calls == []
+    assert _decide() == "denied" and scope.calls == []
+
+
+# ── quota exceeded vs sensitive content: two separate outcomes ───────────────
+
+def test_quota_reply_only_after_every_security_check_passed(scope, glue):
+    glue.state.code_runs_today = ci.CI_DAILY_LIMIT
+    assert _decide() == "quota"
+    assert len(scope.calls) == 1                                    # the file-aware check DID run
+    assert "code_limit_hit" in glue.audits
+    assert "sensitive_file_scope_allowed" not in glue.audits
+
+
+def test_sensitive_question_stays_blocked_even_with_no_runs_left(scope, glue):
+    glue.state.code_runs_today = ci.CI_DAILY_LIMIT
+    scope.verdict = False                                           # not about the file
+    assert _decide() == "denied"
+    assert "code_limit_hit" not in glue.audits
+
+
+def test_quota_decision_grants_nothing(scope, glue):
+    glue.state.code_runs_today = ci.CI_DAILY_LIMIT + 5
+    for _ in range(3):
+        assert _decide() == "quota"                                 # asking again doesn't reset it
+
+
+def test_code_limit_reply_is_saved_as_its_own_source(monkeypatch, glue):
+    out = main._code_limit_reply(ADMIN, "แล้วเดือนไหนสูงสุด", 5, "normal")
+    assert out["answer"] == main.CODE_LIMIT_TEXT
+    assert out["answer"] == "คุณใช้สิทธิ์วิเคราะห์ข้อมูลครบจำนวนครั้งที่กำหนดสำหรับวันนี้แล้ว กรุณาลองใหม่ในวันถัดไป"
+    row = glue.saved[0]
+    assert row["source"] == "code_limit" and row["answer"] == main.CODE_LIMIT_TEXT
+    assert row["source"] != "code"                                  # doesn't use up quota
+    assert out["message_id"] == 99 and out["attachments"] == []
+
+
+def test_code_limit_reply_keeps_the_upload_for_tomorrow(monkeypatch, glue):
+    _, _, size, path = att.save_generated_file(b"wb", "sales.xlsx", "x")
+    up = [{"filename": "sales.xlsx", "content_type": "x", "size": size, "file_path": path}]
+    out = main._code_limit_reply(ADMIN, "", None, "normal", up)
+    assert glue.saved[0]["question"] == "[ไฟล์แนบ]"
+    assert [a["filename"] for a in glue.attached] == ["sales.xlsx"] and len(out["attachments"]) == 1
+    assert not glue.attached[0].get("generated")
 
 
 def test_run_agent_without_standard_route_must_run_code(fake_code):
@@ -662,8 +761,8 @@ CLS_USAGE = {"model": "gpt-4o-mini", "prompt_tokens": 1000, "completion_tokens":
 SCOPE_USAGE = {"model": "gpt-4o-mini", "prompt_tokens": 500, "completion_tokens": 20, "cost_usd": 0.000087}
 
 
-def _stream(monkeypatch, *, keyword=None, flagged=None, scope_ok=False, user=ADMIN):
-    calls = NS(scope=[], scoped_turn=[], normal=False, charged=[], audits=[])
+def _gate(monkeypatch, calls, *, keyword, flagged, decision):
+    """Shared fakes for the safety gate in /chat and /chat/stream."""
     monkeypatch.setattr(main, "use_postgres_auth", lambda: True)
     monkeypatch.setattr(main, "is_sensitive", lambda q: keyword)
 
@@ -676,11 +775,25 @@ def _stream(monkeypatch, *, keyword=None, flagged=None, scope_ok=False, user=ADM
     monkeypatch.setattr(main, "_count_session_turns", lambda sid: 1)
     monkeypatch.setattr(main, "audit_log", lambda action, **kw: calls.audits.append((action, kw.get("detail"))))
     monkeypatch.setattr(chat_pg, "add_usage_to_message_pg", lambda mid, u: calls.charged.append((mid, u)))
+    monkeypatch.setattr(chat_pg, "ensure_session_pg", lambda **kw: (5, "t"))
+    monkeypatch.setattr(chat_pg, "save_chat_message_pg", lambda **kw: calls.saved.append(kw) or 77)
+    monkeypatch.setattr(
+        chat_pg, "save_attachment_pg",
+        lambda **kw: calls.attached.append(kw) or {"id": 1, "filename": kw["filename"],
+                                                   "content_type": kw["content_type"], "generated": False},
+    )
 
     def fake_scope(*a, usages=None, **kw):
         calls.scope.append(a)
         usages.append(dict(SCOPE_USAGE))     # the second, file-aware check
-        return scope_ok
+        return decision
+
+    monkeypatch.setattr(main, "_file_scope_decision", fake_scope)
+
+
+def _stream(monkeypatch, *, keyword=None, flagged=None, decision="denied", user=ADMIN):
+    calls = NS(scope=[], scoped_turn=[], normal=False, charged=[], audits=[], saved=[], attached=[])
+    _gate(monkeypatch, calls, keyword=keyword, flagged=flagged, decision=decision)
 
     def fake_turn(u, q, sid, mode, req, uploads=None, scoped=False):
         calls.scoped_turn.append(scoped)
@@ -692,7 +805,6 @@ def _stream(monkeypatch, *, keyword=None, flagged=None, scope_ok=False, user=ADM
         calls.normal = True
         raise AssertionError("normal pipeline must not run")
 
-    monkeypatch.setattr(main, "_file_scope_allowed", fake_scope)
     monkeypatch.setattr(main, "_agent_turn", fake_turn)
     monkeypatch.setattr(main, "_is_export_request", lambda q: False)
     monkeypatch.setattr(main, "_is_image_edit_request", boom)       # first step after the safety gate
@@ -706,23 +818,94 @@ def _stream(monkeypatch, *, keyword=None, flagged=None, scope_ok=False, user=ADM
 
 
 def test_stream_flagged_but_file_scoped_goes_to_sandbox_only(monkeypatch):
-    events, calls = _stream(monkeypatch, flagged=("CUSTOMER", "r"), scope_ok=True)
+    events, calls = _stream(monkeypatch, flagged=("CUSTOMER", "r"), decision="allowed")
     assert calls.scoped_turn == [True] and not calls.normal
     assert events[-1]["source"] == "code" and events[0]["v"] == "ผลจากไฟล์"
 
 
 def test_stream_flagged_and_not_file_scoped_is_blocked(monkeypatch):
-    events, calls = _stream(monkeypatch, flagged=("PII", "r"), scope_ok=False)
+    events, calls = _stream(monkeypatch, flagged=("PII", "r"), decision="denied")
     assert events[-1]["source"] == "blocked" and calls.scoped_turn == []
     assert events[0]["v"] == main.BLOCKED_RESPONSE
 
 
 def test_stream_keyword_hit_is_blocked_without_any_exemption(monkeypatch):
-    events, calls = _stream(monkeypatch, keyword="เงินเดือน", scope_ok=True)
+    events, calls = _stream(monkeypatch, keyword="เงินเดือน", decision="allowed")
     assert events[-1]["source"] == "blocked"
     assert calls.scope == [] and calls.scoped_turn == []
     assert calls.charged == []
     assert "cost_usd" not in calls.audits[0][1]                      # no classifier ran → no cost
+
+
+def test_stream_quota_gets_quota_reply_not_sensitive_block(monkeypatch):
+    events, calls = _stream(monkeypatch, flagged=("CUSTOMER", "r"), decision="quota")
+    assert events[0] == {"type": "delta", "v": main.CODE_LIMIT_TEXT}
+    assert events[-1]["source"] == "code_limit" and events[-1]["message_id"] == 77
+    assert main.BLOCKED_RESPONSE not in json.dumps(events, ensure_ascii=False)
+    assert calls.scoped_turn == [] and not calls.normal             # no sandbox, no normal pipeline
+    assert calls.saved[0]["source"] == "code_limit"
+    assert not any(a.startswith("sensitive_blocked") for a, _ in calls.audits)
+    assert calls.charged[0][0] == 77                                # classifier cost still tracked
+
+
+def test_stream_keyword_hit_never_turns_into_a_quota_reply(monkeypatch):
+    events, calls = _stream(monkeypatch, keyword="เงินเดือน", decision="quota")
+    assert events[-1]["source"] == "blocked" and calls.scope == [] and calls.saved == []
+
+
+# ── same separation on the non-stream /chat (text follow-up + upload) ────────
+
+def _chat(monkeypatch, tmp_path, *, flagged=("CUSTOMER", "r"), decision="denied", upload=False):
+    calls = NS(scope=[], charged=[], audits=[], saved=[], attached=[], turns=[])
+    _gate(monkeypatch, calls, keyword=None, flagged=flagged, decision=decision)
+    monkeypatch.setattr(ci, "CODE_INTERPRETER_MODE", "admin")        # upload path needs CI on
+
+    def fake_turn(*a, **kw):
+        calls.turns.append(kw)
+        yield "done", {"answer": "ผลจากไฟล์", "tail": "", "source": "code", "session_id": 5,
+                       "session_title": "t", "message_id": 9, "attachments": []}
+
+    monkeypatch.setattr(main, "_agent_turn", fake_turn)
+    files = None
+    if upload:
+        files = [("files", ("sales.xlsx", open(_xlsx(tmp_path), "rb").read(),
+                            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"))]
+    main.app.dependency_overrides[main.current_user] = lambda: ADMIN
+    try:
+        r = TestClient(main.app).post(
+            "/chat", data={"message": "แล้วเดือนไหนยอดขายสูงสุด", "session_id": "5"}, files=files)
+    finally:
+        main.app.dependency_overrides.pop(main.current_user, None)
+    return r, calls
+
+
+def test_chat_follow_up_quota_vs_sensitive_are_separate(monkeypatch, tmp_path):
+    r, calls = _chat(monkeypatch, tmp_path, decision="quota")
+    body = r.json()
+    assert body["source"] == "code_limit" and body["answer"] == main.CODE_LIMIT_TEXT
+    assert body["message_id"] == 77 and calls.turns == []
+    assert not any(a.startswith("sensitive_blocked") for a, _ in calls.audits)
+
+    r, calls = _chat(monkeypatch, tmp_path, decision="denied")
+    body = r.json()
+    assert body["source"] == "blocked" and body["answer"] == main.BLOCKED_RESPONSE
+    assert calls.saved == [] and calls.turns == []
+
+
+def test_chat_upload_quota_keeps_the_file_and_says_quota(monkeypatch, tmp_path):
+    r, calls = _chat(monkeypatch, tmp_path, decision="quota", upload=True)
+    body = r.json()
+    assert body["source"] == "code_limit" and body["answer"] == main.CODE_LIMIT_TEXT
+    assert [a["filename"] for a in calls.attached] == ["sales.xlsx"]
+    assert att.validate_upload_path(calls.attached[0]["file_path"])  # still on disk
+    assert calls.turns == []
+
+
+def test_chat_upload_sensitive_is_blocked_and_file_removed(monkeypatch, tmp_path):
+    r, calls = _chat(monkeypatch, tmp_path, decision="denied", upload=True)
+    assert r.json()["source"] == "blocked" and calls.attached == []
+    uploads = list(att.UPLOAD_DIR.iterdir())
+    assert uploads == []                                             # nothing of this upload kept
 
 
 # ---------------------------------------------------------------------------
@@ -798,7 +981,7 @@ def test_charge_adds_once_and_never_twice(monkeypatch):
 
 
 def test_stream_answered_turn_charges_both_classifiers_to_its_row(monkeypatch):
-    events, calls = _stream(monkeypatch, flagged=("CUSTOMER", "r"), scope_ok=True)
+    events, calls = _stream(monkeypatch, flagged=("CUSTOMER", "r"), decision="allowed")
     assert events[-1]["message_id"] == 9
     assert len(calls.charged) == 1
     mid, usage = calls.charged[0]
@@ -807,7 +990,7 @@ def test_stream_answered_turn_charges_both_classifiers_to_its_row(monkeypatch):
 
 
 def test_stream_blocked_turn_puts_cost_on_audit_entry(monkeypatch):
-    events, calls = _stream(monkeypatch, flagged=("PII", "r"), scope_ok=False)
+    events, calls = _stream(monkeypatch, flagged=("PII", "r"), decision="denied")
     assert events[-1]["source"] == "blocked" and calls.charged == []
     action, detail = calls.audits[-1]
     assert action == "sensitive_blocked_stream"

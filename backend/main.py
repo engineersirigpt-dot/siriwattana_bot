@@ -1237,6 +1237,9 @@ def _owned_spreadsheets(
 # Classifier categories never exempted, even for the user's own file.
 _FILE_SCOPE_NEVER = {"CREDENTIALS"}
 FILE_SCOPE_FAILED = "ขออภัยค่ะ วิเคราะห์ข้อมูลจากไฟล์ไม่สำเร็จ กรุณาลองถามใหม่อีกครั้ง หรือแนบไฟล์ใหม่ค่ะ"
+# Shown instead of the sensitive-data block when a file question passed every
+# check but the user has no Code Interpreter runs left today.
+CODE_LIMIT_TEXT = "คุณใช้สิทธิ์วิเคราะห์ข้อมูลครบจำนวนครั้งที่กำหนดสำหรับวันนี้แล้ว กรุณาลองใหม่ในวันถัดไป"
 
 
 def _safety_cost_detail(usages: list[dict]) -> dict:
@@ -1264,14 +1267,21 @@ def _charge_safety_usage(message_id: int | None, usages: list[dict]) -> None:
     add_usage_to_message_pg(message_id, usage)
 
 
-def _file_scope_allowed(
+def _file_scope_decision(
     user: dict, question: str, session_id: int | None, mode: str, category: str,
     request: Request, uploads: list[dict] | None = None, usages: list[dict] | None = None,
-) -> bool:
-    """The AI classifier flagged `question`. Allow it ONLY as analysis of the
-    user's own spreadsheets: Code Interpreter on for this user and under its
-    daily cap, owned Excel/CSV in this message or session, never credentials,
-    and a second, file-aware check (classify_file_question) agrees.
+) -> str:
+    """The AI classifier flagged `question`. Returns:
+        "allowed" — analysis of the user's own spreadsheets: Code Interpreter on
+                    for this user, owned Excel/CSV in this message or session,
+                    not credentials, a second file-aware check
+                    (classify_file_question) agrees, and runs left today
+        "quota"   — every one of those checks passed except the daily cap
+        "denied"  — anything else: the sensitive-data block stands
+
+    "quota" is decided LAST, so a question only ever sees the quota message
+    after passing the same security checks as an allowed one — a truly
+    sensitive question gets the sensitive block even with no runs left.
 
     An approval is narrow: the caller answers with _agent_turn(scoped=True) —
     the Python sandbox over those files only, never KB / AI Brain / web / other
@@ -1281,25 +1291,62 @@ def _file_scope_allowed(
     from sensitivity_classifier import classify_file_question
 
     if category in _FILE_SCOPE_NEVER or not _agent_tools(user, mode)[1]:
-        return False
-    if count_code_runs_today_pg(user["id"]) >= code_interpreter.CI_DAILY_LIMIT:
-        return False
+        return "denied"
     files = _owned_spreadsheets(user, session_id, uploads)
     if not files:
-        return False
+        return "denied"
     allowed, reason = classify_file_question(
         question, [code_interpreter.outline(name, path) for name, path in files], usages
     )
-    audit_log(
-        "sensitive_file_scope_allowed" if allowed else "sensitive_file_scope_denied",
-        user=user,
-        detail={
-            "category": category, "reason": reason,
-            "files": [name for name, _ in files], "prompt": question[:200],
-        },
-        request=request,
+    detail = {
+        "category": category, "reason": reason,
+        "files": [name for name, _ in files], "prompt": question[:200],
+    }
+    if not allowed:
+        audit_log("sensitive_file_scope_denied", user=user, detail=detail, request=request)
+        return "denied"
+    if count_code_runs_today_pg(user["id"]) >= code_interpreter.CI_DAILY_LIMIT:
+        audit_log(
+            "code_limit_hit", user=user,
+            detail={**detail, "limit": code_interpreter.CI_DAILY_LIMIT, "via": "file_scope"},
+            request=request,
+        )
+        return "quota"
+    audit_log("sensitive_file_scope_allowed", user=user, detail=detail, request=request)
+    return "allowed"
+
+
+def _code_limit_reply(
+    user: dict, question: str, session_id: int | None, mode: str,
+    uploads: list[dict] | None = None,
+) -> dict:
+    """Save and return the daily-quota reply for a file question that passed
+    every check (see _file_scope_decision). Saved like the other limit replies
+    (image_limit / web_limit) — source "code_limit" does not count toward the
+    quota. This turn's uploads stay attached, so the user can ask again in the
+    same chat tomorrow without re-uploading."""
+    from chat_pg import ensure_session_pg, save_attachment_pg, save_chat_message_pg
+
+    uploads = uploads or []
+    sid, stitle = ensure_session_pg(
+        user_id=user["id"], session_id=session_id,
+        first_question=question or uploads[0]["filename"], mode=mode,
     )
-    return allowed
+    mid = save_chat_message_pg(
+        user_id=user["id"], session_id=sid, question=question or "[ไฟล์แนบ]",
+        answer=CODE_LIMIT_TEXT, source="code_limit", knowledge_id=None, mode=mode,
+    )
+    rows = [
+        save_attachment_pg(
+            message_id=mid, user_id=user["id"], filename=u["filename"],
+            content_type=u["content_type"], size_bytes=u["size"], file_path=u["file_path"],
+        )
+        for u in uploads
+    ]
+    return {
+        "answer": CODE_LIMIT_TEXT, "tail": "", "source": "code_limit", "session_id": sid,
+        "session_title": stitle, "message_id": mid, "attachments": rows,
+    }
 
 
 def _agent_turn(
@@ -1320,7 +1367,7 @@ def _agent_turn(
     `uploads` are this message's saved files (dicts from the /chat files path):
     their Excel/CSV go into the Python sandbox and, on "done", all are saved
     with the answer. With uploads only run_python is offered.
-    `scoped=True` (a flagged question approved by _file_scope_allowed): only
+    `scoped=True` (a flagged question approved by _file_scope_decision): only
     run_python over the owned spreadsheets, no standard route, and anything but
     a successful sandbox answer ends as "fallback" with no text sent.
     """
@@ -1888,25 +1935,31 @@ async def _chat_turn(
 
     # A classifier flag on analysis of the user's OWN spreadsheets doesn't block:
     # the turn becomes file-scoped (sandbox over those files only — see
-    # _file_scope_allowed). For uploads that's decided once they're saved
-    # (`pending_scope`); for follow-ups, from the session's files now.
+    # _file_scope_decision), or gets the daily-quota reply when no runs are
+    # left. For uploads that's decided once they're saved (`pending_scope`);
+    # for follow-ups, from the session's files now.
     import code_interpreter
 
     file_scoped = False
+    code_limited = False
     pending_scope: str | None = None
     if question and not _is_linsip_query(question, session_id, user):
         classification = classify_sensitivity(question, safety_usages)
         if classification is not None:
             category, reason = classification
+            decision = "denied"
             if files and any(code_interpreter.is_ci_input(f.filename or "") for f in files) \
                     and _agent_tools(user, mode)[1]:
                 pending_scope = category
-            elif not files and await run_in_threadpool(
-                _file_scope_allowed, user, question, session_id, mode, category, request,
-                usages=safety_usages,
-            ):
-                file_scoped = True
-            else:
+                decision = "pending"
+            elif not files:
+                decision = await run_in_threadpool(
+                    _file_scope_decision, user, question, session_id, mode, category, request,
+                    usages=safety_usages,
+                )
+            file_scoped = decision == "allowed"
+            code_limited = decision == "quota"
+            if decision == "denied":
                 audit_log(
                     "sensitive_blocked_classifier",
                     user=user,
@@ -1950,6 +2003,13 @@ async def _chat_turn(
                 f"แชทนี้ครบ {MAX_TURNS_PER_SESSION} คำถามแล้ว — กรุณาเปิด 'แชทใหม่' "
                 "เพื่อถามต่อค่ะ (ช่วยให้ระบบเร็วและประหยัด token)",
             )
+
+    # File question that passed every check but has no Code Interpreter runs
+    # left today — say so (not the sensitive-data block); nothing else runs.
+    if code_limited:
+        return _agent_chat_response(
+            await run_in_threadpool(_code_limit_reply, user, question, session_id, mode)
+        )
 
     # File-scoped follow-up (approved above): only the sandbox over the user's
     # own spreadsheets may answer it; nothing else in the pipeline runs.
@@ -2181,10 +2241,15 @@ async def _chat_turn(
         # Flagged question on an attached spreadsheet: allowed only as analysis
         # of that file (decided now that its sheets/headers can be read).
         if pending_scope is not None:
-            if not await run_in_threadpool(
-                _file_scope_allowed, user, question, session_id, mode, pending_scope, request, saved_files,
+            decision = await run_in_threadpool(
+                _file_scope_decision, user, question, session_id, mode, pending_scope, request, saved_files,
                 usages=safety_usages,
-            ):
+            )
+            if decision == "quota":
+                return _agent_chat_response(await run_in_threadpool(
+                    _code_limit_reply, user, question, session_id, mode, saved_files,
+                ))
+            if decision != "allowed":
                 for sf in saved_files:  # blocked → keep nothing of this upload
                     try:
                         os.remove(sf["file_path"])
@@ -2743,15 +2808,18 @@ async def chat_stream(
             #    are NOT persisted to history. A job-number lookup skips the
             #    classifier (answered from the authorized WI page) but still runs
             #    the hard keyword filter. A classifier flag on analysis of the
-            #    user's own spreadsheets becomes a file-scoped turn (2.5) instead.
+            #    user's own spreadsheets becomes a file-scoped turn (2.5) — or the
+            #    daily-quota reply when no runs are left — instead.
             keyword_hit = is_sensitive(question) is not None
             flagged = None
             if not keyword_hit and not _is_linsip_query(question, session_id, user):
                 flagged = classify_sensitivity(question, safety_usages)
-            file_scoped = flagged is not None and _file_scope_allowed(
+            decision = "denied" if flagged is None else _file_scope_decision(
                 user, question, session_id, mode, flagged[0], request, usages=safety_usages
             )
-            if keyword_hit or (flagged is not None and not file_scoped):
+            file_scoped = decision == "allowed"
+            code_limited = decision == "quota"
+            if keyword_hit or (flagged is not None and decision == "denied"):
                 audit_log(
                     "sensitive_blocked_stream",
                     user=user,
@@ -2782,8 +2850,16 @@ async def chat_stream(
                     })
                     return
 
+            # 2.4) File question that passed every check, but no Code Interpreter
+            #      runs are left today — say so (not the sensitive-data block).
+            if code_limited:
+                res = _code_limit_reply(user, question, session_id, mode)
+                yield ev({"type": "delta", "v": res["answer"]})
+                yield ev(_agent_done_event(res))
+                return
+
             # 2.5) File-scoped analysis — a flagged question approved by
-            #      _file_scope_allowed. Only the sandbox over the user's own
+            #      _file_scope_decision. Only the sandbox over the user's own
             #      spreadsheets may answer it; nothing else in the pipeline runs.
             if file_scoped:
                 for kind, payload in _agent_turn(user, question, session_id, mode, request, scoped=True):

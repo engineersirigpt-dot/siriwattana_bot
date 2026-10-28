@@ -146,7 +146,7 @@ def _classify_cached(question_normalized: str) -> tuple[str, str]:
 # Second opinion used ONLY when classify_sensitivity flagged a question in a chat
 # where the user attached their own Excel/CSV (Code Interpreter V2). An approval
 # never opens the normal pipeline: the turn is answered by the Python sandbox
-# over those files alone (main._file_scope_allowed / _agent_turn(scoped=True)).
+# over those files alone (main._file_scope_decision / _agent_turn(scoped=True)).
 FILE_SCOPE_PROMPT = (
     "คุณคือผู้ตรวจสอบความปลอดภัยของ chatbot ภายในบริษัท คำถามนี้ถูกตัวกรองชั้นแรกจับไว้ว่าอาจขอข้อมูลภายใน "
     "แต่ผู้ใช้แนบไฟล์ Excel/CSV ของตัวเองไว้ในแชทนี้ (ระบบตรวจแล้วว่าเป็นไฟล์ที่ผู้ใช้คนนี้อัปโหลดเอง) "
