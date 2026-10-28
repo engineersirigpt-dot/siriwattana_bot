@@ -1201,9 +1201,47 @@ def _agent_tools(user: dict, mode: str) -> tuple[bool, bool]:
     return agent.agent_enabled_for(user), code_interpreter.ci_enabled_for(user)
 
 
+def _doc_enabled(user: dict, mode: str) -> bool:
+    """Document Engine V3 (DOCUMENT_ENGINE_MODE, off by default) — its own flag,
+    same rules as the others: postgres only, never in company-only mode."""
+    import doc_engine
+
+    return mode != "company" and use_postgres_auth() and doc_engine.doc_enabled_for(user)
+
+
 def _agent_enabled(user: dict, mode: str) -> bool:
-    """The agent router runs when Agent V1 or Code Interpreter is on for this user."""
-    return any(_agent_tools(user, mode))
+    """The agent router runs when Agent V1, Code Interpreter or the Document
+    Engine is on for this user."""
+    return any(_agent_tools(user, mode)) or _doc_enabled(user, mode)
+
+
+def _owned_documents(
+    user: dict, session_id: int | None, uploads: list[dict] | None = None
+) -> list[tuple[str, str]]:
+    """Documents the Document Engine may open this turn, as [(filename, path)]:
+    this message's uploads, else the newest documents of this session — the
+    user's uploads AND files the bot made, so "แก้สไลด์ 3" edits the deck it just
+    produced (session, message and file ownership checked in SQL)."""
+    import attachments as att
+    import code_interpreter
+    import doc_engine
+    from chat_pg import get_session_documents_pg
+
+    if uploads:
+        sources = uploads
+    elif session_id:
+        sources = get_session_documents_pg(session_id, user["id"])
+    else:
+        sources = []
+    out: list[tuple[str, str]] = []
+    for f in sources:
+        if not doc_engine.is_doc_input(f["filename"]):
+            continue
+        try:
+            out.append((f["filename"], str(att.validate_upload_path(f["file_path"]))))
+        except HTTPException:
+            continue  # file purged from disk
+    return out[: code_interpreter.CI_MAX_INPUT_FILES]
 
 
 def _owned_spreadsheets(
@@ -1396,23 +1434,30 @@ def _agent_turn(
 
     uploads = uploads or []
     web, code = _agent_tools(user, mode)
+    doc = _doc_enabled(user, mode) and not scoped
     web = web and not uploads and not scoped
-    if code and count_code_runs_today_pg(user["id"]) >= code_interpreter.CI_DAILY_LIMIT:
-        code = False  # daily cap reached — the normal pipeline still answers
+    if (code or doc) and count_code_runs_today_pg(user["id"]) >= code_interpreter.CI_DAILY_LIMIT:
+        # daily cap (shared by Code Interpreter and Document Engine) reached —
+        # the normal pipeline still answers
+        code = doc = False
         audit_log("code_limit_hit", user=user, detail={"limit": code_interpreter.CI_DAILY_LIMIT}, request=request)
-    if not (web or code):
+    if not (web or code or doc):
         yield "fallback", None
         return
 
-    # Spreadsheets for the sandbox: this message's uploads, or — for a text
-    # follow-up — the ones uploaded earlier in this session.
+    # Files for the sandbox: this message's uploads, or — for a text follow-up —
+    # the ones earlier in this session (run_python: the user's spreadsheets;
+    # make_document: documents, including the ones the bot made).
     file_note = ""
     input_files = _owned_spreadsheets(user, session_id, uploads) if code else []
+    doc_files = _owned_documents(user, session_id, uploads) if doc else []
+    if uploads:
+        file_note = "\n\n[ผู้ใช้แนบไฟล์: " + ", ".join(u["filename"] for u in uploads) + "]"
+    elif doc_files:
+        file_note = "\n\n[ไฟล์ในแชทนี้ (ล่าสุดก่อน): " + ", ".join(n for n, _ in doc_files) + "]"
+    elif input_files:
+        file_note = "\n\n[ไฟล์ Excel/CSV ที่แนบไว้ก่อนหน้าในแชทนี้: " + ", ".join(n for n, _ in input_files) + "]"
     if code:
-        if uploads:
-            file_note = "\n\n[ผู้ใช้แนบไฟล์: " + ", ".join(u["filename"] for u in uploads) + "]"
-        elif input_files:
-            file_note = "\n\n[ไฟล์ Excel/CSV ที่แนบไว้ก่อนหน้าในแชทนี้: " + ", ".join(n for n, _ in input_files) + "]"
         if scoped:
             file_note += (
                 "\n[ตอบจากข้อมูลในไฟล์ที่แนบเท่านั้น — ถ้าคำถามต้องใช้ข้อมูลที่ไม่อยู่ในไฟล์ "
@@ -1432,7 +1477,7 @@ def _agent_turn(
             prompt, history, web_quota_left=quota_left,
             on_web_search=lambda q, cost: record_web_search_pg(user["id"], q, cost),
             web_enabled=web, ci_enabled=code, input_files=input_files, file_note=file_note,
-            allow_standard=not scoped,
+            allow_standard=not scoped, doc_enabled=doc, doc_files=doc_files,
         ):
             if kind == "done":
                 result = payload
@@ -1457,7 +1502,7 @@ def _agent_turn(
         yield ("error" if emitted else "fallback"), None
         return
 
-    if (uploads or scoped) and not result.used_code:
+    if (uploads or scoped) and not (result.used_code or result.used_document):
         # The sandbox failed on the attached file — the normal file answer
         # (extracted text) beats an apology; a scoped question must not get a
         # model-only answer at all. Uploads only come from the non-stream path
@@ -1474,8 +1519,9 @@ def _agent_turn(
 
     tail = _format_citations(result.citations)
     answer = (result.answer + tail).strip()
-    # "code" also feeds the Code Interpreter daily cap (count_code_runs_today_pg).
-    source = "code" if result.used_code else "agent"
+    # "code" / "document" also feed the shared daily cap (count_code_runs_today_pg).
+    source = "document" if result.used_document else "code" if result.used_code else "agent"
+    sandbox_used = result.used_document or result.used_code
     sid, stitle = ensure_session_pg(
         user_id=user["id"], session_id=session_id,
         first_question=question or uploads[0]["filename"], mode=mode,
@@ -1485,7 +1531,7 @@ def _agent_turn(
         answer=answer, source=source, knowledge_id=None, mode=mode,
         usage=accumulate_usage(
             *result.usage,
-            primary_model=code_interpreter.CI_MODEL if result.used_code else agent.AGENT_MODEL,
+            primary_model=code_interpreter.CI_MODEL if sandbox_used else agent.AGENT_MODEL,
         ),
     )
     rows = [
@@ -1509,8 +1555,8 @@ def _agent_turn(
         detail={
             "session_id": sid, "message_id": mid, "steps": result.steps,
             "tools": result.tools[:10], "n_citations": len(result.citations),
-            "used_code": result.used_code, "n_files": len(result.files),
-            "n_inputs": len(input_files),
+            "used_code": result.used_code, "used_document": result.used_document,
+            "n_files": len(result.files), "n_inputs": len(input_files) + len(doc_files),
             "ms": int((time.monotonic() - started) * 1000), "prompt": question[:200],
         },
         request=request,
@@ -2315,7 +2361,14 @@ async def _chat_turn(
                 # (no create verb) still goes to the vision path below.
                 # A logo + a design request ("ทำโปสเตอร์ … ใส่โลโก้ตามไฟล์") makes a
                 # NEW design carrying that logo instead of editing the logo itself.
-                _ref_images = [sf for sf in saved_files if att.is_image(sf["content_type"])]
+                # A picture sent WITH a Word/Excel/PowerPoint/PDF file (Document
+                # Engine on) is material for that document, not an image to edit.
+                import doc_engine
+
+                _doc_upload = _doc_enabled(user, mode) and any(
+                    doc_engine.is_doc_file(sf["filename"]) for sf in saved_files)
+                _ref_images = [] if _doc_upload else [
+                    sf for sf in saved_files if att.is_image(sf["content_type"])]
                 _logo_design = bool(_ref_images) and _wants_logo_on_new_design(question)
                 if _logo_design or (_ref_images and _wants_image_from_reference(question)):
                     if _logo_design:
@@ -2340,16 +2393,16 @@ async def _chat_turn(
                         turn_limit=MAX_TURNS_PER_SESSION,
                     )
 
-                # Code Interpreter (CODE_INTERPRETER_MODE flag): an Excel/CSV is
-                # attached → the router picks run_python (exact totals, charts,
-                # new files) or hands back to the normal file answer below.
-                # Images/PDF/proofreading never reach this branch. A file-scoped
-                # question may only fall back to the answer about these files.
-                if (
-                    not _is_proofread_request(question)
-                    and any(code_interpreter.is_ci_input(sf["filename"]) for sf in saved_files)
-                    and _agent_tools(user, mode)[1]
-                ):
+                # Code Interpreter (CODE_INTERPRETER_MODE) / Document Engine
+                # (DOCUMENT_ENGINE_MODE): an Excel/CSV — or, with the Document
+                # Engine, a Word/PowerPoint/PDF — is attached → the router picks
+                # run_python / make_document, or hands back to the normal file
+                # answer below ("สรุปไฟล์นี้"). Image-only uploads and proofreading
+                # never reach this branch. A file-scoped question may only fall
+                # back to the answer about these files.
+                _ci_upload = _agent_tools(user, mode)[1] and any(
+                    code_interpreter.is_ci_input(sf["filename"]) for sf in saved_files)
+                if not _is_proofread_request(question) and (_ci_upload or _doc_upload):
                     events = await run_in_threadpool(
                         lambda: list(_agent_turn(
                             user, question, sid, mode, request, uploads=saved_files, scoped=file_scoped,

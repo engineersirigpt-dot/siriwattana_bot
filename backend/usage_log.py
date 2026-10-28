@@ -35,7 +35,7 @@ _FEATURE_OF_SOURCE = {
     "files": "files",
     "image_gen": "image", "image_edit": "image",
     "web": "web_search", "url": "read_link", "agent": "agent",
-    "code": "code_interpreter", "code_limit": "code_interpreter",
+    "code": "code_interpreter", "code_limit": "code_interpreter", "document": "document_engine",
     "linsip": "linsip",
 }
 FEATURE_LABELS = {
@@ -46,6 +46,7 @@ FEATURE_LABELS = {
     "read_link": "อ่านลิงก์",
     "agent": "Agent (ค้นเว็บหลายขั้น)",
     "code_interpreter": "Code Interpreter (Python)",
+    "document_engine": "Document Engine (สร้าง/แก้เอกสาร)",
     "linsip": "ค้นงาน linsip",
     "translation": "แปลเอกสาร",
     "safety": "ตัวตรวจข้อมูลอ่อนไหว",
