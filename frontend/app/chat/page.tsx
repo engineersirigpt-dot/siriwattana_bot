@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import {
   Bookmark,
   BookmarkCheck,
+  Brain,
   ChevronDown,
   ChevronRight,
   Check,
@@ -49,6 +50,7 @@ import {
   exportAnswerXlsx,
   fetchAttachmentBlobUrl,
   forkSharedSession,
+  getMemory,
   getRole,
   getSessionRecipients,
   getToken,
@@ -66,6 +68,7 @@ import { AlertModal, ConfirmModal, PromptModal } from "@/components/Modal";
 import { MarkdownMessage } from "@/components/MarkdownMessage";
 import ThemeToggle from "@/components/ThemeToggle";
 import CapabilitiesModal from "@/components/CapabilitiesModal";
+import MemoryModal from "@/components/MemoryModal";
 
 type Attachment = {
   id: number;
@@ -325,6 +328,8 @@ export default function ChatPage() {
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
   const [role, setRole] = useState<string | null>(null);
+  const [memoryAvailable, setMemoryAvailable] = useState(false);
+  const [showMemory, setShowMemory] = useState(false);
   const [username, setUsername] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [searchResults, setSearchResults] = useState<SearchHit[] | null>(null);
@@ -402,6 +407,10 @@ export default function ChatPage() {
     }
     setRole(getRole());
     setUsername(getUsername());
+    // V4.2: show "ความจำของฉัน" only when memory is on for this user.
+    getMemory()
+      .then((m) => setMemoryAvailable(m.available))
+      .catch(() => setMemoryAvailable(false));
     refreshSessions();
     // Every user — not just admins — sees the team's shared chats.
     refreshSharedTeamSessions();
@@ -1732,6 +1741,15 @@ export default function ChatPage() {
             <FileText size={16} />
             <span>แปลเอกสาร</span>
           </button>
+          {memoryAvailable && (
+            <button
+              onClick={() => setShowMemory(true)}
+              className="w-full flex items-center gap-2 text-white hover:text-white hover:bg-white/10 py-2 px-3 rounded-lg transition-all text-sm"
+            >
+              <Brain size={16} />
+              <span>ความจำของฉัน</span>
+            </button>
+          )}
           <ThemeToggle
             showLabel
             className="w-full flex items-center gap-2 text-white hover:text-white hover:bg-white/10 py-2 px-3 rounded-lg transition-all text-sm"
@@ -2284,6 +2302,8 @@ export default function ChatPage() {
         description={alertMsg ?? ""}
         variant="error"
       />
+
+      <MemoryModal open={showMemory} onClose={() => setShowMemory(false)} />
 
       <CapabilitiesModal
         open={showHelp}

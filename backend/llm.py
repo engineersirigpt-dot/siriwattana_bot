@@ -489,20 +489,59 @@ def _is_reasoning_model(model: str) -> bool:
     )
 
 
-def _model_kwargs(model: str, n: int) -> dict:
+def _model_kwargs(model: str, n: int, effort: str | None = None) -> dict:
     """Per-model call kwargs.
 
     Reasoning models (gpt-5-*, o-series) take max_completion_tokens (not
-    max_tokens) and accept reasoning_effort — we pass LLM_REASONING_EFFORT so
-    chat answers stay fast. Older models (gpt-4.1, gpt-4o-mini) take max_tokens
-    and reject reasoning_effort, so they get neither.
+    max_tokens) and accept reasoning_effort — we pass LLM_REASONING_EFFORT (or
+    the routed `effort`, V4.1) so chat answers stay fast. Older models (gpt-4.1,
+    gpt-4o-mini) take max_tokens and reject reasoning_effort, so they get neither.
     """
     if _is_reasoning_model(model):
         return {
             "max_completion_tokens": n,
-            "reasoning_effort": LLM_REASONING_EFFORT,
+            "reasoning_effort": effort or LLM_REASONING_EFFORT,
         }
     return {"max_tokens": n}
+
+
+def _chat_create(model: str, messages: list[dict], n: int, effort: str | None = None, **extra):
+    """chat.completions.create for an answer. Returns (response, model, effort used).
+
+    `effort` is set only by V4.1 model routing. A routed call the API rejects
+    (unknown model, no access, unsupported effort) is retried once with the
+    legacy LLM_MODEL at LLM_REASONING_EFFORT — routing must never cost an answer.
+    Unrouted calls (effort None) behave exactly as before.
+    """
+    try:
+        res = _get_client().chat.completions.create(
+            model=model, messages=messages, **_model_kwargs(model, n, effort), **extra,
+        )
+        return res, model, (effort or LLM_REASONING_EFFORT) if _is_reasoning_model(model) else None
+    except Exception as e:  # noqa: BLE001
+        import openai
+
+        rejected = isinstance(e, (openai.BadRequestError, openai.NotFoundError, openai.PermissionDeniedError))
+        if effort is None or not rejected or (model == LLM_MODEL and effort == LLM_REASONING_EFFORT):
+            raise
+        import sys
+
+        print(f"MODEL_ROUTE_FALLBACK: {model}/{effort} rejected ({type(e).__name__}) → {LLM_MODEL}",
+              file=sys.stderr)
+        res = _get_client().chat.completions.create(
+            model=LLM_MODEL, messages=messages, **_model_kwargs(LLM_MODEL, n), **extra,
+        )
+        return res, LLM_MODEL, LLM_REASONING_EFFORT if _is_reasoning_model(LLM_MODEL) else None
+
+
+def _routed_usage(usage: dict, asked_effort: str | None, used_effort: str | None, asked_model: str) -> dict:
+    """A routed answer's usage also says its effort, and the model it fell back
+    from if the API rejected the routed one. Unrouted usage keeps its old shape."""
+    if asked_effort is not None:
+        usage["reasoning_effort"] = used_effort
+        if usage.get("model") != asked_model:
+            usage["fallback_from"] = asked_model
+    return usage
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -938,8 +977,10 @@ def answer_from_context(
     context_answer: str,
     model: str | None = None,
     history: list[dict] | None = None,
+    effort: str | None = None,
 ) -> tuple[str, dict]:
-    """Returns (answer_text, usage). usage is the per-call dict from _extract_usage."""
+    """Returns (answer_text, usage). usage is the per-call dict from _extract_usage.
+    `effort` comes from V4.1 model routing (None = LLM_REASONING_EFFORT)."""
     messages: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT_RAG}]
     if history:
         messages.extend(history)
@@ -953,13 +994,9 @@ def answer_from_context(
         }
     )
     chosen = model or LLM_MODEL
-    res = _get_client().chat.completions.create(
-        model=chosen,
-        messages=messages,
-        **_model_kwargs(chosen, 8000),
-    )
+    res, used, used_effort = _chat_create(chosen, messages, 8000, effort)
     text = (res.choices[0].message.content or "").strip()
-    return text, _extract_usage(res, chosen)
+    return text, _routed_usage(_extract_usage(res, used), effort, used_effort, chosen)
 
 
 def answer_freely(
@@ -967,6 +1004,7 @@ def answer_freely(
     model: str | None = None,
     history: list[dict] | None = None,
     company_only: bool = False,
+    effort: str | None = None,
 ) -> tuple[str, dict]:
     """Answer without RAG context. Returns (answer_text, usage).
 
@@ -979,13 +1017,9 @@ def answer_freely(
         messages.extend(history)
     messages.append({"role": "user", "content": question})
     chosen = model or LLM_MODEL
-    res = _get_client().chat.completions.create(
-        model=chosen,
-        messages=messages,
-        **_model_kwargs(chosen, 8000),
-    )
+    res, used, used_effort = _chat_create(chosen, messages, 8000, effort)
     text = (res.choices[0].message.content or "").strip()
-    return text, _extract_usage(res, chosen)
+    return text, _routed_usage(_extract_usage(res, used), effort, used_effort, chosen)
 
 
 # Web search — for questions needing fresh/live info (news, today's prices,
@@ -1103,6 +1137,7 @@ def stream_from_context(
     model: str | None = None,
     history: list[dict] | None = None,
     usage_holder: dict | None = None,
+    effort: str | None = None,
 ):
     """Streaming twin of answer_from_context — yields text deltas as the model
     produces them. Same prompt/messages so output matches the non-stream path.
@@ -1126,16 +1161,14 @@ def stream_from_context(
             ),
         }
     )
-    chosen = model or LLM_MODEL
-    stream_kwargs: dict = dict(
-        model=chosen,
-        messages=messages,
-        stream=True,
-        **_model_kwargs(chosen, 8000),
-    )
+    yield from _stream_answer(model or LLM_MODEL, messages, usage_holder, effort)
+
+
+def _stream_answer(chosen: str, messages: list[dict], usage_holder: dict | None, effort: str | None):
+    extra: dict = {"stream": True}
     if usage_holder is not None:
-        stream_kwargs["stream_options"] = {"include_usage": True}
-    stream = _get_client().chat.completions.create(**stream_kwargs)
+        extra["stream_options"] = {"include_usage": True}
+    stream, used, used_effort = _chat_create(chosen, messages, 8000, effort, **extra)
     for chunk in stream:
         if chunk.choices:
             delta = chunk.choices[0].delta.content
@@ -1143,7 +1176,8 @@ def stream_from_context(
                 yield delta
         # `usage` arrives on the final chunk only when include_usage=True.
         if usage_holder is not None and getattr(chunk, "usage", None):
-            usage_holder.update(_extract_usage_from_chunk(chunk.usage, chosen))
+            usage_holder.update(_routed_usage(_extract_usage_from_chunk(chunk.usage, used),
+                                              effort, used_effort, chosen))
 
 
 def stream_freely(
@@ -1152,6 +1186,7 @@ def stream_freely(
     history: list[dict] | None = None,
     company_only: bool = False,
     usage_holder: dict | None = None,
+    effort: str | None = None,
 ):
     """Streaming twin of answer_freely — yields text deltas.
 
@@ -1162,23 +1197,7 @@ def stream_freely(
     if history:
         messages.extend(history)
     messages.append({"role": "user", "content": question})
-    chosen = model or LLM_MODEL
-    stream_kwargs: dict = dict(
-        model=chosen,
-        messages=messages,
-        stream=True,
-        **_model_kwargs(chosen, 8000),
-    )
-    if usage_holder is not None:
-        stream_kwargs["stream_options"] = {"include_usage": True}
-    stream = _get_client().chat.completions.create(**stream_kwargs)
-    for chunk in stream:
-        if chunk.choices:
-            delta = chunk.choices[0].delta.content
-            if delta:
-                yield delta
-        if usage_holder is not None and getattr(chunk, "usage", None):
-            usage_holder.update(_extract_usage_from_chunk(chunk.usage, chosen))
+    yield from _stream_answer(model or LLM_MODEL, messages, usage_holder, effort)
 
 
 def answer_with_files(
