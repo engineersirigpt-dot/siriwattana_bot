@@ -10,6 +10,8 @@ The keyword list is a starter. Expand based on real chat logs after go-live —
 just edit SENSITIVE_KEYWORDS, rebuild backend, no migration needed.
 """
 
+import re
+
 # Case-insensitive substring match. Add new keywords anywhere; order doesn't matter.
 SENSITIVE_KEYWORDS: set[str] = {
     # --- Payroll / compensation ---
@@ -59,6 +61,18 @@ SENSITIVE_KEYWORDS: set[str] = {
     "ข้อมูลการเงินภายใน",
 }
 
+# Pay words a job ad carries ("รับสมัครช่างพิมพ์ เงินเดือน 20,000"): in clearly
+# recruitment text they don't block here — the user is publishing a position's
+# pay, not asking for someone's. The Layer-2 classifier still runs and blocks a
+# named person's pay or the company's real internal pay (sensitivity_classifier
+# PAYROLL rule). "สลิปเงินเดือน" and "payroll" always block.
+RECRUITMENT_PAY_KEYWORDS: set[str] = {"เงินเดือน", "ค่าจ้าง", "ค่าตอบแทน", "โบนัส", "salary"}
+_RECRUITMENT_RE = re.compile(
+    r"รับสมัคร|สมัครงาน|ประกาศ(?:รับ|หา|งาน)|เปิดรับ(?:พนักงาน|สมัคร)|รับพนักงาน|"
+    r"\b(?:hiring|recruit\w*|job (?:ad|post|opening)s?)\b",
+    re.IGNORECASE,
+)
+
 BLOCKED_RESPONSE = (
     "ข้อมูลนี้เป็นข้อมูลส่วนบุคคลหรือข้อมูลภายในบริษัท "
     "ระบบไม่สามารถเปิดเผยผ่าน Chatbot ได้ "
@@ -71,12 +85,16 @@ def is_sensitive(text: str) -> str | None:
     Return the first sensitive keyword found in `text`, or None if clean.
 
     Matching is case-insensitive substring. "เงินเดือนคุณ A" matches "เงินเดือน";
-    "What's the API_KEY" matches "api_key".
+    "What's the API_KEY" matches "api_key". In a job ad the pay words are
+    skipped (RECRUITMENT_PAY_KEYWORDS) — "สลิปเงินเดือน" still matches.
     """
     if not text:
         return None
     needle = text.lower()
+    recruitment = _RECRUITMENT_RE.search(needle) is not None
     for kw in SENSITIVE_KEYWORDS:
         if kw.lower() in needle:
+            if recruitment and kw in RECRUITMENT_PAY_KEYWORDS:
+                continue
             return kw
     return None
