@@ -495,24 +495,6 @@ export async function getUiConfig(): Promise<{ ui_v5: boolean }> {
   return api<{ ui_v5: boolean }>("/ui/config");
 }
 
-// A user on V5 can go back to the classic page; kept per browser.
-const UI_PREF_KEY = "siri_ui";
-export function getUiPreference(): "classic" | null {
-  try {
-    return localStorage.getItem(UI_PREF_KEY) === "classic" ? "classic" : null;
-  } catch {
-    return null;
-  }
-}
-export function setUiPreference(pref: "classic" | null) {
-  try {
-    if (pref) localStorage.setItem(UI_PREF_KEY, pref);
-    else localStorage.removeItem(UI_PREF_KEY);
-  } catch {
-    /* storage blocked — the server default applies */
-  }
-}
-
 // An attachment fetch that says WHY it failed (gone / not yours / other), so a
 // file card can show a useful message instead of failing silently.
 export class AttachmentError extends Error {

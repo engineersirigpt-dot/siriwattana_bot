@@ -17,16 +17,13 @@ test.describe("rollout flag", () => {
     await expect(page.getByText("ลองหน้าแชทแบบใหม่")).toHaveCount(0);
   });
 
-  test("flag on → V5; a user can go back to classic and return", async ({ page }, testInfo) => {
-    await signIn(page);
+  test("flag on → V5, with no way back to classic in the menu", async ({ page }, testInfo) => {
+    await signIn(page, "admin", "classic"); // a "classic" choice saved by the old button no longer counts
     await page.goto("/chat");
     await expect(page.locator('[data-ui="v5"]')).toBeVisible();
     await openNav(page, testInfo);
-    await page.getByTestId("back-to-classic").click();
-    await expect(page.getByText("ลองหน้าแชทแบบใหม่")).toBeVisible();
-    await expect(page.locator('[data-ui="v5"]')).toHaveCount(0);
-    await page.getByText("ลองหน้าแชทแบบใหม่").click();
-    await expect(page.locator('[data-ui="v5"]')).toBeVisible();
+    await expect(page.getByRole("button", { name: "ออกจากระบบ" })).toBeVisible();
+    await expect(page.getByText("กลับไปหน้าแชทแบบเดิม")).toHaveCount(0);
   });
 
   test("backend without /ui/config → classic", async ({ page }) => {
@@ -338,6 +335,18 @@ test("phone: a chat's actions sit behind ⋯, so titles keep their width", async
   await actions.getByRole("button", { name: "เปลี่ยนชื่อ" }).click();
   await expect(page.getByRole("dialog")).toBeVisible();
   await expect(actions).toHaveCount(0); // closes after use
+});
+
+test("dark mode: the logo has no white box; the composer has no stray scrollbar", async ({ page }) => {
+  await signIn(page, "admin", undefined, "dark");
+  await page.goto("/chat");
+  const empty = page.getByTestId("empty-state");
+  await expect(empty.locator('img[src="/Logo_siri_t.png"]')).toBeVisible();
+  await expect(empty.locator('img[src="/Logo_siri.jpg"]')).toBeHidden();
+  const box = page.getByLabel("ข้อความ");
+  expect(await box.evaluate((el) => getComputedStyle(el).overflowY)).toBe("hidden");
+  await box.fill(Array.from({ length: 20 }, (_, i) => `บรรทัด ${i + 1}`).join("\n"));
+  expect(await box.evaluate((el) => getComputedStyle(el).overflowY)).toBe("auto"); // past ~8 lines it scrolls
 });
 
 test("desktop and tablet: the sidebar stays put", async ({ page }, testInfo) => {

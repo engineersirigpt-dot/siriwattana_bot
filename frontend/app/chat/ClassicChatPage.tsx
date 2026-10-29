@@ -316,7 +316,7 @@ function groupByUser<T extends { username: string }>(sessions: T[]) {
   return groups;
 }
 
-export default function ClassicChatPage({ onTryV5 }: { onTryV5?: () => void } = {}) {
+export default function ClassicChatPage() {
   const router = useRouter();
   const [sessions, setSessions] = useState<Session[]>([]);
   const [teamSessions, setTeamSessions] = useState<TeamSession[]>([]);
@@ -1748,15 +1748,6 @@ export default function ClassicChatPage({ onTryV5 }: { onTryV5?: () => void } = 
             >
               <Brain size={16} />
               <span>ความจำของฉัน</span>
-            </button>
-          )}
-          {onTryV5 && (
-            <button
-              onClick={onTryV5}
-              className="w-full flex items-center gap-2 text-white hover:text-white hover:bg-white/10 py-2 px-3 rounded-lg transition-all text-sm"
-            >
-              <Lightbulb size={16} />
-              <span>ลองหน้าแชทแบบใหม่</span>
             </button>
           )}
           <ThemeToggle

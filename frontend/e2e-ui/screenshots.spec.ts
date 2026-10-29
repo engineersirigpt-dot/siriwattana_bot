@@ -46,6 +46,9 @@ test("dark mode — v5", async ({ page }, testInfo) => {
   await resetMock(page, { ui: { 1: true } });
   await signIn(page, "admin", undefined, "dark");
   await page.goto("/chat");
+  await expect(page.getByTestId("empty-state")).toBeVisible();
+  await page.waitForTimeout(400);
+  await page.screenshot({ path: path.join(DIR!, `${testInfo.project.name}-v5-dark-empty.png`) });
   await openSession(page, testInfo, "รายงานยอดขายไตรมาส 1");
   await expect(page.getByTestId("file-card").first()).toBeVisible();
   await page.waitForTimeout(800);
