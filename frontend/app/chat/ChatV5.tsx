@@ -41,7 +41,6 @@ import {
   Pencil,
   Plus,
   RefreshCw,
-  RotateCcw,
   Search,
   Send,
   Settings,
@@ -69,7 +68,6 @@ import {
   sendChat,
   sendChatStream,
   sendFeedback,
-  setUiPreference,
   shareSession,
   type ShareUser,
 } from "@/lib/api";
@@ -79,6 +77,7 @@ import MemoryModal from "@/components/MemoryModal";
 import MessageRow, { type MsgV5, type RowActions } from "@/components/chat/MessageRow";
 import { PendingFile } from "@/components/chat/FileCard";
 import { knownStep, stepsFromSource } from "@/components/chat/StatusLine";
+import { Logo } from "@/components/chat/Logo";
 import { useStickyScroll } from "@/components/chat/useStickyScroll";
 import {
   DATA_FILE_RE,
@@ -232,12 +231,14 @@ export default function ChatV5() {
     return () => window.removeEventListener("keydown", onKey);
   }, [navOpen]);
 
-  // auto-grow the composer (up to ~8 lines)
+  // auto-grow the composer (up to ~8 lines); a scrollbar only past that —
+  // otherwise Windows shows an empty one beside a single line
   useEffect(() => {
     const ta = inputRef.current;
     if (!ta) return;
     ta.style.height = "auto";
     ta.style.height = `${Math.min(ta.scrollHeight, 200)}px`;
+    ta.style.overflowY = ta.scrollHeight > 200 ? "auto" : "hidden";
   }, [input]);
 
   // ── data ─────────────────────────────────────────────────────────────────
@@ -806,11 +807,6 @@ export default function ChatV5() {
     router.replace("/login");
   }
 
-  function backToClassic() {
-    setUiPreference("classic");
-    window.location.reload();
-  }
-
   // ── derived ───────────────────────────────────────────────────────────────
   const q = search.trim().toLowerCase();
   const visibleSessions = q ? sessions.filter((s) => s.title.toLowerCase().includes(q)) : sessions;
@@ -1049,8 +1045,7 @@ export default function ChatV5() {
 
         <div className="space-y-1 border-t border-white/20 p-3 md:p-4">
           <div className="mb-1 flex items-center gap-3 rounded-xl border border-white/10 bg-white/5 px-2 py-2">
-            {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img src="/Logo_siri.jpg" alt="" className="h-9 w-9 flex-shrink-0 rounded-lg bg-surface object-cover p-0.5" />
+            <Logo className="h-9 w-9 flex-shrink-0" tile="rounded-lg bg-surface p-0.5" />
             <div className="min-w-0 flex-1">
               <p className="truncate text-sm font-medium text-white">{username ?? "—"}</p>
               <p className="text-xs text-white/85">{role === "admin" ? "⭐ Administrator" : "User"}</p>
@@ -1064,7 +1059,6 @@ export default function ChatV5() {
             <button onClick={() => setShowMemory(true)} className="ui-side-btn" data-testid="memory-menu"><Brain size={16} /> ความจำของฉัน</button>
           )}
           <ThemeToggle showLabel className="ui-side-btn" />
-          <button onClick={backToClassic} className="ui-side-btn" data-testid="back-to-classic"><RotateCcw size={16} /> กลับไปหน้าแชทแบบเดิม</button>
           <button onClick={logout} className="ui-side-btn"><LogOut size={16} /> ออกจากระบบ</button>
         </div>
       </aside>
@@ -1093,8 +1087,7 @@ export default function ChatV5() {
               </button>
             )}
             <div className="hidden items-center gap-2 rounded-xl bg-purple-500 py-1 pl-1 pr-3 lg:flex">
-              {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img src="/Logo_siri.jpg" alt="Sirivatana" className="h-7 w-7 rounded-md bg-surface object-cover p-0.5" />
+              <Logo alt="Sirivatana" className="h-7 w-7" tile="rounded-md bg-surface p-0.5" />
               <span className="whitespace-nowrap text-sm font-semibold text-white">ศิริวัฒนาอินเตอร์พริ้นท์ จำกัด (มหาชน)</span>
             </div>
           </div>
@@ -1134,8 +1127,7 @@ export default function ChatV5() {
               )}
               {chatState === "idle" && messages.length === 0 && (
                 <div className="mt-16 text-center text-faint sm:mt-20" data-testid="empty-state">
-                  {/* eslint-disable-next-line @next/next/no-img-element */}
-                  <img src="/Logo_siri.jpg" alt="Sirivatana" className="mx-auto mb-4 h-16 w-16 rounded-2xl object-cover shadow-md sm:h-20 sm:w-20" />
+                  <Logo alt="Sirivatana" className="mx-auto mb-4 h-16 w-16 sm:h-20 sm:w-20" tile="rounded-2xl shadow-md" />
                   <p className="text-content2">พิมพ์คำถามเกี่ยวกับบริษัทหรือคำถามทั่วไปได้เลย</p>
                   <p className="mt-1 text-sm">แนบไฟล์ได้ด้วยปุ่ม 📎 หรือลากไฟล์มาวาง</p>
                 </div>

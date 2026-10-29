@@ -8,6 +8,7 @@ import { memo } from "react";
 import { Check, Copy, FileDown, FileText, Sheet, Square, ThumbsDown, ThumbsUp } from "lucide-react";
 import Markdown from "@/components/chat/Markdown";
 import { FileCard } from "@/components/chat/FileCard";
+import { Logo } from "@/components/chat/Logo";
 import { StatusLine, StepChips } from "@/components/chat/StatusLine";
 import { fileKind, withPreviews } from "@/lib/fileKinds";
 import {
@@ -89,8 +90,7 @@ function MessageRow({
   const showActions = m.text && !streaming && m.source !== "export_offer" && m.source !== "blocked";
   return (
     <div className="flex justify-start gap-2.5 sm:gap-3" data-testid="msg-bot" data-streaming={streaming ? "1" : "0"}>
-      {/* eslint-disable-next-line @next/next/no-img-element */}
-      <img src="/Logo_siri.jpg" alt="" className="mt-0.5 h-8 w-8 flex-shrink-0 rounded-full border border-line object-cover shadow-sm sm:h-9 sm:w-9" />
+      <Logo className="mt-0.5 h-8 w-8 flex-shrink-0 sm:h-9 sm:w-9" tile="rounded-full border border-line shadow-sm" />
       <div className="min-w-0 flex-1 pt-0.5">
         {m.attachments && m.attachments.length > 0 && isImageSource(m.source) && (
           <Attachments items={m.attachments} onBubble={false} large />
