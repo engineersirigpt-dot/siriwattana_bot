@@ -43,7 +43,7 @@ import {
 import {
   API_BASE,
   api,
-  clearAuth,
+  signOut,
   downloadSourceFile,
   exportAnswerDocx,
   exportAnswerPdf,
@@ -1315,8 +1315,9 @@ export default function ClassicChatPage() {
   }
 
   function logout() {
-    clearAuth();
-    router.replace("/login");
+    const dest = signOut(); // back to the MI portal for an SSO user
+    if (dest.startsWith("/")) router.replace(dest);
+    else window.location.href = dest;
   }
 
   const groups = groupBySaved(sessions);

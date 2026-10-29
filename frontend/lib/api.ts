@@ -3,17 +3,36 @@ export const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? "http://localhost:80
 const TOKEN_KEY = "chatbot_token";
 const ROLE_KEY = "chatbot_role";
 const USERNAME_KEY = "chatbot_username";
+// Set only for a user who came in from the MI portal (SSO): "ออกจากระบบ" goes
+// back there (backend MI_PORTAL_URL) instead of our login page.
+const RETURN_KEY = "chatbot_return_url";
 
-export function saveAuth(token: string, role: string, username: string) {
+export function saveAuth(token: string, role: string, username: string, returnUrl?: string | null) {
   localStorage.setItem(TOKEN_KEY, token);
   localStorage.setItem(ROLE_KEY, role);
   localStorage.setItem(USERNAME_KEY, username);
+  if (returnUrl && /^https?:\/\//i.test(returnUrl)) localStorage.setItem(RETURN_KEY, returnUrl);
+  else localStorage.removeItem(RETURN_KEY);
 }
 
 export function clearAuth() {
   localStorage.removeItem(TOKEN_KEY);
   localStorage.removeItem(ROLE_KEY);
   localStorage.removeItem(USERNAME_KEY);
+  localStorage.removeItem(RETURN_KEY);
+}
+
+// Sign out; returns where to go next — the MI portal for an SSO user, else
+// our login page ("/login").
+export function signOut(): string {
+  let dest = "/login";
+  try {
+    dest = localStorage.getItem(RETURN_KEY) || "/login";
+  } catch {
+    /* storage blocked */
+  }
+  clearAuth();
+  return dest;
 }
 
 export function getToken(): string | null {
@@ -123,7 +142,7 @@ export async function miSsoLogin(token: string) {
     }
     throw new Error(detail || "เข้าสู่ระบบผ่าน MI ไม่สำเร็จ");
   }
-  return res.json() as Promise<{ access_token: string; role: string; username: string }>;
+  return res.json() as Promise<{ access_token: string; role: string; username: string; return_url?: string | null }>;
 }
 
 export async function sendChat(opts: {
