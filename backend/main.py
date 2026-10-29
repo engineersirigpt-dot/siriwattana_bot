@@ -2534,6 +2534,17 @@ async def _chat_turn(
             )
 
             if saved_files:
+                # "แปลไฟล์นี้" with a long English PDF: a chat answer would be cut
+                # short or drift into a summary → the page-by-page translator
+                # instead (before the Document Engine, which would take a PDF too).
+                if not file_scoped and att.wants_whole_translation(question):
+                    _tr_pdfs = [sf for sf in saved_files
+                                if att.is_pdf(sf["content_type"]) and att.is_long_english_pdf(sf["file_path"])]
+                    if _tr_pdfs:
+                        return await run_in_threadpool(
+                            _translation_job_reply, user, question, sid, stitle, mode, saved_files, _tr_pdfs, request,
+                        )
+
                 # Reference-image generation: an image is attached AND the user
                 # wants a new/edited image FROM it ("สร้างรถจากโลโก้นี้",
                 # "เพิ่มแมวอีกตัวในรูป") → run the image edit on the uploaded
@@ -5388,6 +5399,54 @@ def admin_delete_user_chats(
 # background (translate_manual pipeline), download the Thai Word file.
 # ----------------------------------------------------------------------------
 from pathlib import Path as _Path
+
+
+def _translation_job_reply(
+    user: dict, question: str, sid: int, stitle: str, mode: str,
+    saved_files: list[dict], pdfs: list[dict], request: Request,
+) -> "ChatResponse":
+    """/chat: "แปลไฟล์นี้" with a long English PDF → start the same background
+    translator as the แปลเอกสาร page and answer with one line per job. Each line
+    ends in a `<!-- translate-job:<id> -->` marker (invisible Markdown) that the
+    V5 page turns into a progress card with the Word/PDF downloads; the jobs
+    also show on the แปลเอกสาร page."""
+    from chat_pg import save_attachment_pg, save_chat_message_pg
+
+    jobs = [doctr.start_job(sf["file_path"], sf["filename"], user["id"]) for sf in pdfs]
+    lines = []
+    for j in jobs:
+        cap = f" (เกิน {j['max_pages']} หน้า/งาน — แปล {j['translated_pages']} หน้าแรก)" if j["exceeds_cap"] else ""
+        lines.append(
+            f"เริ่มแปล **{j['filename']}** เป็นภาษาไทยทีละหน้า — {j['total']} หน้า{cap}\n\n"
+            f"<!-- translate-job:{j['id']} -->"
+        )
+    answer = "\n\n".join(lines) + (
+        "\n\nเมื่อแปลเสร็จ ดาวน์โหลดเป็น Word/PDF ได้ที่การ์ดงานแปลในแชทนี้ หรือที่เมนู \"แปลเอกสาร\" "
+        "— ระหว่างนี้ถามเรื่องอื่นต่อได้เลย"
+    )
+    mid = save_chat_message_pg(
+        user_id=user["id"], session_id=sid, question=question or "[ไฟล์แนบ]",
+        answer=answer, source="translate_job", knowledge_id=None, mode=mode,
+    )
+    rows = [
+        save_attachment_pg(
+            message_id=mid, user_id=user["id"], filename=sf["filename"],
+            content_type=sf["content_type"], size_bytes=sf["size"], file_path=sf["file_path"],
+        )
+        for sf in saved_files
+    ]
+    for j in jobs:
+        audit_log(
+            "translate_started",
+            user=user,
+            detail={"job_id": j["id"], "filename": j["filename"], "pages": j["total"], "via": "chat"},
+            request=request,
+        )
+    return ChatResponse(
+        answer=answer, source="translate_job", similarity=None, session_id=sid,
+        session_title=stitle, attachments=rows, message_id=mid,
+        turn_count=_count_session_turns(sid), turn_limit=MAX_TURNS_PER_SESSION,
+    )
 
 
 @app.post("/translate/start")

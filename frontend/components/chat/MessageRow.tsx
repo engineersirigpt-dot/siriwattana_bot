@@ -9,6 +9,7 @@ import { Check, Copy, FileDown, FileText, Sheet, Square, ThumbsDown, ThumbsUp } 
 import Markdown from "@/components/chat/Markdown";
 import { FileCard } from "@/components/chat/FileCard";
 import { Logo } from "@/components/chat/Logo";
+import { TranslationCard, translateJobs } from "@/components/chat/TranslationCard";
 import { StatusLine, StepChips } from "@/components/chat/StatusLine";
 import { fileKind, withPreviews } from "@/lib/fileKinds";
 import {
@@ -86,6 +87,7 @@ function MessageRow({
   }
 
   const streaming = !!m.streaming;
+  const tj = translateJobs(m.text); // a translation started from the chat → cards
   const fmt = requestedExportFormat(m.question);
   const showActions = m.text && !streaming && m.source !== "export_offer" && m.source !== "blocked";
   return (
@@ -110,7 +112,7 @@ function MessageRow({
           (m.text || streaming) && (
             <>
               {m.steps && <StepChips steps={m.steps.filter((s) => s !== "agent_writing")} />}
-              <Markdown text={m.text} live={streaming} />
+              <Markdown text={tj.text} live={streaming} />
             </>
           )
         )}
@@ -119,6 +121,7 @@ function MessageRow({
             <Square size={10} fill="currentColor" /> หยุดแล้ว — คำตอบอาจไม่ครบ
           </p>
         )}
+        {!streaming && tj.ids.map((id) => <TranslationCard key={id} jobId={id} />)}
         {m.attachments && m.attachments.length > 0 && !isImageSource(m.source) && !streaming && (
           <div className="mt-3">
             <Attachments items={m.attachments} onBubble={false} large />
@@ -134,7 +137,7 @@ function MessageRow({
         )}
         {showActions && (
           <div className="mt-1.5 flex flex-wrap items-center gap-1" data-testid="msg-actions">
-            <button type="button" onClick={() => actions.copy(index, m.text)} className="ui-icon-btn" aria-label="คัดลอกคำตอบ" title="คัดลอกคำตอบ">
+            <button type="button" onClick={() => actions.copy(index, tj.text)} className="ui-icon-btn" aria-label="คัดลอกคำตอบ" title="คัดลอกคำตอบ">
               {copied ? <Check size={14} className="text-green-600" /> : <Copy size={14} />}
               {copied && <span className="ml-1 text-xs text-green-600">คัดลอกแล้ว</span>}
             </button>

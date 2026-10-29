@@ -135,6 +135,7 @@ function freshState() {
     ui: { 1: true, 2: false },
     memory: { 1: { available: true, enabled: true, items: [{ id: 1, content: "ฉันอยู่ฝ่ายผลิต กะเช้า", created_at: null }] }, 2: { available: false, enabled: false, items: [] } },
     sessions, messages, nextSid: 900, nextMid: 7100, nextAtt: 600, requests: [],
+    jobs: {}, // translation jobs started from the chat, see /translate/*
   };
 }
 let S = freshState();
@@ -327,6 +328,26 @@ const server = http.createServer(async (req, res) => {
     const form = formFields(await readBody(req), req.headers["content-type"]);
     return streamAnswer(req, res, user, form.fields.message || "", Number(form.fields.session_id) || null);
   }
+  // Background translation (doc_translation): each status call moves a job on
+  // (queued → 6 more pages → … → done), so a test sees real progress quickly.
+  const tm = /^\/translate\/(status|download|review)\/([0-9a-f]+)$/.exec(path);
+  if (tm) {
+    const job = S.jobs[tm[2]];
+    if (!job || job.user_id !== user.id) return send(res, 404, { detail: "ไม่พบงานแปล" });
+    if (tm[1] === "status") {
+      if (job.status === "queued") job.status = "running";
+      else if (job.status === "running") {
+        job.done = Math.min(job.total, job.done + 6);
+        if (job.done >= job.total) Object.assign(job, { status: "done", pdf: "/x.pdf", review_flagged: 1, cost_usd: 0.4 });
+      }
+      return send(res, 200, job);
+    }
+    if (tm[1] === "review") return send(res, 200, { pages: [{ page: 3, issues: ["ตัวเลขในตารางอาจไม่ตรงต้นฉบับ"] }], raw: "" });
+    if (job.status !== "done") return send(res, 409, { detail: "งานแปลยังไม่เสร็จ" });
+    const pdfOut = url.searchParams.get("fmt") === "pdf";
+    res.writeHead(200, { "Content-Type": pdfOut ? "application/pdf" : DOCX, "Access-Control-Allow-Origin": "*" });
+    return res.end(pdfOut ? pdf("translated") : Buffer.from("PK fake docx"));
+  }
   if (path === "/chat" && req.method === "POST") {
     const form = formFields(await readBody(req), req.headers["content-type"]);
     await sleep(500);
@@ -335,6 +356,23 @@ const server = http.createServer(async (req, res) => {
       FILES[id] = { filename: f.filename, content_type: f.content_type, owner: user.id, body: Buffer.alloc(f.size) };
       return meta(id);
     });
+    // like _translation_job_reply: "แปล…" + a PDF → a background job, not a chat answer
+    const message = form.fields.message || "";
+    const pdfs = form.files.filter((f) => /\.pdf$/i.test(f.filename));
+    if (/แปล(?!ว่า)/.test(message) && pdfs.length) {
+      const sid = Number(form.fields.session_id) || S.nextSid++;
+      const lines = pdfs.map((f) => {
+        const id = (S.nextMid * 1000 + pdfs.indexOf(f)).toString(16).padStart(12, "0");
+        S.jobs[id] = { id, user_id: user.id, filename: f.filename, status: "queued", done: 0, total: 12, translated_pages: 12,
+          exceeds_cap: false, max_pages: 150, review_flagged: 0, cost_usd: 0, pdf: null, error: null };
+        return `เริ่มแปล **${f.filename}** เป็นภาษาไทยทีละหน้า — 12 หน้า\n\n<!-- translate-job:${id} -->`;
+      });
+      const answer = lines.join("\n\n") + "\n\nเมื่อแปลเสร็จ ดาวน์โหลดเป็น Word/PDF ได้ที่การ์ดงานแปลในแชทนี้ หรือที่เมนู \"แปลเอกสาร\" — ระหว่างนี้ถามเรื่องอื่นต่อได้เลย";
+      if (!S.sessions.find((s) => s.id === sid)) S.sessions.unshift({ id: sid, title: message.slice(0, 40), is_saved: 0, created_at: "", updated_at: "", message_count: 1, last_preview: null });
+      (S.messages[sid] ??= []).push({ id: S.nextMid, question: message, answer, source: "translate_job", attachments: ups });
+      return send(res, 200, { answer, source: "translate_job", session_id: sid, session_title: message.slice(0, 40),
+        attachments: ups, message_id: S.nextMid++, turn_count: 1, turn_limit: 20 });
+    }
     const gen = (form.fields.message || "").includes("excel") ? [meta(501)] : [];
     return send(res, 200, {
       answer: "อ่านไฟล์แล้วค่ะ สรุปได้ว่าเอกสารเรียบร้อยดี", source: gen.length ? "code" : "files",

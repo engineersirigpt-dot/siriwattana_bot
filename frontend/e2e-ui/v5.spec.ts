@@ -239,6 +239,28 @@ test("attaching files: typed chips, then cards on both sides", async ({ page }) 
   await expect(page.getByTestId("msg-bot").last().getByTestId("file-card")).toContainText("ยอดขาย_Q1.xlsx");
 });
 
+test("แปลไฟล์นี้ with a PDF: a progress card, then Word/PDF downloads — still there after a reload", async ({ page }, testInfo) => {
+  await signIn(page);
+  await page.goto("/chat");
+  await expect(page.getByTestId("empty-state")).toBeVisible();
+  await page.getByTestId("file-input").setInputFiles({ name: "GL44_manual.pdf", mimeType: "application/pdf", buffer: Buffer.from("%PDF-1.4") });
+  await page.getByLabel("ข้อความ").fill("แปลไฟล์นี้");
+  await page.getByTestId("send").click();
+  const card = page.getByTestId("translate-card");
+  await expect(card).toContainText("GL44_manual.pdf");
+  await expect(card.getByTestId("translate-progress")).toContainText(/กำลังแปล \d+\/12 หน้า|อยู่ในคิว/);
+  await expect(card.getByTestId("translate-done")).toHaveText(/แปลเสร็จแล้ว — 12 หน้า/, { timeout: 30_000 });
+  await expect(page.getByTestId("msg-bot").last()).not.toContainText("translate-job"); // the marker isn't shown
+  const [dl] = await Promise.all([page.waitForEvent("download"), card.getByRole("button", { name: /ดาวน์โหลด Word/ }).click()]);
+  expect(dl.suggestedFilename()).toBe("GL44_manual_แปลไทย.docx");
+  await card.getByRole("button", { name: /ควรตรวจทานซ้ำ/ }).click();
+  await expect(card.getByTestId("translate-review")).toContainText("หน้า 3");
+
+  await page.reload();
+  await openSession(page, testInfo, "แปลไฟล์นี้");
+  await expect(page.getByTestId("translate-done")).toBeVisible(); // the job's state, not a stale copy
+});
+
 // ── history ────────────────────────────────────────────────────────────────
 test("history: titles filter as you type, Enter searches inside messages", async ({ page }, testInfo) => {
   await signIn(page);
