@@ -437,6 +437,11 @@ class MiSsoIn(BaseModel):
     token: str
 
 
+MI_PORTAL_URL = os.getenv("MI_PORTAL_URL", "").strip()
+if not MI_PORTAL_URL.lower().startswith(("http://", "https://")):
+    MI_PORTAL_URL = ""
+
+
 @app.post("/auth/mi-sso")
 @limiter.limit("30/minute")
 def mi_sso_login(request: Request, body: MiSsoIn):
@@ -513,6 +518,8 @@ def mi_sso_login(request: Request, body: MiSsoIn):
         "token_type": "bearer",
         "username": user_row["username"],
         "role": user_row["role"],
+        # "ออกจากระบบ" takes an SSO user back to the MI portal (blank → our login page)
+        "return_url": MI_PORTAL_URL or None,
     }
 
 

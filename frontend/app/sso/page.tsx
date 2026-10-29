@@ -28,7 +28,7 @@ export default function SsoPage() {
     miSsoLogin(token)
       .then((res) => {
         if (cancelled) return;
-        saveAuth(res.access_token, res.role, res.username);
+        saveAuth(res.access_token, res.role, res.username, res.return_url);
         router.replace("/chat");
       })
       .catch((e: unknown) => {

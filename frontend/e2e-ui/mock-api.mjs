@@ -249,6 +249,14 @@ const server = http.createServer(async (req, res) => {
     return send(res, 200, { ok: true });
   }
   if (path === "/__mock/requests") return send(res, 200, S.requests);
+  // MI portal SSO: /sso?token=… → our session + where "ออกจากระบบ" goes back to
+  if (path === "/mi-portal") return send(res, 200, "<h1>MI Authentication System</h1>", "text/html");
+  if (path === "/auth/mi-sso" && req.method === "POST") {
+    const { token } = JSON.parse((await readBody(req)).toString() || "{}");
+    if (token !== "mi-jwt-staff") return send(res, 401, { detail: "Token จาก MI ไม่ถูกต้องหรือหมดอายุ" });
+    return send(res, 200, { access_token: "tok-staff", token_type: "bearer", username: "staff", role: "user",
+      return_url: `http://127.0.0.1:${PORT}/mi-portal` });
+  }
 
   const user = USERS[(req.headers.authorization || "").replace("Bearer ", "")];
   if (!user) return send(res, 401, { detail: "unauthorized" });

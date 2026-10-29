@@ -53,7 +53,7 @@ import {
 import {
   API_BASE,
   api,
-  clearAuth,
+  signOut,
   exportAnswerDocx,
   exportAnswerPdf,
   exportAnswerXlsx,
@@ -803,8 +803,9 @@ export default function ChatV5() {
   }
 
   function logout() {
-    clearAuth();
-    router.replace("/login");
+    const dest = signOut(); // back to the MI portal for an SSO user
+    if (dest.startsWith("/")) router.replace(dest);
+    else window.location.href = dest;
   }
 
   // ── derived ───────────────────────────────────────────────────────────────
