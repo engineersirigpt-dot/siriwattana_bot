@@ -60,6 +60,21 @@ test("dark mode — v5", async ({ page }, testInfo) => {
   await page.screenshot({ path: path.join(DIR!, `${testInfo.project.name}-v5-dark-top.png`) });
 });
 
+test("translation card — v5", async ({ page }, testInfo) => {
+  await resetMock(page, { ui: { 1: true } });
+  await signIn(page);
+  await page.goto("/chat");
+  await page.getByTestId("file-input").setInputFiles({ name: "GL44_manual.pdf", mimeType: "application/pdf", buffer: Buffer.from("%PDF-1.4") });
+  await page.getByLabel("ข้อความ").fill("แปลไฟล์นี้");
+  await page.getByTestId("send").click();
+  await expect(page.getByTestId("translate-progress")).toContainText("กำลังแปล");
+  await page.screenshot({ path: path.join(DIR!, `${testInfo.project.name}-v5-translate-running.png`) });
+  await expect(page.getByTestId("translate-done")).toBeVisible({ timeout: 30_000 });
+  await page.getByRole("button", { name: /ควรตรวจทานซ้ำ/ }).click();
+  await page.waitForTimeout(300);
+  await page.screenshot({ path: path.join(DIR!, `${testInfo.project.name}-v5-translate-done.png`) });
+});
+
 test("streaming with status — v5", async ({ page }, testInfo) => {
   await resetMock(page, { ui: { 1: true } });
   await signIn(page);

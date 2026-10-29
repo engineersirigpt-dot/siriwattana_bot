@@ -583,9 +583,46 @@ def long_translation_warning(question: str, text_chars: int, image_pages: int) -
     return (
         "⚠️ หมายเหตุ: การแปล/ถอดความเอกสารยาวผ่านแชทอาจ **ไม่ครบหรือไม่ตรงต้นฉบับ 100%** "
         "เพราะระบบแชทตอบได้จำกัดต่อรอบ และอาจสรุป/เรียบเรียงใหม่โดยไม่ได้ตั้งใจ "
-        "หากต้องการคำแปลที่ครบทุกหน้า ตรงต้นฉบับ พร้อมไฟล์ Word/PDF "
-        "แนะนำให้ใช้เครื่องมือแปลเอกสารเฉพาะทาง (แจ้งผู้ดูแลระบบได้เลย)"
+        "หากต้องการคำแปลไทยครบทุกหน้า พร้อมไฟล์ Word/PDF "
+        "ให้แนบเป็นไฟล์ **PDF ภาษาอังกฤษ** แล้วพิมพ์ว่า \"แปลไฟล์นี้\" — ระบบจะแปลให้ทีละหน้า"
     )
+
+
+# "แปลไฟล์นี้ / translate this" with a long PDF → the page-by-page translator
+# (doc_translation, English → Thai, Word/PDF out) instead of a chat answer.
+# Not for part of it ("แปลหน้า 3", "สรุปแล้วแปล"), a word ("แปลว่า"), or into
+# another language — those stay in chat.
+_WHOLE_TRANSLATE_RE = re.compile(r"แปล(?!ว่า)|\btranslat", re.IGNORECASE)
+_PART_RE = re.compile(
+    r"หน้า(?:ที่)?\s*\d|ย่อหน้า|บรรทัด|ประโยค|คำว่า|คำนี้|สรุป|"
+    r"\b(?:page|paragraph|line|sentence)s?\s*\d|\bsummar",
+    re.IGNORECASE,
+)
+_OTHER_TARGET_RE = re.compile(
+    r"เป็น(?:ภาษา)?\s*(?:อังกฤษ|จีน|ญี่ปุ่น|เกาหลี|เวียดนาม|พม่า|ลาว|เขมร|กัมพูชา)|"
+    r"\b(?:in)?to\s+(?:english|chinese|japanese|korean|vietnamese)\b",
+    re.IGNORECASE,
+)
+_THAI_CHAR_RE = re.compile(r"[฀-๿]")
+
+
+def wants_whole_translation(question: str) -> bool:
+    q = question or ""
+    return bool(_WHOLE_TRANSLATE_RE.search(q)) and not _PART_RE.search(q) and not _OTHER_TARGET_RE.search(q)
+
+
+def is_long_english_pdf(file_path: str) -> bool:
+    """Long enough that a chat translation would be cut short (the same limits
+    as long_translation_warning) and not already Thai — the translator works
+    English → Thai. A scanned PDF (no text layer) counts by its pages."""
+    pages = count_pdf_pages(file_path)
+    if pages == 0:
+        return False
+    text = re.sub(r"\[หน้า \d+\]", "", extract_pdf_text(file_path))  # its own page labels are Thai
+    letters = [c for c in text if c.isalpha()]
+    if letters and sum(1 for c in letters if _THAI_CHAR_RE.match(c)) / len(letters) > 0.3:
+        return False
+    return pages >= _LONG_IMAGE_PAGES or len(text) > _LONG_TEXT_CHARS
 
 
 def is_text_sparse(extracted: str) -> bool:
