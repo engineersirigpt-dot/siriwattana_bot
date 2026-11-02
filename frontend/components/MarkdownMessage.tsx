@@ -6,10 +6,14 @@ import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
 import { Check, Copy } from "lucide-react";
 import "highlight.js/styles/github.css";
+import { translateJobs } from "@/components/chat/TranslationCard";
 
 type Props = { text: string };
 
-export function MarkdownMessage({ text }: Props) {
+export function MarkdownMessage({ text: raw }: Props) {
+  // a chat-started translation's job marker is not for reading (the chat
+  // pages show a card for it; a shared copy shows just the text)
+  const text = translateJobs(raw).text;
   return (
     <div
       // 15px body (prose-sm is 14px). Set on the root so prose's em-based child

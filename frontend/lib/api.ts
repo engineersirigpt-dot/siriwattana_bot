@@ -3,8 +3,10 @@ export const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? "http://localhost:80
 const TOKEN_KEY = "chatbot_token";
 const ROLE_KEY = "chatbot_role";
 const USERNAME_KEY = "chatbot_username";
-// Set only for a user who came in from the MI portal (SSO): "ออกจากระบบ" goes
-// back there (backend MI_PORTAL_URL) instead of our login page.
+// Set for a browser that came in from the MI portal (SSO): signing in again —
+// after "ออกจากระบบ", an expired session, or a sign-out in another tab — goes
+// back there (backend MI_PORTAL_URL) instead of our login page. Kept after
+// sign-out on purpose; a login on our own page removes it.
 const RETURN_KEY = "chatbot_return_url";
 
 export function saveAuth(token: string, role: string, username: string, returnUrl?: string | null) {
@@ -19,20 +21,37 @@ export function clearAuth() {
   localStorage.removeItem(TOKEN_KEY);
   localStorage.removeItem(ROLE_KEY);
   localStorage.removeItem(USERNAME_KEY);
-  localStorage.removeItem(RETURN_KEY);
 }
 
-// Sign out; returns where to go next — the MI portal for an SSO user, else
-// our login page ("/login").
-export function signOut(): string {
-  let dest = "/login";
+// Where a signed-out visitor signs in: the MI portal if this browser came
+// from it, else our login page ("/login").
+export function loginDestination(): string {
   try {
-    dest = localStorage.getItem(RETURN_KEY) || "/login";
+    return localStorage.getItem(RETURN_KEY) || "/login";
   } catch {
-    /* storage blocked */
+    return "/login";
   }
+}
+
+// Sign out; returns where to go next (loginDestination).
+export function signOut(): string {
+  const dest = loginDestination();
   clearAuth();
   return dest;
+}
+
+// Not (or no longer) signed in — a 401, no token: clear what's left and go
+// sign in. Used instead of showing the raw {"detail": ...} error.
+export function goSignIn(): void {
+  if (typeof window === "undefined") return;
+  const dest = signOut();
+  if (dest.startsWith("/") && window.location.pathname.startsWith(dest)) return;
+  window.location.replace(dest);
+}
+
+// A response that says the session is gone → sign in again.
+function checkAuth(res: Response): void {
+  if (res.status === 401) goSignIn();
 }
 
 export function getToken(): string | null {
@@ -64,6 +83,7 @@ export async function api<T = unknown>(
     },
   });
   if (!res.ok) {
+    checkAuth(res);
     const text = await res.text();
     throw new Error(text || res.statusText);
   }
@@ -181,6 +201,7 @@ export async function sendChat(opts: {
     signal: opts.signal,
   });
   if (!res.ok) {
+    checkAuth(res);
     const text = await res.text();
     throw new Error(text || res.statusText);
   }
@@ -244,6 +265,7 @@ export async function sendChatStream(
     signal: opts.signal,
   });
   if (!res.ok || !res.body) {
+    checkAuth(res);
     const text = await res.text().catch(() => "");
     throw new Error(text || res.statusText);
   }
@@ -538,7 +560,10 @@ export async function fetchAttachment(id: number): Promise<Blob> {
   } catch {
     throw new AttachmentError(0);
   }
-  if (!res.ok) throw new AttachmentError(res.status);
+  if (!res.ok) {
+    checkAuth(res);
+    throw new AttachmentError(res.status);
+  }
   return res.blob();
 }
 

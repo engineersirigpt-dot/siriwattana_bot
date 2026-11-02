@@ -5,6 +5,7 @@ import { useParams, useRouter } from "next/navigation";
 import { ArrowLeft, ClipboardList, Eye, Loader2 } from "lucide-react";
 import { api, forkSharedSession, getToken } from "@/lib/api";
 import { MarkdownMessage } from "@/components/MarkdownMessage";
+import { Logo } from "@/components/chat/Logo";
 import { AlertModal } from "@/components/Modal";
 
 type SharedMessage = {
@@ -106,7 +107,7 @@ export default function SharedChatPage() {
   return (
     <div className="min-h-screen bg-gradient-to-br from-surface via-app to-purple-100">
       {/* Top banner */}
-      <div className="sticky top-0 z-10 bg-white/90 backdrop-blur-sm border-b border-line shadow-sm">
+      <div className="sticky top-0 z-10 bg-surface/90 backdrop-blur-sm border-b border-line shadow-sm">
         <div className="max-w-4xl mx-auto px-6 py-4 flex items-center justify-between gap-3 flex-wrap">
           <div className="flex items-center gap-3 min-w-0 flex-1">
             <button
@@ -177,11 +178,7 @@ export default function SharedChatPage() {
             </div>
 
             <div className="flex justify-start gap-3">
-              <img
-                src="/Logo_siri.jpg"
-                alt="Sirivatana"
-                className="w-9 h-9 rounded-full object-cover flex-shrink-0 shadow-sm border border-line"
-              />
+              <Logo alt="Sirivatana" className="h-9 w-9 flex-shrink-0" tile="rounded-full shadow-sm border border-line" />
               <div className="flex-1 min-w-0 pt-1">
                 <MarkdownMessage text={m.answer} />
                 {m.source_file && (

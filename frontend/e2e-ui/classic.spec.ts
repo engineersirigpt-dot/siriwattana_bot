@@ -24,6 +24,22 @@ test("classic: ask and get a streamed answer", async ({ page }) => {
   await expect(page.getByText("บริษัทเปิดกี่โมง").first()).toBeVisible();
 });
 
+test("classic: switching chats mid-answer doesn't write it into the chat opened", async ({ page }) => {
+  await signIn(page);
+  await page.goto("/chat");
+  await page.getByPlaceholder("พิมพ์คำถาม…").fill("ตอบช้า ๆ ยาว ๆ");
+  await page.locator("form").getByRole("button", { name: "ส่ง" }).click();
+  await expect(page.getByText(/คำตอบยาว/).first()).toBeVisible();
+  await page.getByText("ขั้นตอนเบิกค่าเดินทาง 1", { exact: true }).first().click();
+  await expect(page.getByText(/ทองคำแท่งขายออก/).first()).toBeVisible(); // chat 200's own answer
+  const posted = page.waitForRequest((r) => r.url().endsWith("/chat/stream"));
+  await page.getByPlaceholder(/พิมพ์คำถาม/).fill("สรุปแชทนี้ให้ 3 บรรทัด");
+  await page.locator("form").getByRole("button", { name: "ส่ง" }).click();
+  expect((await posted).postData() ?? "").toMatch(/name="session_id"\r\n\r\n200\r\n/);
+  await page.waitForTimeout(1500);
+  await expect(page.locator("main")).not.toContainText("คำตอบยาว");
+});
+
 test("classic: new chat clears the screen", async ({ page }) => {
   await signIn(page);
   await page.goto("/chat");

@@ -67,9 +67,12 @@ SENSITIVE_KEYWORDS: set[str] = {
 # named person's pay or the company's real internal pay (sensitivity_classifier
 # PAYROLL rule). "สลิปเงินเดือน" and "payroll" always block.
 RECRUITMENT_PAY_KEYWORDS: set[str] = {"เงินเดือน", "ค่าจ้าง", "ค่าตอบแทน", "โบนัส", "salary"}
+# "who we're looking for" words: หาช่าง…, ต้องการพนักงาน…, รับคนงาน…, งานว่าง…
+_STAFF = r"(?:พนักงาน|คนงาน|คน|ช่าง|ผู้ช่วย|แม่บ้าน|คนขับ|เจ้าหน้าที่|ลูกจ้าง|แรงงาน|ผู้จัดการ|หัวหน้างาน)"
 _RECRUITMENT_RE = re.compile(
-    r"รับสมัคร|สมัครงาน|ประกาศ(?:รับ|หา|งาน)|เปิดรับ(?:พนักงาน|สมัคร)|รับพนักงาน|"
-    r"\b(?:hiring|recruit\w*|job (?:ad|post|opening)s?)\b",
+    r"รับสมัคร|สมัครงาน|ประกาศ(?:รับ|หา|งาน)|เปิดรับ|งานว่าง|ตำแหน่งว่าง|"
+    rf"(?:หา|ต้องการ|รับ){_STAFF}|"
+    r"\b(?:hiring|recruit\w*|vacanc(?:y|ies)|job (?:ad|post|posting|opening|offer)s?)\b",
     re.IGNORECASE,
 )
 

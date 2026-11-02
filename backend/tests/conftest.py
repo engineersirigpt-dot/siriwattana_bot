@@ -51,6 +51,14 @@ def isolated_env(tmp_path, monkeypatch):
     monkeypatch.setattr(db_module, "_conn", None)
 
 
+@pytest.fixture(autouse=True)
+def fresh_rate_limits():
+    """Every test starts with empty rate-limit counters — the suite's own
+    requests would otherwise trip /chat/stream's 30/minute and later tests
+    get a 429 instead of their answer."""
+    main.limiter.reset()
+
+
 # ---------------------------------------------------------------------------
 # LLM / embedding stubs (runs for every test)
 # ---------------------------------------------------------------------------

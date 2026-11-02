@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { miSsoLogin, saveAuth } from "@/lib/api";
+import { Logo } from "@/components/chat/Logo";
 
 // SSO landing page. The central MI portal redirects the browser here with
 // ?token=<MI_JWT>. We hand that token to the backend, which verifies it and
@@ -44,11 +45,7 @@ export default function SsoPage() {
   return (
     <div className="min-h-screen flex items-center justify-center bg-gradient-to-b from-app to-surface px-4">
       <div className="max-w-sm w-full bg-surface rounded-2xl shadow-lg border border-line p-8 text-center">
-        <img
-          src="/Logo_siri.jpg"
-          alt="Sirivatana"
-          className="mx-auto w-16 h-16 rounded-xl object-cover mb-4 shadow-sm"
-        />
+        <Logo alt="Sirivatana" className="mx-auto mb-4 h-16 w-16" tile="rounded-xl shadow-sm" />
         {error ? (
           <>
             <p className="text-red-600 font-medium mb-1">เข้าสู่ระบบไม่สำเร็จ</p>

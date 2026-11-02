@@ -1022,6 +1022,37 @@ def get_session_documents_pg(session_id: int, user_id: int, limit: int = 5) -> l
     return [{"filename": r[0], "file_path": r[1]} for r in rows]
 
 
+def get_session_translations_pg(session_id: int, user_id: int, limit: int = 3) -> dict:
+    """Translations started from this chat ("แปลไฟล์นี้"): how many were asked
+    for (translate_job answers) and the finished Thai Word files attached to
+    them (newest first, with their text) — for "สรุปฉบับแปล" follow-ups."""
+    with get_pg_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT COUNT(*) FROM chat_history
+                WHERE session_id = %s AND user_id = %s AND source = 'translate_job'
+                """,
+                (session_id, user_id),
+            )
+            asked = int(cur.fetchone()[0])
+            cur.execute(
+                """
+                SELECT a.filename, a.file_path, a.extracted_text
+                FROM attachments a
+                JOIN chat_history h ON h.id = a.message_id
+                WHERE h.session_id = %s AND h.user_id = %s AND a.user_id = %s
+                  AND h.source = 'translate_job' AND COALESCE(a.generated, false)
+                  AND lower(a.filename) LIKE '%%.docx'
+                ORDER BY a.id DESC
+                LIMIT %s
+                """,
+                (session_id, user_id, user_id, limit),
+            )
+            files = [{"filename": r[0], "file_path": r[1], "extracted_text": r[2]} for r in cur.fetchall()]
+    return {"asked": asked, "files": files}
+
+
 def get_session_spreadsheets_pg(session_id: int, user_id: int, limit: int = 5) -> list[dict]:
     """Excel/CSV files the user uploaded earlier in this session (newest first),
     so a follow-up ("แล้วเดือนไหนขายดีสุด") can be computed on the same data.

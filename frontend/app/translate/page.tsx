@@ -17,6 +17,7 @@ import {
   deleteTranslation,
   downloadTranslation,
   getToken,
+  goSignIn,
   getTranslationReview,
   getTranslationStatus,
   listTranslationJobs,
@@ -57,7 +58,7 @@ export default function TranslatePage() {
 
   useEffect(() => {
     if (!getToken()) {
-      router.replace("/login");
+      goSignIn();
       return;
     }
     loadHistory();

@@ -33,6 +33,29 @@ MAKE_PDF = os.getenv("TRANSLATE_MAKE_PDF", "true").lower() in ("1", "true", "yes
 _executor = ThreadPoolExecutor(max_workers=MAX_CONCURRENT)
 _jobs: dict[str, dict] = {}
 _lock = threading.Lock()
+# job id -> callbacks run (with the finished job) when it is done — a job
+# started from the chat attaches its Word/PDF to the chat message this way
+_on_done: dict[str, list] = {}
+
+
+def on_done(job_id: str, fn) -> None:
+    """Call fn(job) once the job is done (right away if it already is).
+    In memory only: a backend restart ends the job anyway (mark_orphans_interrupted)."""
+    with _lock:
+        job = _jobs.get(job_id)
+        if not job or job.get("status") != "done":
+            _on_done.setdefault(job_id, []).append(fn)
+            return
+        job = dict(job)
+    _run_callbacks([fn], job)
+
+
+def _run_callbacks(fns: list, job: dict) -> None:
+    for fn in fns:
+        try:
+            fn(job)
+        except Exception:  # noqa: BLE001 — never break the worker over a follow-up
+            pass
 
 
 def _update(job_id: str, **kw) -> None:
@@ -251,6 +274,10 @@ def _run(job_id: str, pdf_path: str, out_dir: str, base: str) -> None:
         )
         _update(job_id, **done_fields)
         _db_update(job_id, **done_fields)
+        with _lock:
+            fns = _on_done.pop(job_id, [])
+            finished = dict(_jobs.get(job_id) or {})
+        _run_callbacks(fns, finished)
         # ค่าใช้จ่ายเข้า AI usage log ด้วย (ไม่หายแม้ลบงานแปล) — ดู usage_log.py
         if _db_on():
             import usage_log
@@ -264,6 +291,8 @@ def _run(job_id: str, pdf_path: str, out_dir: str, base: str) -> None:
     except Exception as e:  # noqa: BLE001 — เก็บ error ไว้ให้ frontend แสดง ไม่ให้ worker ตาย
         _update(job_id, status="error", error=str(e)[:300])
         _db_update(job_id, status="error", error=str(e)[:300])
+        with _lock:
+            _on_done.pop(job_id, None)
 
 
 def delete_job(job_id: str, user_id) -> bool:

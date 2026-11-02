@@ -18,6 +18,13 @@ from sensitive import is_sensitive
     "ช่วยเขียนประกาศรับสมัครพนักงานขาย เงินเดือน 15,000-18,000 + โบนัสประจำปี",
     "เปิดรับพนักงานแพ็คของ ค่าจ้างวันละ 400 บาท",
     "We're hiring a press operator, salary 20,000 THB",
+    # QA 2026-11-02: job ads without "รับสมัคร / สมัครงาน"
+    "ทำโปสเตอร์หาช่างพิมพ์ เงินเดือน 20,000 บาท",
+    "ด่วน! ต้องการพนักงานขับรถ เงินเดือน 15,000 บาท ทำโปสเตอร์ให้หน่อย",
+    "Make a job vacancy poster for a press operator, salary 20,000 THB",
+    "ช่วยเขียนโพสต์ Facebook หาคนงานแพ็คของ ค่าจ้างวันละ 400 บาท",
+    "รับช่างซ่อมบำรุง ค่าตอบแทนตามประสบการณ์",
+    "มีตำแหน่งงานว่าง แอดมินออนไลน์ เงินเดือน 18,000",
 ])
 def test_pay_in_a_job_ad_passes(text):
     assert is_sensitive(text) is None
@@ -28,6 +35,8 @@ def test_pay_in_a_job_ad_passes(text):
     "โบนัสปีนี้ของหัวหน้าฝ่ายผลิต",
     "ขอสลิปเงินเดือนของพี่ดา",
     "salary of the plant manager",
+    "ช่างพิมพ์ที่บริษัทเราได้เงินเดือนเท่าไหร่",
+    "หัวหน้าฝ่ายผลิตได้โบนัสปีนี้กี่เดือน",
 ])
 def test_pay_questions_still_block(text):
     assert is_sensitive(text) is not None

@@ -124,3 +124,101 @@ def test_agent_stop_mid_answer_saves_the_text_sent(monkeypatch, pipe):  # noqa: 
     _stop_after("ค้นราคาทองวันนี้", 3, session_id=None)   # status, session, first delta
     assert [r["answer"] for r in pipe.saved] == ["ราคา" + main.STOPPED_NOTE]
     assert pipe.saved[0]["source"] == "agent" and pipe.saved[0]["session_id"] == 5
+
+
+# ── หยุด while a slow step runs (QA 2026-11-02: the image was still saved) ──
+
+def test_stop_while_the_image_is_made_keeps_nothing(monkeypatch, pipe):  # noqa: F811
+    import time
+
+    import attachments as att
+    import chat_pg
+    import usage_log
+
+    quota, logged = [], []
+    monkeypatch.setattr(main, "_is_image_request", lambda q: True)
+    monkeypatch.setattr(chat_pg, "count_images_today_pg", lambda uid: 0)
+    monkeypatch.setattr(chat_pg, "record_image_generation_pg", lambda *a: quota.append(a))
+    monkeypatch.setattr(chat_pg, "save_attachment_pg", lambda **kw: pipe.saved.append(kw) or {"id": 1})
+    monkeypatch.setattr(att, "save_generated_image", lambda *a, **kw: ("ai.png", "image/png", 3, "/x.png"))
+    monkeypatch.setattr(usage_log, "log_usage_pg", lambda *a, **kw: logged.append(a))
+
+    def slow_image(question, logo_path=None):
+        time.sleep(1.0)  # the image model at work
+        return b"png", {"model_used": "gpt-image-2", "prompt_tokens": 0, "completion_tokens": 0, "cost_usd": 0.16}
+
+    monkeypatch.setattr(main, "generate_image", slow_image)
+    req = Request({"type": "http", "method": "POST", "path": "/chat/stream", "headers": [], "client": ("t", 1)})
+    got = []
+
+    async def run():
+        resp = await inspect.unwrap(main.chat_stream)(request=req, message="วาดรูปแมว", session_id=5,
+                                                      mode="normal", user=ADMIN)
+        async with anyio.create_task_group() as tg:
+            async def stop_after(t):
+                await anyio.sleep(t)
+                tg.cancel_scope.cancel()
+
+            async def consume():
+                async for chunk in resp.body_iterator:
+                    got.append(json.loads(chunk))
+                    if got[-1].get("state") == "generating_image":
+                        tg.start_soon(stop_after, 0.2)  # หยุด, 0.2 s into the 1 s image
+
+            tg.start_soon(consume)
+
+    anyio.run(run)
+    assert [e["type"] for e in got] == ["status"]          # nothing after หยุด reached the browser
+    assert pipe.saved == [] and quota == []                # no message, no image row, no quota used
+    assert logged and logged[0][2] == "image_gen"          # the money spent is still in the usage log
+
+
+# ── /chat (no stream): หยุด drops the request ───────────────────────────────
+
+def test_watch_disconnect_sets_the_flag():
+    import threading
+
+    stopped = threading.Event()
+
+    async def receive():
+        return {"type": "http.disconnect"}
+
+    req = Request({"type": "http", "method": "POST", "path": "/chat", "headers": []}, receive)
+    anyio.run(main._watch_disconnect, req, stopped)
+    assert stopped.is_set()
+
+
+def test_chat_stopped_keeps_nothing_of_the_turn(monkeypatch):
+    from types import SimpleNamespace as NS
+
+    import chat_pg
+    import code_interpreter as ci
+    import doc_engine as de
+    from tests.test_code_interpreter import _gate
+
+    import usage_log
+
+    calls = NS(turns=[], scope=[], charged=[], audits=[], saved=[], attached=[], answered=[], logged=[])
+    _gate(monkeypatch, calls, keyword=None, flagged=None, decision="denied")
+    monkeypatch.setattr(de, "DOCUMENT_ENGINE_MODE", "off")
+    monkeypatch.setattr(ci, "CODE_INTERPRETER_MODE", "off")
+    monkeypatch.setattr(chat_pg, "get_session_history_pg", lambda **kw: [])
+    monkeypatch.setattr(usage_log, "log_usage_pg", lambda *a, **kw: calls.logged.append(a))
+    monkeypatch.setattr(main, "_answer_files", lambda *a: calls.answered.append(a) or (
+        "ตอบ", {"model": "gpt-4.1", "prompt_tokens": 10, "completion_tokens": 5, "cost_usd": 0.001}))
+
+    async def gone_at_once(request, stopped):   # the browser drops the request straight away
+        stopped.set()
+
+    monkeypatch.setattr(main, "_watch_disconnect", gone_at_once)
+    main.app.dependency_overrides[main.current_user] = lambda: ADMIN
+    try:
+        r = TestClient(main.app).post("/chat", data={"message": "สรุปไฟล์นี้"},
+                                      files=[("files", ("a.txt", b"hello", "text/plain"))])
+    finally:
+        main.app.dependency_overrides.pop(main.current_user, None)
+    assert r.json()["source"] == "stopped"
+    assert calls.saved == [] and calls.attached == []          # nothing of the turn is kept
+    assert any(a[0] == "chat_stopped" for a in calls.audits)
+    if calls.answered:                                         # an answer made before หยุด landed: its cost is logged
+        assert calls.logged

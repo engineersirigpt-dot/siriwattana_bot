@@ -24,10 +24,11 @@ import {
   Users,
   X,
 } from "lucide-react";
-import { API_BASE, api, getRole, getToken } from "@/lib/api";
+import { API_BASE, api, getRole, getToken, goSignIn } from "@/lib/api";
 import { ConfirmModal } from "@/components/Modal";
 import { DashboardPanel } from "@/components/admin/DashboardPanel";
 import { UsagePanel } from "@/components/admin/UsagePanel";
+import { translateJobs } from "@/components/chat/TranslationCard";
 
 type Pending = {
   id: number;
@@ -129,7 +130,7 @@ export default function AdminPage() {
   const [currentUserId, setCurrentUserId] = useState<number | null>(null);
 
   useEffect(() => {
-    if (!getToken()) return router.replace("/login");
+    if (!getToken()) return goSignIn();
     if (getRole() !== "admin") return router.replace("/chat");
     api<{ id: number }>("/auth/me")
       .then((u) => setCurrentUserId(u.id))
@@ -593,7 +594,7 @@ export default function AdminPage() {
                               <span className="text-xs text-muted font-medium block mb-0.5">
                                 bot ({m.source})
                               </span>
-                              {m.answer}
+                              {translateJobs(m.answer).text}
                             </div>
                           </div>
                         ))}
