@@ -119,6 +119,32 @@ test.describe("chat and streaming", () => {
   });
 });
 
+test("switching chats mid-answer: it finishes in its own chat, never in the one opened", async ({ page }, testInfo) => {
+  await signIn(page);
+  await page.goto("/chat");
+  await expect(page.getByTestId("empty-state")).toBeVisible();
+  await page.getByLabel("ข้อความ").fill("ตอบช้า ๆ ยาว ๆ");
+  await page.getByTestId("send").click();
+  await expect(page.getByTestId("msg-bot").last()).toContainText("คำตอบยาว");
+
+  await openSession(page, testInfo, "ขั้นตอนเบิกค่าเดินทาง 1");
+  const heading = page.getByRole("heading", { name: "ขั้นตอนเบิกค่าเดินทาง 1" });
+  await expect(heading).toBeVisible();
+  await expect(page.getByTestId("send")).toBeVisible(); // this chat isn't busy
+  const posted = page.waitForRequest((r) => r.url().endsWith("/chat/stream"));
+  await page.getByLabel("ข้อความ").fill("สรุปแชทนี้ให้ 3 บรรทัด");
+  await page.getByTestId("send").click();
+  expect((await posted).postData() ?? "").toMatch(/name="session_id"\r\n\r\n200\r\n/); // the chat on screen
+  await expect(page.getByTestId("msg-bot").last()).toHaveAttribute("data-streaming", "0");
+  await page.waitForTimeout(1500);
+  expect(await page.getByTestId("msg-bot").allTextContents()).not.toContainEqual(expect.stringContaining("คำตอบยาว"));
+  await expect(heading).toBeVisible();
+
+  // back to the first chat: the answer that kept going is there once done
+  await openSession(page, testInfo, "ตอบช้า ๆ ยาว ๆ");
+  await expect(page.getByTestId("msg-bot").last()).toContainText("คำตอบยาว", { timeout: 30_000 });
+});
+
 test("reading back isn't interrupted by a streaming answer", async ({ page }, testInfo) => {
   await signIn(page);
   await page.goto("/chat");

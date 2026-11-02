@@ -209,12 +209,12 @@ export function DashboardPanel() {
 
   if (error) {
     return (
-      <div className="bg-red-50 border border-red-200 rounded-2xl p-6 text-center">
-        <p className="text-red-700 font-medium">โหลดข้อมูลไม่สำเร็จ</p>
-        <p className="text-sm text-red-600 mt-1">{error}</p>
+      <div className="bg-red-50 border border-red-200 rounded-2xl p-6 text-center dark:bg-red-950/40 dark:border-red-900">
+        <p className="text-red-700 font-medium dark:text-red-300">โหลดข้อมูลไม่สำเร็จ</p>
+        <p className="text-sm text-red-600 mt-1 dark:text-red-300/80">{error}</p>
         <button
           onClick={() => fetchOverview(range)}
-          className="mt-3 px-3 py-1.5 text-sm bg-red-100 hover:bg-red-200 rounded-lg text-red-700"
+          className="mt-3 px-3 py-1.5 text-sm bg-red-100 hover:bg-red-200 rounded-lg text-red-700 dark:bg-red-900/50 dark:hover:bg-red-900 dark:text-red-200"
         >
           ลองอีกครั้ง
         </button>

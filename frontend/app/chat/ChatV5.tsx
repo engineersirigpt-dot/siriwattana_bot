@@ -53,6 +53,7 @@ import {
 import {
   API_BASE,
   api,
+  goSignIn,
   signOut,
   exportAnswerDocx,
   exportAnswerPdf,
@@ -189,12 +190,17 @@ export default function ChatV5() {
   const searchRef = useRef<HTMLInputElement>(null);
   const abortRef = useRef<AbortController | null>(null);
   const loadSeq = useRef(0);
+  // Bumped whenever another chat (or a new one) is put on screen. An answer
+  // still coming in for the chat that was left keeps running and is saved by
+  // the server, but no longer touches the screen (see send).
+  const viewSeq = useRef(0);
+  const currentSidRef = useRef<number | null>(null);
   const { atBottom, scrollToBottom } = useStickyScroll(scrollRef, messages);
 
   // ── start ─────────────────────────────────────────────────────────────────
   useEffect(() => {
     if (!getToken()) {
-      router.replace("/login");
+      goSignIn(); // our login page, or the MI portal for a browser that came from it
       return;
     }
     setRole(getRole());
@@ -231,6 +237,10 @@ export default function ChatV5() {
     return () => window.removeEventListener("keydown", onKey);
   }, [navOpen]);
 
+  useEffect(() => {
+    currentSidRef.current = currentSid;
+  }, [currentSid]);
+
   // auto-grow the composer (up to ~8 lines); a scrollbar only past that —
   // otherwise Windows shows an empty one beside a single line
   useEffect(() => {
@@ -265,7 +275,16 @@ export default function ChatV5() {
     }
   }
 
+  // Leave the chat on screen: an answer still coming in carries on in the
+  // background (the server saves it) without writing into the next chat.
+  function leaveView() {
+    viewSeq.current++;
+    abortRef.current = null;
+    setSending(false);
+  }
+
   function openChat(sid: number, owner: string | null, token: string | null) {
+    leaveView();
     setCurrentSid(sid);
     setSearchResults(null);
     setReadOnlyOwner(owner);
@@ -421,7 +440,7 @@ export default function ChatV5() {
 
   // ── chat list actions ─────────────────────────────────────────────────────
   function newChat() {
-    abortRef.current?.abort();
+    leaveView();
     loadSeq.current++;
     setCurrentSid(null);
     setMessages([]);
@@ -639,17 +658,27 @@ export default function ChatV5() {
     requestAnimationFrame(() => scrollToBottom(true));
     const controller = new AbortController();
     abortRef.current = controller;
+    const view = viewSeq.current;
     try {
-      if (files.length) await runNonStream(text, files, controller);
-      else await runStreaming(text, controller);
+      if (files.length) await runNonStream(text, files, controller, view);
+      else await runStreaming(text, controller, view);
     } finally {
-      setSending(false);
-      abortRef.current = null;
+      if (viewSeq.current === view) {
+        setSending(false);
+        abortRef.current = null;
+      }
     }
   }
 
+  // An answer for a chat that is no longer on screen: when it lands in the
+  // chat being looked at again, show it (from the server).
+  function landedElsewhere(sid: number) {
+    if (currentSidRef.current === sid) loadSession(sid);
+  }
+
   // Files go through /chat (no streaming). A placeholder answer shows the wait.
-  async function runNonStream(text: string, files: File[], controller: AbortController) {
+  async function runNonStream(text: string, files: File[], controller: AbortController, view: number) {
+    const here = () => viewSeq.current === view;
     const proof = files.length > 0 && PROOFREAD_RE.test(text);
     const heavy = files.some((f) => DATA_FILE_RE.test(f.name));
     setMessages((m) => [
@@ -666,6 +695,9 @@ export default function ChatV5() {
     ]);
     try {
       const res = await sendChat({ message: text, sessionId: currentSid, files, signal: controller.signal });
+      refreshSessions();
+      if (role === "admin") refreshTeamSessions();
+      if (!here()) return landedElsewhere(res.session_id);
       const atts = splitAttachments(res.source, res.attachments);
       const isImageResult = res.source === "image_edit" || res.source === "image_gen";
       setMessages((m) => {
@@ -691,9 +723,8 @@ export default function ChatV5() {
       setCurrentSid(res.session_id);
       if (typeof res.turn_count === "number") setTurnCount(res.turn_count);
       if (typeof res.turn_limit === "number") setTurnLimit(res.turn_limit);
-      refreshSessions();
-      if (role === "admin") refreshTeamSessions();
     } catch (e) {
+      if (!here()) return;
       const aborted = e instanceof DOMException && e.name === "AbortError";
       patchLastBot({
         streaming: false,
@@ -702,7 +733,12 @@ export default function ChatV5() {
     }
   }
 
-  async function runStreaming(text: string, controller: AbortController) {
+  async function runStreaming(text: string, controller: AbortController, view: number) {
+    const here = () => viewSeq.current === view;
+    // only while this chat is still the one on screen
+    const patch: typeof patchLastBot = (p) => {
+      if (here()) patchLastBot(p);
+    };
     setMessages((m) => [
       ...m,
       { role: "bot", text: "", source: "", question: text, myVote: null, streaming: true, steps: [], startedAt: Date.now() },
@@ -716,7 +752,7 @@ export default function ChatV5() {
       if (!pending) return;
       const t = pending;
       pending = "";
-      patchLastBot((last) => ({ text: last.text + t }));
+      patch((last) => ({ text: last.text + t }));
     };
     let receivedAny = false;
     let sentText = false;
@@ -731,18 +767,21 @@ export default function ChatV5() {
           },
           onSession: (s) => {
             receivedAny = true;
-            if (currentSid === null) {
+            refreshSessions();
+            if (currentSid === null && here()) {
               // a new chat: it exists now, even if this answer gets stopped
               setCurrentSid(s.session_id);
-              refreshSessions();
             }
           },
           onStatus: (state) => {
-            if (state === "generating_image") patchLastBot({ generatingImage: true });
-            else if (knownStep(state)) patchLastBot((last) => ({ steps: [...(last.steps ?? []), state] }));
+            if (state === "generating_image") patch({ generatingImage: true });
+            else if (knownStep(state)) patch((last) => ({ steps: [...(last.steps ?? []), state] }));
           },
           onDone: (meta) => {
             flush();
+            refreshSessions();
+            if (role === "admin") refreshTeamSessions();
+            if (!here()) return landedElsewhere(meta.session_id);
             patchLastBot((last) => ({
               source: meta.source,
               source_knowledge_id: meta.source_knowledge_id ?? null,
@@ -757,13 +796,11 @@ export default function ChatV5() {
             setCurrentSid(meta.session_id);
             if (typeof meta.turn_count === "number") setTurnCount(meta.turn_count);
             if (typeof meta.turn_limit === "number") setTurnLimit(meta.turn_limit);
-            refreshSessions();
-            if (role === "admin") refreshTeamSessions();
           },
           onError: (detail) => {
             receivedAny = true;
             flush();
-            patchLastBot((last) => ({ text: last.text + (last.text ? "\n\n" : "") + `⚠️ ${detail}`, streaming: false }));
+            patch((last) => ({ text: last.text + (last.text ? "\n\n" : "") + `⚠️ ${detail}`, streaming: false }));
           },
         },
       );
@@ -771,23 +808,24 @@ export default function ChatV5() {
       flush();
       const aborted = e instanceof DOMException && e.name === "AbortError";
       if (aborted) {
-        patchLastBot((last) => (last.text ? { stopped: true } : { text: "ยกเลิกการถามแล้ว" }));
-        if (sentText) {
+        patch((last) => (last.text ? { stopped: true } : { text: "ยกเลิกการถามแล้ว" }));
+        if (sentText && here()) {
           // the backend saves the text it had sent (marked as stopped) — one more turn
           setTurnCount((c) => c + 1);
           refreshSessions();
         }
       } else if (!receivedAny) {
         // never started (e.g. sqlite → 501): drop the bubble, use /chat instead
+        if (!here()) return;
         setMessages((m) => (m[m.length - 1]?.role === "bot" && !m[m.length - 1].text ? m.slice(0, -1) : m));
-        await runNonStream(text, [], controller);
+        await runNonStream(text, [], controller, view);
         return;
       } else {
-        patchLastBot((last) => ({ text: last.text + "\n\n⚠️ การเชื่อมต่อขัดข้อง" }));
+        patch((last) => ({ text: last.text + "\n\n⚠️ การเชื่อมต่อขัดข้อง" }));
       }
     } finally {
       flush();
-      patchLastBot((last) => (last.streaming ? { streaming: false, generatingImage: false } : {}));
+      patch((last) => (last.streaming ? { streaming: false, generatingImage: false } : {}));
     }
   }
 

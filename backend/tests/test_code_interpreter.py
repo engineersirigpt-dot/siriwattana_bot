@@ -826,7 +826,7 @@ def _stream(monkeypatch, *, keyword=None, flagged=None, decision="denied", user=
     calls = NS(scope=[], scoped_turn=[], normal=False, charged=[], audits=[], saved=[], attached=[])
     _gate(monkeypatch, calls, keyword=keyword, flagged=flagged, decision=decision)
 
-    def fake_turn(u, q, sid, mode, req, uploads=None, scoped=False):
+    def fake_turn(u, q, sid, mode, req, uploads=None, scoped=False, **kw):
         calls.scoped_turn.append(scoped)
         yield "delta", "ผลจากไฟล์"
         yield "done", {"answer": "ผลจากไฟล์", "tail": "", "source": "code", "session_id": 5,

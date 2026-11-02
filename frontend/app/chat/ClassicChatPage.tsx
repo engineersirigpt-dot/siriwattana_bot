@@ -43,6 +43,7 @@ import {
 import {
   API_BASE,
   api,
+  goSignIn,
   signOut,
   downloadSourceFile,
   exportAnswerDocx,
@@ -66,6 +67,7 @@ import {
 } from "@/lib/api";
 import { AlertModal, ConfirmModal, PromptModal } from "@/components/Modal";
 import { MarkdownMessage } from "@/components/MarkdownMessage";
+import { TranslationCard, translateJobs } from "@/components/chat/TranslationCard";
 import ThemeToggle from "@/components/ThemeToggle";
 import CapabilitiesModal from "@/components/CapabilitiesModal";
 import MemoryModal from "@/components/MemoryModal";
@@ -382,6 +384,12 @@ export default function ClassicChatPage() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const abortRef = useRef<AbortController | null>(null);
+  // Bumped whenever another chat (or a new one) is put on screen — see leaveView.
+  const viewSeq = useRef(0);
+  const currentSidRef = useRef<number | null>(null);
+  useEffect(() => {
+    currentSidRef.current = currentSid;
+  }, [currentSid]);
 
   // Voice input (mic → Whisper → fill the input box). getUserMedia only works
   // on HTTPS or localhost, so the button is hidden on plain-HTTP origins.
@@ -402,7 +410,7 @@ export default function ClassicChatPage() {
 
   useEffect(() => {
     if (!getToken()) {
-      router.replace("/login");
+      goSignIn(); // our login page, or the MI portal for a browser that came from it
       return;
     }
     setRole(getRole());
@@ -548,7 +556,22 @@ export default function ClassicChatPage() {
     return result;
   }
 
+  // Leave the chat on screen: an answer still coming in carries on in the
+  // background (the server saves it) without writing into the next chat.
+  function leaveView() {
+    viewSeq.current++;
+    abortRef.current = null;
+    setSending(false);
+  }
+
+  // An answer for a chat that is no longer on screen: when it lands in the
+  // chat being looked at again, show it (from the server).
+  function landedElsewhere(sid: number) {
+    if (currentSidRef.current === sid) loadSession(sid);
+  }
+
   async function loadSession(sid: number) {
+    leaveView();
     setCurrentSid(sid);
     setSearchResults(null);
     setReadOnlyOwner(null);
@@ -581,6 +604,7 @@ export default function ClassicChatPage() {
   }
 
   async function loadTeamSession(sid: number, owner: string) {
+    leaveView();
     setCurrentSid(sid);
     setSearchResults(null);
     setReadOnlyOwner(owner);
@@ -603,6 +627,7 @@ export default function ClassicChatPage() {
     owner: string,
     token: string,
   ) {
+    leaveView();
     setCurrentSid(sid);
     setSearchResults(null);
     setReadOnlyOwner(owner);
@@ -755,6 +780,7 @@ export default function ClassicChatPage() {
   }
 
   function newChat(mode: ChatMode = "normal") {
+    leaveView();
     setCurrentSid(null);
     setMessages([]);
     setSearchResults(null);
@@ -986,6 +1012,7 @@ export default function ClassicChatPage() {
   }
 
   function exitReadOnly() {
+    leaveView();
     setReadOnlyOwner(null);
     setReadOnlyToken(null);
     setCurrentSid(null);
@@ -1023,19 +1050,22 @@ export default function ClassicChatPage() {
 
     const controller = new AbortController();
     abortRef.current = controller;
+    const view = viewSeq.current;
 
     try {
       // Files use the classic non-stream path (vision model, different shape).
       // Plain text questions stream token-by-token; on any startup failure
       // (e.g. sqlite → 501) we transparently fall back to non-stream.
       if (filesToSend.length > 0) {
-        await runNonStream(text, filesToSend, controller);
+        await runNonStream(text, filesToSend, controller, view);
       } else {
-        await runStreaming(text, controller);
+        await runStreaming(text, controller, view);
       }
     } finally {
-      setSending(false);
-      abortRef.current = null;
+      if (viewSeq.current === view) {
+        setSending(false);
+        abortRef.current = null;
+      }
     }
   }
 
@@ -1044,7 +1074,9 @@ export default function ClassicChatPage() {
     text: string,
     filesToSend: File[],
     controller: AbortController,
+    view: number,
   ) {
+    const here = () => viewSeq.current === view;
     try {
       const res = await sendChat({
         message: text,
@@ -1053,6 +1085,9 @@ export default function ClassicChatPage() {
         mode: chatMode,
         signal: controller.signal,
       });
+      refreshSessions();
+      if (role === "admin") refreshTeamSessions();
+      if (!here()) return landedElsewhere(res.session_id);
       let newBotIdx = 0;
       setMessages((m) => {
         const copy = [...m];
@@ -1091,9 +1126,8 @@ export default function ClassicChatPage() {
       setCurrentSid(res.session_id);
       if (typeof res.turn_count === "number") setTurnCount(res.turn_count);
       if (typeof res.turn_limit === "number") setTurnLimit(res.turn_limit);
-      refreshSessions();
-      if (role === "admin") refreshTeamSessions();
     } catch (e: unknown) {
+      if (!here()) return;
       const isAbort = e instanceof DOMException && e.name === "AbortError";
       setMessages((m) => [
         ...m,
@@ -1111,23 +1145,28 @@ export default function ClassicChatPage() {
   // fill it as tokens arrive. The streaming bubble is always the LAST message
   // (concurrent sends are blocked by `sending`), so we target it by position
   // inside the state updater — no fragile index captured before render.
-  async function runStreaming(text: string, controller: AbortController) {
+  async function runStreaming(text: string, controller: AbortController, view: number) {
+    const here = () => viewSeq.current === view;
     setMessages((m) => [
       ...m,
       { role: "bot", text: "", source: "", question: text, myVote: null, streaming: true },
     ]);
+    // Every screen update below: only while this chat is still the one shown.
+    const setMessagesHere: typeof setMessages = (u) => {
+      if (here()) setMessages(u);
+    };
 
     // Update the trailing bot bubble. Guards on role so we never touch a user
     // message if the array shape is unexpected.
     const patchLastBot = (patch: Partial<Msg>) =>
-      setMessages((m) => {
+      setMessagesHere((m) => {
         const copy = [...m];
         const last = copy.length - 1;
         if (copy[last]?.role === "bot") copy[last] = { ...copy[last], ...patch };
         return copy;
       });
     const appendLastBot = (t: string) =>
-      setMessages((m) => {
+      setMessagesHere((m) => {
         const copy = [...m];
         const last = copy.length - 1;
         if (copy[last]?.role === "bot") {
@@ -1157,6 +1196,9 @@ export default function ClassicChatPage() {
             else if (AGENT_STATUS_LABELS[state]) patchLastBot({ agentStatus: AGENT_STATUS_LABELS[state] });
           },
           onDone: (meta) => {
+            refreshSessions();
+            if (role === "admin") refreshTeamSessions();
+            if (!here()) return landedElsewhere(meta.session_id);
             patchLastBot({
               source: meta.source,
               source_knowledge_id: meta.source_knowledge_id ?? null,
@@ -1174,13 +1216,11 @@ export default function ClassicChatPage() {
             setCurrentSid(meta.session_id);
             if (typeof meta.turn_count === "number") setTurnCount(meta.turn_count);
             if (typeof meta.turn_limit === "number") setTurnLimit(meta.turn_limit);
-            refreshSessions();
-            if (role === "admin") refreshTeamSessions();
           },
           onError: (detail) => {
             receivedAny = true;
             // Append so any partial answer already streamed isn't lost.
-            setMessages((m) => {
+            setMessagesHere((m) => {
               const copy = [...m];
               const last = copy.length - 1;
               if (copy[last]?.role === "bot") {
@@ -1199,7 +1239,7 @@ export default function ClassicChatPage() {
     } catch (e: unknown) {
       const isAbort = e instanceof DOMException && e.name === "AbortError";
       if (isAbort) {
-        setMessages((m) => {
+        setMessagesHere((m) => {
           const copy = [...m];
           const last = copy.length - 1;
           if (copy[last]?.role === "bot" && !copy[last].text) {
@@ -1210,20 +1250,21 @@ export default function ClassicChatPage() {
       } else if (!receivedAny) {
         // Stream never produced anything (e.g. 501 on sqlite, network) — drop
         // the empty bubble and retry through the classic non-stream path.
+        if (!here()) return;
         setMessages((m) => {
           const copy = [...m];
           const last = copy.length - 1;
           if (copy[last]?.role === "bot" && !copy[last].text) copy.splice(last, 1);
           return copy;
         });
-        await runNonStream(text, [], controller);
+        await runNonStream(text, [], controller, view);
         return;
       } else {
         appendLastBot("\n\n⚠️ การเชื่อมต่อขัดข้อง");
       }
     } finally {
       // Belt-and-suspenders: never leave the trailing bubble stuck "streaming".
-      setMessages((m) => {
+      setMessagesHere((m) => {
         const copy = [...m];
         const last = copy.length - 1;
         if (copy[last]?.role === "bot" && copy[last].streaming) {
@@ -1906,7 +1947,9 @@ export default function ClassicChatPage() {
               const isTyping = i === typingIndex;
               const isStreaming = !!m.streaming;
               const animating = isTyping || isStreaming;
-              const shownText = isTyping ? m.text.slice(0, typedChars) : m.text;
+              // a translation started from the chat: its job markers become cards
+              const tj = m.role === "bot" ? translateJobs(m.text) : { ids: [], text: m.text };
+              const shownText = isTyping ? tj.text.slice(0, typedChars) : tj.text;
 
               if (m.role === "user") {
                 return (
@@ -1977,6 +2020,7 @@ export default function ClassicChatPage() {
                       // (instead of raw "| col | col |" text).
                       (m.text || isStreaming) && <MarkdownMessage text={shownText} />
                     )}
+                    {!animating && tj.ids.map((id) => <TranslationCard key={id} jobId={id} />)}
                     {/* Code Interpreter output (charts, Excel/CSV) follows the
                         answer that explains it. */}
                     {m.attachments && m.attachments.length > 0 && !isImageSource(m.source) && !animating && (

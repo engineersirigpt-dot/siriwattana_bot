@@ -594,8 +594,9 @@ def long_translation_warning(question: str, text_chars: int, image_pages: int) -
 # another language — those stay in chat.
 _WHOLE_TRANSLATE_RE = re.compile(r"แปล(?!ว่า)|\btranslat", re.IGNORECASE)
 _PART_RE = re.compile(
-    r"หน้า(?:ที่)?\s*\d|ย่อหน้า|บรรทัด|ประโยค|คำว่า|คำนี้|สรุป|"
-    r"\b(?:page|paragraph|line|sentence)s?\s*\d|\bsummar",
+    r"หน้า(?:ที่)?\s*\d|\d+\s*หน้า|หน้า(?:แรก|สุดท้าย)|บางหน้า|บางส่วน|เฉพาะ|หัวข้อ|บท(?:ที่)?\s*\d|"
+    r"ส่วนที่|ภาคผนวก|ย่อหน้า|บรรทัด|ประโยค|คำว่า|คำนี้|สรุป|"
+    r"\b(?:page|paragraph|line|sentence|chapter|section)s?\s*\d|\bfirst\s+\d+|\bonly\b|\bsummar",
     re.IGNORECASE,
 )
 _OTHER_TARGET_RE = re.compile(
@@ -611,16 +612,43 @@ def wants_whole_translation(question: str) -> bool:
     return bool(_WHOLE_TRANSLATE_RE.search(q)) and not _PART_RE.search(q) and not _OTHER_TARGET_RE.search(q)
 
 
+def _mostly_thai(text: str) -> bool:
+    letters = [c for c in text if c.isalpha()]
+    return bool(letters) and sum(1 for c in letters if _THAI_CHAR_RE.match(c)) / len(letters) > 0.3
+
+
+def _scanned_first_page_text(file_path: str) -> str | None:
+    """OCR (Tesseract, Thai + English, no API) of a scanned PDF's first page,
+    to tell its language. None when it can't be read."""
+    try:
+        from PIL import Image
+
+        from proofread import _tesseract
+
+        with fitz.open(str(validate_upload_path(file_path))) as doc:
+            pix = doc[0].get_pixmap(dpi=150)
+        res = _tesseract(Image.open(io.BytesIO(pix.tobytes("png"))), "tha+eng", 3, ("txt",))
+        text = (res or {}).get("txt", "")
+        return text if text.strip() else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def is_long_english_pdf(file_path: str) -> bool:
     """Long enough that a chat translation would be cut short (the same limits
     as long_translation_warning) and not already Thai — the translator works
-    English → Thai. A scanned PDF (no text layer) counts by its pages."""
+    English → Thai. A scanned PDF (no text layer) counts by its pages; its
+    language comes from an OCR of page 1 — unreadable → not started (the
+    chat answers instead)."""
     pages = count_pdf_pages(file_path)
     if pages == 0:
         return False
     text = re.sub(r"\[หน้า \d+\]", "", extract_pdf_text(file_path))  # its own page labels are Thai
-    letters = [c for c in text if c.isalpha()]
-    if letters and sum(1 for c in letters if _THAI_CHAR_RE.match(c)) / len(letters) > 0.3:
+    if is_text_sparse(text):
+        ocr = _scanned_first_page_text(file_path)
+        if ocr is None or _mostly_thai(ocr):
+            return False
+    elif _mostly_thai(text):
         return False
     return pages >= _LONG_IMAGE_PAGES or len(text) > _LONG_TEXT_CHARS
 

@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { Lock, User } from "lucide-react";
 import { login, saveAuth } from "@/lib/api";
 import ThemeToggle from "@/components/ThemeToggle";
+import { Logo } from "@/components/chat/Logo";
 
 export default function LoginPage() {
   const router = useRouter();
@@ -41,11 +42,7 @@ export default function LoginPage() {
       <div className="relative z-10 bg-surface rounded-3xl shadow-2xl p-12 w-full max-w-md">
         {/* Logo */}
         <div className="flex justify-center mb-8">
-          <img
-            src="/Logo_siri.jpg"
-            alt="Sirivatana"
-            className="w-20 h-20 rounded-2xl object-cover shadow-lg"
-          />
+          <Logo alt="Sirivatana" className="h-20 w-20" tile="rounded-2xl shadow-lg" />
         </div>
 
         {/* Title */}

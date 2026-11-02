@@ -2,7 +2,9 @@ import csv
 import io
 import json
 import os
+import asyncio
 import re
+import threading
 import time
 
 import anyio
@@ -21,7 +23,7 @@ from fastapi import (
     Request,
     UploadFile,
 )
-from fastapi.concurrency import iterate_in_threadpool, run_in_threadpool
+from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.security import OAuth2PasswordRequestForm
@@ -800,10 +802,13 @@ def _wants_image_from_reference(text: str) -> bool:
 
 
 def _handle_image_edit(
-    user: dict, question: str, session_id: int | None, mode: str, last_img: dict
+    user: dict, question: str, session_id: int | None, mode: str, last_img: dict,
+    cancelled=None,
 ) -> dict:
     """Edit the session's most recent image per `question`. Shares the daily
-    image quota. Returns the same dict shape as _handle_image_generation."""
+    image quota. Returns the same dict shape as _handle_image_generation.
+    `cancelled()` true once the edit is back → the user pressed หยุด: nothing
+    saved, no quota used (_stopped_result)."""
     import attachments as att
     from chat_pg import (
         count_images_today_pg,
@@ -837,6 +842,8 @@ def _handle_image_edit(
         import sys
 
         print(f"IMAGE_EDIT_FAILED: {e!r}", file=sys.stderr)
+        if cancelled and cancelled():
+            return _stopped_result(user, sid, stitle, None, "image_edit")
         text = "ขออภัยค่ะ แก้ไขรูปไม่สำเร็จ ลองพิมพ์คำสั่งใหม่ หรือสร้างรูปใหม่ก็ได้ค่ะ"
         mid = save_chat_message_pg(
             user_id=user["id"], session_id=sid, question=question,
@@ -845,6 +852,8 @@ def _handle_image_edit(
         return {"answer": text, "source": "image_error", "session_id": sid,
                 "session_title": stitle, "message_id": mid, "attachment": None}
 
+    if cancelled and cancelled():
+        return _stopped_result(user, sid, stitle, usage, "image_edit")
     display, ctype, size, path = att.save_generated_image(data, "ai-image-edited.png")
     remaining = IMAGE_GEN_DAILY_LIMIT - used - 1
     caption = (
@@ -866,7 +875,7 @@ def _handle_image_edit(
 
 def _handle_image_generation(
     user: dict, question: str, session_id: int | None, mode: str,
-    logo_path: str | None = None,
+    logo_path: str | None = None, cancelled=None,
 ) -> dict:
     """Generate an image (or refuse if over the daily quota) and persist it.
 
@@ -875,6 +884,8 @@ def _handle_image_generation(
         {answer, source, session_id, session_title, message_id, attachment}
     `attachment` is the saved-image row dict (or None when limited/failed).
     `logo_path` is a user-attached logo to place on the new design.
+    `cancelled()` true once the image is back → the user pressed หยุด: nothing
+    saved, no quota used (_stopped_result).
     """
     import attachments as att
     from chat_pg import (
@@ -911,6 +922,8 @@ def _handle_image_generation(
         import sys
 
         print(f"IMAGE_GEN_FAILED: {e!r}", file=sys.stderr)
+        if cancelled and cancelled():
+            return _stopped_result(user, sid, stitle, None, "image_gen")
         # Distinguish OpenAI's content-policy rejection (copyrighted characters,
         # brands, real people, unsafe content) from a real system error so the
         # user knows to reword instead of just "try again". Neither consumes the
@@ -942,6 +955,8 @@ def _handle_image_generation(
             "session_title": stitle, "message_id": mid, "attachment": None,
         }
 
+    if cancelled and cancelled():
+        return _stopped_result(user, sid, stitle, usage, "image_gen")
     display, ctype, size, path = att.save_generated_image(data)
     remaining = IMAGE_GEN_DAILY_LIMIT - used - 1
     caption = (
@@ -1131,7 +1146,8 @@ def _format_citations(citations: list[dict]) -> str:
 
 
 def _try_web_search_answer(
-    user: dict, question: str, session_id: int | None, mode: str, request: Request
+    user: dict, question: str, session_id: int | None, mode: str, request: Request,
+    cancelled=None,
 ) -> dict | None:
     """Handle a live-web-search question, or return None to fall through.
 
@@ -1139,6 +1155,8 @@ def _try_web_search_answer(
     failed (so the caller runs the normal brain/KB/LLM pipeline instead).
     On success/quota-hit returns a result dict:
         {answer, source, session_id, session_title, message_id}
+    `cancelled()` true once the search is back → the user pressed หยุด:
+    nothing saved, no quota used (_stopped_result).
     """
     if mode == "company" or not _is_web_search_request(question):
         return None
@@ -1186,6 +1204,8 @@ def _try_web_search_answer(
 
     answer = (answer + _format_citations(citations)).strip()
     usage_row = accumulate_usage(ws_usage, primary_model=WEB_SEARCH_MODEL)
+    if cancelled and cancelled():
+        return _stopped_result(user, session_id, "", usage_row, "web")
     sid, stitle = ensure_session_pg(
         user_id=user["id"], session_id=session_id,
         first_question=question, mode=mode,
@@ -1572,6 +1592,7 @@ def _code_limit_reply(
 def _agent_turn(
     user: dict, question: str, session_id: int | None, mode: str, request: Request,
     uploads: list[dict] | None = None, scoped: bool = False, session_ref: dict | None = None,
+    cancelled=None,
 ):
     """Run the agent router for one question. Replaces the legacy URL-reading and
     web-search steps (the agent decides which tools to use, if any). Yields:
@@ -1593,6 +1614,8 @@ def _agent_turn(
     `session_ref`: /chat/stream creates a new chat when the first answer text
     goes out (so a stopped answer has a chat to be saved in) and puts its id in
     ["id"] — the finished answer is saved there too.
+    `cancelled()` true when the answer is ready → the user pressed หยุด (/chat):
+    ("stopped", None), nothing saved.
     """
     import agent
     import attachments as att
@@ -1695,6 +1718,12 @@ def _agent_turn(
     # "code" / "document" also feed the shared daily cap (count_code_runs_today_pg).
     source = "document" if result.used_document else "code" if result.used_code else "agent"
     sandbox_used = result.used_document or result.used_code
+    if cancelled and cancelled():
+        _stopped_result(user, session_id, "", accumulate_usage(
+            *result.usage, primary_model=code_interpreter.CI_MODEL if sandbox_used else agent.AGENT_MODEL,
+        ), source)
+        yield "stopped", None
+        return
     sid, stitle = ensure_session_pg(
         user_id=user["id"], session_id=(session_ref or {}).get("id") or session_id,
         first_question=question or uploads[0]["filename"], mode=mode,
@@ -2115,10 +2144,28 @@ async def chat(
     # collected here and added once to whichever row the turn saved (a blocked
     # turn saves none — its audit entry carries the cost instead).
     safety_usages: list[dict] = []
-    res = await _chat_turn(request, message, session_id, mode, files, user, safety_usages)
+    # หยุด in the browser drops this request; the slow steps check `stopped`
+    # before saving, so a stopped question leaves nothing behind.
+    stopped = threading.Event()
+    watcher = asyncio.create_task(_watch_disconnect(request, stopped))
+    try:
+        res = await _chat_turn(request, message, session_id, mode, files, user, safety_usages, stopped)
+    finally:
+        watcher.cancel()
     if safety_usages and res.message_id:
         await run_in_threadpool(_charge_safety_usage, res.message_id, safety_usages)
     return res
+
+
+def _stopped_chat(user: dict, request: Request, saved_files: list[dict], sid: int | None, title: str) -> ChatResponse:
+    """/chat after หยุด: keep nothing of this turn (the uploads included)."""
+    for sf in saved_files:
+        try:
+            os.remove(sf["file_path"])
+        except OSError:
+            pass
+    audit_log("chat_stopped", user=user, detail={"session_id": sid, "file_count": len(saved_files)}, request=request)
+    return ChatResponse(answer="", source="stopped", similarity=None, session_id=sid or 0, session_title=title)
 
 
 async def _chat_turn(
@@ -2129,7 +2176,9 @@ async def _chat_turn(
     files: list[UploadFile],
     user: dict,
     safety_usages: list[dict],
+    stopped: threading.Event | None = None,
 ) -> ChatResponse:
+    cancelled = stopped.is_set if stopped is not None else None
     question = message.strip()
     company_only = mode == "company"
 
@@ -2345,7 +2394,11 @@ async def _chat_turn(
 
         last_img = get_last_image_attachment_pg(session_id)
         if last_img:
-            res = _handle_image_edit(user, question, session_id, mode, last_img)
+            # off the event loop (10-20 s), so a หยุด can be noticed meanwhile
+            res = await run_in_threadpool(
+                lambda: _handle_image_edit(user, question, session_id, mode, last_img, cancelled=cancelled))
+            if res["source"] == "stopped":
+                return _stopped_chat(user, request, [], session_id, "")
             return ChatResponse(
                 answer=res["answer"],
                 source=res["source"],
@@ -2367,7 +2420,10 @@ async def _chat_turn(
             detail={"prompt": question[:300], "via": "chat"},
             request=request,
         )
-        res = _handle_image_generation(user, question, session_id, mode)
+        res = await run_in_threadpool(
+            lambda: _handle_image_generation(user, question, session_id, mode, cancelled=cancelled))
+        if res["source"] == "stopped":
+            return _stopped_chat(user, request, [], session_id, "")
         return ChatResponse(
             answer=res["answer"],
             source=res["source"],
@@ -2396,6 +2452,18 @@ async def _chat_turn(
                 turn_limit=MAX_TURNS_PER_SESSION,
             )
 
+    # A question about a translation done in this chat → from the translated text.
+    if question and not files:
+        tf = await run_in_threadpool(_translation_followup, user, question, session_id, mode)
+        if tf is not None:
+            return ChatResponse(
+                answer=tf["answer"], source=tf["source"], similarity=None,
+                session_id=tf["session_id"], session_title=tf["session_title"],
+                message_id=tf["message_id"],
+                turn_count=_count_session_turns(tf["session_id"]),
+                turn_limit=MAX_TURNS_PER_SESSION,
+            )
+
     # Agent router (AGENT_V1_MODE / CODE_INTERPRETER_MODE flags) — the model
     # decides whether to search the web / read links / run Python, over several
     # steps, replacing the two legacy steps below when web tools are on. If it
@@ -2405,11 +2473,13 @@ async def _chat_turn(
     agent_router_usage: dict = {}
     if question and not files and _agent_enabled(user, mode):
         events = await run_in_threadpool(
-            lambda: list(_agent_turn(user, question, session_id, mode, request))
+            lambda: list(_agent_turn(user, question, session_id, mode, request, cancelled=cancelled))
         )
         for kind, payload in events:
             if kind == "done":
                 return _agent_chat_response(payload)
+            if kind == "stopped":
+                return _stopped_chat(user, request, [], session_id, "")
             if kind == "standard":
                 legacy_tools = payload["legacy_tools"]
                 agent_router_usage = payload["usage"]
@@ -2436,8 +2506,11 @@ async def _chat_turn(
     # Live web search intent (postgres only — mirrors /chat/stream). Returns
     # None to fall through to the normal pipeline on non-match / failure.
     if question and not files and use_postgres_auth() and legacy_tools:
-        ws = _try_web_search_answer(user, question, session_id, mode, request)
+        ws = await run_in_threadpool(
+            lambda: _try_web_search_answer(user, question, session_id, mode, request, cancelled=cancelled))
         if ws is not None:
+            if ws["source"] == "stopped":
+                return _stopped_chat(user, request, [], session_id, "")
             return ChatResponse(
                 answer=ws["answer"],
                 source=ws["source"],
@@ -2545,11 +2618,13 @@ async def _chat_turn(
                 # short or drift into a summary → the page-by-page translator
                 # instead (before the Document Engine, which would take a PDF too).
                 if not file_scoped and att.wants_whole_translation(question):
-                    _tr_pdfs = [sf for sf in saved_files
-                                if att.is_pdf(sf["content_type"]) and att.is_long_english_pdf(sf["file_path"])]
+                    _tr_pdfs = await run_in_threadpool(lambda: [
+                        sf for sf in saved_files
+                        if att.is_pdf(sf["content_type"]) and att.is_long_english_pdf(sf["file_path"])])
                     if _tr_pdfs:
                         return await run_in_threadpool(
-                            _translation_job_reply, user, question, sid, stitle, mode, saved_files, _tr_pdfs, request,
+                            _translation_job_reply, user, question, sid, stitle, mode, saved_files, _tr_pdfs,
+                            request, history,
                         )
 
                 # Reference-image generation: an image is attached AND the user
@@ -2570,15 +2645,17 @@ async def _chat_turn(
                 _logo_design = bool(_ref_images) and _wants_logo_on_new_design(question)
                 if _logo_design or (_ref_images and _wants_image_from_reference(question)):
                     if _logo_design:
-                        res = _handle_image_generation(
+                        res = await run_in_threadpool(lambda: _handle_image_generation(
                             user, question, sid, mode,
-                            logo_path=_ref_images[0]["file_path"],
-                        )
+                            logo_path=_ref_images[0]["file_path"], cancelled=cancelled,
+                        ))
                     else:
-                        res = _handle_image_edit(
+                        res = await run_in_threadpool(lambda: _handle_image_edit(
                             user, question, sid, mode,
-                            {"file_path": _ref_images[0]["file_path"]},
-                        )
+                            {"file_path": _ref_images[0]["file_path"]}, cancelled=cancelled,
+                        ))
+                    if res["source"] == "stopped":
+                        return _stopped_chat(user, request, saved_files, sid, stitle)
                     return ChatResponse(
                         answer=res["answer"],
                         source=res["source"],
@@ -2604,13 +2681,19 @@ async def _chat_turn(
                     events = await run_in_threadpool(
                         lambda: list(_agent_turn(
                             user, question, sid, mode, request, uploads=saved_files, scoped=file_scoped,
+                            cancelled=cancelled,
                         ))
                     )
                     for kind, payload in events:
                         if kind == "done":
                             return _agent_chat_response(payload)
+                        if kind == "stopped":
+                            return _stopped_chat(user, request, saved_files, sid, stitle)
                         if kind == "standard":
                             agent_router_usage = payload["usage"]
+
+                if cancelled and cancelled():  # หยุด before the file answer (an LLM call)
+                    return _stopped_chat(user, request, saved_files, sid, stitle)
 
                 image_urls: list[str] = []
                 text_attachments: list[tuple[str, str]] = []
@@ -2808,6 +2891,12 @@ async def _chat_turn(
             # Honesty note for an ungrounded answer to a company-specific factual
             # question (no-op otherwise).
             answer = answer + _company_fact_note(question, source)
+
+            if cancelled and cancelled():
+                # หยุด while the answer was being made: keep nothing — only the
+                # money already spent goes in the usage log
+                _stopped_result(user, sid, stitle, usage_row, source)
+                return _stopped_chat(user, request, saved_files, sid, stitle)
 
             message_id = save_chat_message_pg(
                 user_id=user["id"],
@@ -3048,19 +3137,63 @@ async def _chat_turn(
 # after its last yield ran. _close_on_disconnect closes it right away; gen()
 # then saves the text it had already sent, marked with STOPPED_NOTE (the next
 # turn's history sees it was cut short). Closing also ends the OpenAI stream.
+# A slow step running at that moment (an image, a web search) can't be cut
+# short — `stopped` tells it not to save its result or count it against a
+# quota (see _stopped_result); /chat gets the same signal from _watch_disconnect.
 
 STOPPED_NOTE = "\n\n_(หยุดก่อนตอบจบ — คำตอบอาจไม่ครบ)_"
+_END = object()
 
 
-async def _close_on_disconnect(it):
+async def _close_on_disconnect(it, stopped: threading.Event | None = None):
+    lock = threading.Lock()  # held while a step runs; close waits for it
+
+    def step():
+        with lock:
+            return next(it, _END)
+
     try:
-        async for chunk in iterate_in_threadpool(it):
+        while True:
+            # abandon_on_cancel: the client is gone → stop waiting for a slow
+            # step at once (it finishes in its thread; `stopped` says to drop it)
+            chunk = await anyio.to_thread.run_sync(step, abandon_on_cancel=True)
+            if chunk is _END:
+                break
             yield chunk
     finally:
+        if stopped is not None:
+            stopped.set()
+
+        def close():
+            with lock:
+                it.close()
+
         # we are being cancelled — shield the close; it runs in a worker
         # thread because it may write to the DB (_save_stopped)
         with anyio.CancelScope(shield=True):
-            await anyio.to_thread.run_sync(it.close)
+            await anyio.to_thread.run_sync(close)
+
+
+async def _watch_disconnect(request: Request, stopped: threading.Event) -> None:
+    """Set `stopped` when the browser drops a /chat request (หยุด). /chat isn't
+    a stream, so nothing else notices before the answer would be saved."""
+    try:
+        while (await request.receive()).get("type") != "http.disconnect":
+            pass
+        stopped.set()
+    except Exception:  # noqa: BLE001 — cancelled when the answer is sent
+        pass
+
+
+def _stopped_result(user: dict, session_id: int | None, title: str, usage: dict | None, source: str) -> dict:
+    """The user pressed หยุด while a slow step ran: its result is not saved and
+    not counted against a quota — only the money already spent is logged."""
+    if usage:
+        import usage_log
+
+        usage_log.log_usage_pg(user["id"], usage_log.feature_for(source), source, usage)
+    return {"answer": "", "source": "stopped", "session_id": session_id or 0, "session_title": title,
+            "message_id": None, "attachment": None}
 
 
 def _save_stopped(user: dict, question: str, mode: str, request: Request, live: dict) -> None:
@@ -3130,6 +3263,8 @@ async def chat_stream(
         if obj.get("type") == "done" and obj.get("message_id"):
             _charge_safety_usage(obj["message_id"], safety_usages)
         return json.dumps(obj, ensure_ascii=False) + "\n"
+
+    stopped = threading.Event()  # set by _close_on_disconnect when the client goes away
 
     def gen():
         from chat_pg import (
@@ -3233,6 +3368,19 @@ async def chat_stream(
                 })
                 return
 
+            # 2.8) A question about a translation done in this chat → answered
+            #      from the translated text (the history alone doesn't hold it).
+            tf = _translation_followup(user, question, session_id, mode)
+            if tf is not None:
+                yield ev({"type": "delta", "v": tf["answer"]})
+                yield ev({
+                    "type": "done", "source": tf["source"], "session_id": tf["session_id"],
+                    "session_title": tf["session_title"], "message_id": tf["message_id"],
+                    "turn_count": _count_session_turns(tf["session_id"]),
+                    "turn_limit": MAX_TURNS_PER_SESSION,
+                })
+                return
+
             # 3) Export intent — save the offer, no token streaming.
             if _is_export_request(question):
                 offer_text = (
@@ -3270,7 +3418,9 @@ async def chat_stream(
                 last_img = get_last_image_attachment_pg(session_id)
                 if last_img:
                     yield ev({"type": "status", "state": "generating_image"})
-                    res = _handle_image_edit(user, question, session_id, mode, last_img)
+                    res = _handle_image_edit(user, question, session_id, mode, last_img, cancelled=stopped.is_set)
+                    if res["source"] == "stopped":
+                        return
                     yield ev({"type": "delta", "v": res["answer"]})
                     done_evt = {
                         "type": "done", "source": res["source"],
@@ -3296,7 +3446,9 @@ async def chat_stream(
                 # Tell the client to show a "creating image" placeholder — the
                 # generation below is slow (10-20s) and emits no tokens.
                 yield ev({"type": "status", "state": "generating_image"})
-                res = _handle_image_generation(user, question, session_id, mode)
+                res = _handle_image_generation(user, question, session_id, mode, cancelled=stopped.is_set)
+                if res["source"] == "stopped":
+                    return
                 yield ev({"type": "delta", "v": res["answer"]})
                 done_evt = {
                     "type": "done", "source": res["source"],
@@ -3385,8 +3537,11 @@ async def chat_stream(
             #      "ราคาทองวันนี้"). Skipped in company mode; falls through to
             #      the normal pipeline if the search fails or quota is hit-and-
             #      returned. Non-streaming (search is slow) — emitted as one delta.
-            ws = _try_web_search_answer(user, question, session_id, mode, request) if legacy_tools else None
+            ws = (_try_web_search_answer(user, question, session_id, mode, request, cancelled=stopped.is_set)
+                  if legacy_tools else None)
             if ws is not None:
+                if ws["source"] == "stopped":
+                    return
                 yield ev({"type": "delta", "v": ws["answer"]})
                 yield ev({
                     "type": "done", "source": ws["source"],
@@ -3580,7 +3735,7 @@ async def chat_stream(
             yield ev({"type": "error", "detail": "เกิดข้อผิดพลาดในการสร้างคำตอบ"})
 
     return StreamingResponse(
-        _close_on_disconnect(gen()),
+        _close_on_disconnect(gen(), stopped),
         media_type="application/x-ndjson",
         # Defeat reverse-proxy/response buffering so tokens reach the browser
         # as they're produced rather than all at once at the end.
@@ -5408,15 +5563,65 @@ def admin_delete_user_chats(
 from pathlib import Path as _Path
 
 
+DOCX_CT = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+# A follow-up about a translation done in this chat ("สรุปฉบับแปล", "ในฉบับแปล หน้า 2…")
+_TRANSLATION_FOLLOWUP_RE = re.compile(
+    r"ฉบับแปล|คำแปล|ที่แปล(?:ไว้|แล้ว|มา|ให้)?|แปลแล้ว|ไฟล์แปล|\btranslat(?:ed|ion)\b", re.IGNORECASE,
+)
+TRANSLATION_CONTEXT_CHARS = 40_000   # of the translated text given to the model per follow-up
+
+
+def _files_answer_parts(files: list[dict]) -> tuple[list[str], list[tuple[str, str]], int]:
+    """(image data URLs, (name, text) pairs, total text chars) for a plain file
+    answer — the same reading as the /chat files path (images by vision,
+    scanned PDF pages as images, text from everything else)."""
+    image_urls: list[str] = []
+    texts: list[tuple[str, str]] = []
+    total = 0
+    for sf in files:
+        if att.is_image(sf["content_type"]):
+            image_urls.append(att.encode_image_data_url(sf["file_path"], sf["content_type"]))
+            sf["extracted_text"] = None
+            continue
+        extracted = att.extract_any_text(sf["file_path"], sf["content_type"], sf["filename"])
+        sf["extracted_text"] = extracted if extracted.strip() else None
+        total += len(extracted)
+        if att.is_pdf(sf["content_type"]) and att.is_text_sparse(extracted):
+            image_urls.extend(att.render_pdf_pages_as_images(sf["file_path"]))
+        if extracted.strip():
+            texts.append((sf["filename"], extracted))
+    return image_urls, texts, total
+
+
+def _attach_translation(user_id: int, message_id: int, job: dict) -> None:
+    """A chat-started translation is done: put its Thai Word/PDF on the chat
+    message (file cards on both pages, the text for follow-up questions)."""
+    from chat_pg import save_attachment_pg
+
+    base = _Path(job.get("filename") or "document").stem or "document"
+    for key, ext, ctype in (("docx", ".docx", DOCX_CT), ("pdf", ".pdf", "application/pdf")):
+        path = job.get(key)
+        if not path or not _Path(path).exists():
+            continue
+        display, ct, size, stored = att.save_generated_file(_Path(path).read_bytes(), f"{base}_แปลไทย{ext}", ctype)
+        save_attachment_pg(
+            message_id=message_id, user_id=user_id, filename=display, content_type=ct,
+            size_bytes=size, file_path=stored, generated=True,
+            extracted_text=att.extract_docx_text(stored) if ext == ".docx" else None,
+        )
+
+
 def _translation_job_reply(
     user: dict, question: str, sid: int, stitle: str, mode: str,
-    saved_files: list[dict], pdfs: list[dict], request: Request,
+    saved_files: list[dict], pdfs: list[dict], request: Request, history: list[dict],
 ) -> "ChatResponse":
     """/chat: "แปลไฟล์นี้" with a long English PDF → start the same background
     translator as the แปลเอกสาร page and answer with one line per job. Each line
     ends in a `<!-- translate-job:<id> -->` marker (invisible Markdown) that the
-    V5 page turns into a progress card with the Word/PDF downloads; the jobs
-    also show on the แปลเอกสาร page."""
+    chat pages turn into a progress card with the Word/PDF downloads; the jobs
+    also show on the แปลเอกสาร page. When a job is done its Word/PDF is attached
+    to this message. Other files sent along (a short PDF, a Word file…) get the
+    usual chat answer in the same message — nothing is dropped."""
     from chat_pg import save_attachment_pg, save_chat_message_pg
 
     jobs = [doctr.start_job(sf["file_path"], sf["filename"], user["id"]) for sf in pdfs]
@@ -5431,18 +5636,29 @@ def _translation_job_reply(
         "\n\nเมื่อแปลเสร็จ ดาวน์โหลดเป็น Word/PDF ได้ที่การ์ดงานแปลในแชทนี้ หรือที่เมนู \"แปลเอกสาร\" "
         "— ระหว่างนี้ถามเรื่องอื่นต่อได้เลย"
     )
+    usage = None
+    rest = [sf for sf in saved_files if sf not in pdfs]
+    if rest:
+        image_urls, texts, total = _files_answer_parts(rest)
+        names = ", ".join(sf["filename"] for sf in rest)
+        rest_answer, files_usage = _answer_files(question, image_urls, texts, history)
+        warn = att.long_translation_warning(question, total, len(image_urls))
+        answer += f"\n\n---\n\n**{names}**\n\n" + (f"{warn}\n\n" if warn else "") + rest_answer
+        usage = accumulate_usage(files_usage)
     mid = save_chat_message_pg(
         user_id=user["id"], session_id=sid, question=question or "[ไฟล์แนบ]",
-        answer=answer, source="translate_job", knowledge_id=None, mode=mode,
+        answer=answer, source="translate_job", knowledge_id=None, mode=mode, usage=usage,
     )
     rows = [
         save_attachment_pg(
             message_id=mid, user_id=user["id"], filename=sf["filename"],
             content_type=sf["content_type"], size_bytes=sf["size"], file_path=sf["file_path"],
+            extracted_text=sf.get("extracted_text"),
         )
         for sf in saved_files
     ]
     for j in jobs:
+        doctr.on_done(j["id"], lambda job, mid=mid: _attach_translation(user["id"], mid, job))
         audit_log(
             "translate_started",
             user=user,
@@ -5454,6 +5670,39 @@ def _translation_job_reply(
         session_title=stitle, attachments=rows, message_id=mid,
         turn_count=_count_session_turns(sid), turn_limit=MAX_TURNS_PER_SESSION,
     )
+
+
+def _translation_followup(user: dict, question: str, session_id: int | None, mode: str) -> dict | None:
+    """A question about a translation done in this chat ("สรุปฉบับแปลให้หน่อย")
+    → answered from the translated Thai text, which the chat history alone
+    doesn't hold. None when it isn't one (the normal pipeline runs)."""
+    if not (session_id and use_postgres_auth() and _TRANSLATION_FOLLOWUP_RE.search(question or "")):
+        return None
+    from chat_pg import ensure_session_pg, get_session_translations_pg, save_chat_message_pg
+
+    tr = get_session_translations_pg(session_id, user["id"])
+    if not tr["asked"]:
+        return None
+    sid, stitle = ensure_session_pg(user_id=user["id"], session_id=session_id, first_question=question, mode=mode)
+    if not tr["files"]:
+        answer = ("งานแปลในแชทนี้ยังไม่เสร็จค่ะ — รอให้การ์ดงานแปลขึ้นว่า \"แปลเสร็จแล้ว\" "
+                  "แล้วค่อยถามเรื่องฉบับแปลอีกครั้งนะคะ")
+        usage = None
+    else:
+        texts = []
+        for f in tr["files"]:
+            text = f["extracted_text"] or att.extract_docx_text(f["file_path"])
+            if len(text) > TRANSLATION_CONTEXT_CHARS:
+                text = text[:TRANSLATION_CONTEXT_CHARS] + "\n\n[…ฉบับแปลยาวกว่านี้ — ตัดมาเฉพาะช่วงต้น]"
+            texts.append((f["filename"], text))
+        answer, files_usage = _answer_files(question, [], texts, _turn_history(user, session_id))
+        usage = accumulate_usage(files_usage)
+    mid = save_chat_message_pg(
+        user_id=user["id"], session_id=sid, question=question, answer=answer,
+        source="files", knowledge_id=None, mode=mode, usage=usage,
+    )
+    _after_answer(user, sid)
+    return {"answer": answer, "source": "files", "session_id": sid, "session_title": stitle, "message_id": mid}
 
 
 @app.post("/translate/start")
