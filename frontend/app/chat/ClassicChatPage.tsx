@@ -43,8 +43,17 @@ import {
 import {
   API_BASE,
   api,
+  friendlyError,
+  getUiConfig,
   goSignIn,
+  messageTooLong,
+  newClientId,
+  rememberRole,
+  setDraftSource,
   signOut,
+  StreamStartError,
+  stopTurn,
+  takeDraft,
   downloadSourceFile,
   exportAnswerDocx,
   exportAnswerPdf,
@@ -161,11 +170,13 @@ const OFFICE_MIMES = new Set([
   "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
   "application/vnd.ms-excel", // legacy .xls
   "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  "application/msword", // legacy .doc (the server converts it)
+  "application/vnd.ms-powerpoint", // legacy .ppt
 ]);
 
 // Office files accepted by extension too — browsers often send an empty/odd
 // MIME for these (especially legacy .xls), so don't rely on MIME alone.
-const OFFICE_EXTS = new Set([".pdf", ".docx", ".xlsx", ".xls", ".pptx"]);
+const OFFICE_EXTS = new Set([".pdf", ".docx", ".doc", ".xlsx", ".xls", ".pptx", ".ppt"]);
 
 const TEXT_EXTS = new Set([
   ".txt", ".md", ".markdown", ".csv", ".tsv", ".json", ".log",
@@ -185,7 +196,7 @@ const AUDIO_EXTS = new Set([".mp3", ".m4a", ".wav", ".webm", ".ogg", ".flac", ".
 export const FILE_ACCEPT_ATTR = [
   "image/*",
   "audio/*",
-  ".pdf", ".docx", ".xlsx", ".xls", ".pptx",
+  ".pdf", ".docx", ".doc", ".xlsx", ".xls", ".pptx", ".ppt",
   ...Array.from(AUDIO_EXTS),
   ...Array.from(TEXT_EXTS),
 ].join(",");
@@ -195,7 +206,16 @@ function fileExtension(name: string): string {
   return i >= 0 ? name.slice(i).toLowerCase() : "";
 }
 
+// Why a file can't be attached, in plain Thai (matches the server's message).
+export function unsupportedFileMessage(f: File): string {
+  const ext = fileExtension(f.name);
+  if (ext === ".heic" || ext === ".heif" || /heic|heif/i.test(f.type))
+    return `รูป "${f.name}" เป็นแบบ HEIC ของ iPhone ซึ่งระบบยังอ่านไม่ได้ — แนบรูปจากแอปรูปภาพ (iPhone จะแปลงเป็น JPG ให้เอง) หรือแปลงเป็น JPG/PNG ก่อนแล้วแนบใหม่`;
+  return `ไฟล์ "${f.name}" เป็นประเภทที่ระบบยังไม่รองรับ — รองรับ PDF, Word, Excel, PowerPoint, รูปภาพ (JPG/PNG/WebP/GIF), ไฟล์ข้อความหรือโค้ด และไฟล์เสียง`;
+}
+
 export function isAcceptedFile(f: File): boolean {
+  if (/heic|heif/i.test(f.type) || /\.(heic|heif)$/i.test(f.name)) return false;
   if (f.type.startsWith("image/")) return true;
   if (f.type.startsWith("audio/")) return true;
   if (OFFICE_MIMES.has(f.type)) return true;
@@ -384,6 +404,17 @@ export default function ClassicChatPage() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const abortRef = useRef<AbortController | null>(null);
+  // the answer being asked for (its client id) — หยุด names it to the server
+  const turnIdRef = useRef<string | null>(null);
+  // an answer the server is still finishing for the chat on screen (its tab
+  // was reloaded/closed mid-answer) — shown as pending, หยุด stops it
+  const resumeRef = useRef<string | null>(null);
+  const inputValRef = useRef("");
+  // the question on its way: a 401 that answers it keeps it as the draft
+  const lastSentRef = useRef("");
+  useEffect(() => {
+    inputValRef.current = input;
+  }, [input]);
   // Bumped whenever another chat (or a new one) is put on screen — see leaveView.
   const viewSeq = useRef(0);
   const currentSidRef = useRef<number | null>(null);
@@ -415,6 +446,19 @@ export default function ClassicChatPage() {
     }
     setRole(getRole());
     setUsername(getUsername());
+    // the role from sign-in may be stale (an admin demoted since)
+    getUiConfig()
+      .then((c) => {
+        if (c.role) {
+          rememberRole(c.role);
+          setRole(c.role);
+        }
+      })
+      .catch(() => {});
+    // a message typed before the session ran out comes back after sign-in
+    const draft = takeDraft();
+    if (draft) setInput(draft);
+    setDraftSource(() => (inputValRef.current.trim() ? inputValRef.current : lastSentRef.current));
     // V4.2: show "ความจำของฉัน" only when memory is on for this user.
     getMemory()
       .then((m) => setMemoryAvailable(m.available))
@@ -561,6 +605,8 @@ export default function ClassicChatPage() {
   function leaveView() {
     viewSeq.current++;
     abortRef.current = null;
+    turnIdRef.current = null;
+    resumeRef.current = null;
     setSending(false);
   }
 
@@ -583,8 +629,10 @@ export default function ClassicChatPage() {
         mode?: ChatMode;
         turn_count?: number;
         shared_token?: string | null;
+        pending?: { id: string; question: string } | null;
       }>(`/chat/sessions/${sid}`);
       setMessages(hydrateMessages(data.messages));
+      if (data.pending) followPending(sid, data.pending);
       // Restore the toggle to whatever mode the user was last in on this session.
       // While company mode is disabled, coerce any old company-mode chat to
       // normal so the banner never resurfaces.
@@ -600,6 +648,37 @@ export default function ClassicChatPage() {
       setChatMode("normal");
       setTurnCount(0);
       setSharedToken(null);
+    }
+  }
+
+  // The server is still finishing an answer for this chat (the page was
+  // reloaded or closed mid-answer): show it as pending, check every few
+  // seconds, and show the saved answer once it lands.
+  async function followPending(sid: number, p: { id: string; question: string }) {
+    const view = viewSeq.current;
+    resumeRef.current = p.id;
+    setSending(true);
+    setMessages((m) => [
+      ...m,
+      { role: "user", text: p.question },
+      { role: "bot", text: "", question: p.question, streaming: true, agentStatus: "กำลังตอบต่อจากครั้งก่อน…" },
+    ]);
+    for (;;) {
+      await new Promise((r) => setTimeout(r, 3000));
+      if (viewSeq.current !== view) return;
+      let data: { messages: LoadedMessage[]; turn_count?: number; pending?: unknown };
+      try {
+        data = await api(`/chat/sessions/${sid}`);
+      } catch {
+        continue; // offline for a moment — try again
+      }
+      if (viewSeq.current !== view) return;
+      if (data.pending) continue;
+      resumeRef.current = null;
+      setSending(false);
+      setMessages(hydrateMessages(data.messages));
+      setTurnCount(data.turn_count ?? 0);
+      return;
     }
   }
 
@@ -864,7 +943,7 @@ export default function ClassicChatPage() {
       }
 
       if (!isAcceptedFile(f)) {
-        setAlertMsg(`ไฟล์ "${f.name}" ไม่รองรับ`);
+        setAlertMsg(unsupportedFileMessage(f));
         continue;
       }
 
@@ -1023,6 +1102,8 @@ export default function ClassicChatPage() {
     e.preventDefault();
     const text = input.trim();
     if ((!text && pendingFiles.length === 0) || sending || readOnlyOwner) return;
+    const tooLong = messageTooLong(text);
+    if (tooLong) return setAlertMsg(tooLong);
 
     const filesToSend = pendingFiles;
     const optimisticAtts: Attachment[] = filesToSend.map((f, i) => ({
@@ -1050,6 +1131,9 @@ export default function ClassicChatPage() {
 
     const controller = new AbortController();
     abortRef.current = controller;
+    const clientId = newClientId();
+    turnIdRef.current = clientId;
+    lastSentRef.current = text;
     const view = viewSeq.current;
 
     try {
@@ -1057,15 +1141,17 @@ export default function ClassicChatPage() {
       // Plain text questions stream token-by-token; on any startup failure
       // (e.g. sqlite → 501) we transparently fall back to non-stream.
       if (filesToSend.length > 0) {
-        await runNonStream(text, filesToSend, controller, view);
+        await runNonStream(text, filesToSend, controller, view, clientId);
       } else {
-        await runStreaming(text, controller, view);
+        await runStreaming(text, controller, view, clientId);
       }
     } finally {
       if (viewSeq.current === view) {
         setSending(false);
         abortRef.current = null;
+        turnIdRef.current = null;
       }
+      lastSentRef.current = "";
     }
   }
 
@@ -1075,6 +1161,7 @@ export default function ClassicChatPage() {
     filesToSend: File[],
     controller: AbortController,
     view: number,
+    clientId?: string,
   ) {
     const here = () => viewSeq.current === view;
     try {
@@ -1084,6 +1171,7 @@ export default function ClassicChatPage() {
         files: filesToSend,
         mode: chatMode,
         signal: controller.signal,
+        clientId,
       });
       refreshSessions();
       if (role === "admin") refreshTeamSessions();
@@ -1135,7 +1223,7 @@ export default function ClassicChatPage() {
           role: "bot",
           text: isAbort
             ? "ยกเลิกการถามแล้ว"
-            : `เกิดข้อผิดพลาด: ${e instanceof Error ? e.message : ""}`,
+            : `⚠️ ${friendlyError(e)}`,
         },
       ]);
     }
@@ -1145,7 +1233,7 @@ export default function ClassicChatPage() {
   // fill it as tokens arrive. The streaming bubble is always the LAST message
   // (concurrent sends are blocked by `sending`), so we target it by position
   // inside the state updater — no fragile index captured before render.
-  async function runStreaming(text: string, controller: AbortController, view: number) {
+  async function runStreaming(text: string, controller: AbortController, view: number, clientId?: string) {
     const here = () => viewSeq.current === view;
     setMessages((m) => [
       ...m,
@@ -1183,6 +1271,7 @@ export default function ClassicChatPage() {
           sessionId: currentSid,
           mode: chatMode,
           signal: controller.signal,
+          clientId,
         },
         {
           onDelta: (t) => {
@@ -1247,6 +1336,9 @@ export default function ClassicChatPage() {
           }
           return copy;
         });
+      } else if (e instanceof StreamStartError && e.status !== 501) {
+        // refused (too many requests, chat full…): say why, in Thai
+        patchLastBot({ text: `⚠️ ${e.message}` });
       } else if (!receivedAny) {
         // Stream never produced anything (e.g. 501 on sqlite, network) — drop
         // the empty bubble and retry through the classic non-stream path.
@@ -1257,10 +1349,11 @@ export default function ClassicChatPage() {
           if (copy[last]?.role === "bot" && !copy[last].text) copy.splice(last, 1);
           return copy;
         });
-        await runNonStream(text, [], controller, view);
+        await runNonStream(text, [], controller, view, clientId);
         return;
       } else {
-        appendLastBot("\n\n⚠️ การเชื่อมต่อขัดข้อง");
+        // the connection dropped mid-answer; the server finishes and saves it
+        appendLastBot("\n\n⚠️ การเชื่อมต่อขาดระหว่างตอบ — ระบบตอบต่อจนจบให้แล้ว เปิดแชทนี้อีกครั้งเพื่อดูคำตอบเต็ม");
       }
     } finally {
       // Belt-and-suspenders: never leave the trailing bubble stuck "streaming".
@@ -1276,6 +1369,10 @@ export default function ClassicChatPage() {
   }
 
   function cancelSend() {
+    // หยุด: tell the server first (closing the connection alone no longer
+    // stops an answer — a reload or closed tab must not), then let go of it
+    const id = turnIdRef.current ?? resumeRef.current;
+    if (id) stopTurn(id);
     abortRef.current?.abort();
   }
 

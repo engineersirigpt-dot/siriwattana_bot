@@ -125,7 +125,14 @@ def _save_cached_embedding(text: str, vector: list[float]) -> None:
     )
 
 
+# The embedding model takes at most 8,192 tokens; a long pasted text (a few
+# pages of Thai — about one token per character at worst) failed the whole
+# answer (QA C-07). Its opening is plenty to find matching knowledge.
+EMBED_MAX_CHARS = 6000
+
+
 def embed(text: str) -> list[float]:
+    text = (text or "")[:EMBED_MAX_CHARS]
     if _use_postgres():
         from rag_pg import embed_pg
 

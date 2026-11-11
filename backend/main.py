@@ -93,7 +93,7 @@ async def rate_limit_handler(request: Request, exc: RateLimitExceeded):
     )
     return JSONResponse(
         status_code=429,
-        content={"detail": "Too many requests. Please try again later."},
+        content={"detail": "ส่งคำขอถี่เกินไป กรุณารอสักครู่ (ประมาณ 1 นาที) แล้วลองใหม่"},
     )
 
 
@@ -542,7 +542,16 @@ def ui_config(user: dict = Depends(current_user)):
     v5 = UI_V5_MODE == "all" or (
         UI_V5_MODE == "admin" and (user.get("role") == "admin" or user.get("username") in UI_V5_USERS)
     )
-    return {"ui_v5": v5}
+    # role: the page keeps the role from sign-in; this refreshes it, so an admin
+    # demoted (or promoted) since then sees the right menus after a reload.
+    return {"ui_v5": v5, "role": user.get("role")}
+
+
+@app.get("/auth/config")
+def auth_config():
+    """Public sign-in settings. mi_portal_url: where an MI user goes back to
+    sign in (the /sso error page's button); null → our own login page."""
+    return {"mi_portal_url": MI_PORTAL_URL or None}
 
 
 @app.post("/transcribe")
@@ -936,7 +945,18 @@ def _handle_image_generation(
                 "rejected", "blocked", "not allowed",
             )
         )
-        if blocked:
+        from llm import ImageRequestRefused
+
+        if isinstance(e, ImageRequestRefused):
+            text = (
+                "ขออภัยค่ะ AI วาดโลโก้หรือเครื่องหมายการค้าของแบรนด์อื่น (เช่น Coca-Cola) "
+                "หรือตัวการ์ตูนที่มีลิขสิทธิ์ให้ไม่ได้ 🙏\n\n"
+                "- ถ้าเป็นงานของลูกค้า: แนบไฟล์โลโก้มาด้วย แล้วพิมพ์เช่น "
+                "\"ทำภาพกล่องลูกฟูกใส่โลโก้ตามไฟล์\"\n"
+                "- หรือเปลี่ยนเป็นคำอธิบายทั่วไป เช่น \"กล่องลูกฟูกพิมพ์ลายสีแดง\""
+            )
+            source = "image_blocked"
+        elif blocked:
             text = (
                 "ขออภัยค่ะ ไม่สามารถสร้างรูปนี้ได้ เนื่องจากติดนโยบายเนื้อหาของ AI "
                 "(เช่น ตัวการ์ตูน/แบรนด์/โลโก้ที่มีลิขสิทธิ์ บุคคลจริง หรือเนื้อหาที่ไม่เหมาะสม) "
@@ -1324,6 +1344,25 @@ def _turn_history(user: dict, session_id: int | None, legacy: list[dict] | None 
     except Exception as e:  # noqa: BLE001 — memory must never cost an answer
         audit_log("memory_context_failed", user=user, detail={"error": f"{type(e).__name__}: {e}"[:300]})
         return old()
+
+
+# "จำไว้ว่า…" while long-term memory (MEMORY_MODE) is off for this user: the
+# model used to answer "รับทราบค่ะ ฉันจะจำไว้" although nothing is kept past this
+# chat (QA C-09). Only such questions get this note — other prompts unchanged.
+_REMEMBER_RE = re.compile(r"จำไว้|ช่วยจำ|จดจำ|จำให้|อย่าลืมว่า|\bremember\b|\bkeep in mind\b", re.IGNORECASE)
+NO_MEMORY_NOTE = (
+    "ข้อเท็จจริงของระบบ: แชทบอทนี้ไม่มีความจำข้ามแชท — สิ่งที่ผู้ใช้บอกใช้ได้เฉพาะในแชทนี้ "
+    "ถ้าเปิดแชทใหม่จะไม่รู้อีก. ถ้าผู้ใช้ขอให้จำ ห้ามรับปากว่าจะจำไว้หรือจำไว้แล้ว — ให้บอกตรง ๆ "
+    "ว่าจะใช้ข้อมูลนี้ได้ในแชทนี้เท่านั้น เปิดแชทใหม่ต้องบอกอีกครั้ง แล้วค่อยตอบส่วนอื่นของข้อความตามปกติ"
+)
+
+
+def _with_memory_note(user: dict, question: str, history: list[dict]) -> list[dict]:
+    import memory
+
+    if memory.memory_enabled_for(user) or not _REMEMBER_RE.search(question or ""):
+        return history
+    return [*history, {"role": "system", "content": NO_MEMORY_NOTE}]
 
 
 def _after_answer(user: dict, session_id: int | None) -> None:
@@ -2130,6 +2169,21 @@ def _safe_unlink_attachment(file_path: str) -> bool:
         return False
 
 
+# A pasted text longer than this (~40 A4 pages) is refused with a Thai hint to
+# attach it as a file: the whole text would go to the model on this turn and
+# on the next HISTORY_TURNS turns. The page checks the same limit first.
+MAX_MESSAGE_CHARS = int(os.getenv("MAX_MESSAGE_CHARS", "120000"))
+
+
+def _check_message_length(question: str) -> None:
+    if len(question) > MAX_MESSAGE_CHARS:
+        raise HTTPException(
+            400,
+            f"ข้อความยาวเกินไป ({len(question):,} ตัวอักษร — สูงสุด {MAX_MESSAGE_CHARS:,}) "
+            "กรุณาบันทึกเป็นไฟล์ (Word, PDF หรือ .txt) แล้วแนบไฟล์แทนการวาง",
+        )
+
+
 @app.post("/chat", response_model=ChatResponse)
 @limiter.limit("20/minute")
 async def chat(
@@ -2138,20 +2192,28 @@ async def chat(
     session_id: int | None = Form(None),
     mode: str = Form("normal"),
     files: list[UploadFile] = File([]),
+    client_id: str | None = Form(None),
     user: dict = Depends(current_user),
 ):
     # The safety classifiers run before any answer exists. Their usage is
     # collected here and added once to whichever row the turn saved (a blocked
     # turn saves none — its audit entry carries the cost instead).
     safety_usages: list[dict] = []
-    # หยุด in the browser drops this request; the slow steps check `stopped`
-    # before saving, so a stopped question leaves nothing behind.
+    # หยุด (POST /chat/stop) sets `stopped`; the slow steps check it before
+    # saving, so a stopped question leaves nothing behind. A browser that just
+    # goes away (reload, closed tab) doesn't stop it — the answer is still
+    # saved (see _TURNS). Without a client_id (old page): going away = หยุด.
     stopped = threading.Event()
-    watcher = asyncio.create_task(_watch_disconnect(request, stopped))
+    turn = await run_in_threadpool(
+        _turn_start, client_id, user, message.strip() or "[ไฟล์แนบ]", stopped, {"sid": session_id},
+    )
+    watcher = asyncio.create_task(_watch_disconnect(request, stopped)) if turn is None else None
     try:
         res = await _chat_turn(request, message, session_id, mode, files, user, safety_usages, stopped)
     finally:
-        watcher.cancel()
+        if watcher is not None:
+            watcher.cancel()
+        _turn_end(turn)
     if safety_usages and res.message_id:
         await run_in_threadpool(_charge_safety_usage, res.message_id, safety_usages)
     return res
@@ -2184,6 +2246,7 @@ async def _chat_turn(
 
     if not question and not files:
         raise HTTPException(400, "empty message")
+    _check_message_length(question)
 
     # Pre-filter: block sensitive questions before any upload / RAG / LLM call.
     # Saves OpenAI tokens and prevents the chatbot from ever attempting to answer.
@@ -2771,7 +2834,7 @@ async def _chat_turn(
 
             else:
                 # V4.1/V4.2 (flags off → exactly the legacy history and classifier)
-                history = _turn_history(user, session_id, history)
+                history = _with_memory_note(user, question, _turn_history(user, session_id, history))
                 t_answer = time.monotonic()
                 route = _route_for(user, question, company_only)
                 if route is None:
@@ -3145,33 +3208,165 @@ STOPPED_NOTE = "\n\n_(หยุดก่อนตอบจบ — คำตอ�
 _END = object()
 
 
-async def _close_on_disconnect(it, stopped: threading.Event | None = None):
+def _answer_error_text(e: Exception) -> str:
+    """What the user reads when an answer fails (QA O-05): what happened and
+    what to do, in Thai — an OpenAI outage is not the user's mistake."""
+    import openai
+
+    if isinstance(e, openai.APIConnectionError):  # unreachable or timed out
+        return "เชื่อมต่อระบบ AI (OpenAI) ไม่ได้ในขณะนี้ กรุณาลองใหม่อีกครั้งในอีกสักครู่"
+    if isinstance(e, openai.RateLimitError):
+        return ("ระบบ AI มีการใช้งานหนาแน่นหรือโควตาเต็ม กรุณาลองใหม่ในอีกสักครู่ "
+                "— ถ้ายังไม่ได้ กรุณาแจ้งผู้ดูแลระบบ")
+    if isinstance(e, openai.InternalServerError):
+        return "ระบบ AI (OpenAI) ขัดข้องชั่วคราว กรุณาลองใหม่อีกครั้งในอีกสักครู่"
+    return "เกิดข้อผิดพลาดในการสร้างคำตอบ กรุณาลองใหม่อีกครั้ง"
+
+
+# ── Answers that outlive the browser tab ────────────────────────────────────
+# A reload, a closed tab or dropped Wi-Fi is not หยุด. A request that carries a
+# client_id (the current pages send one) is a "turn": when its browser goes
+# away the answer is finished in the background and saved whole, and the chat
+# reopened meanwhile shows it as pending (GET /chat/sessions/{id} → "pending")
+# until it lands. Only POST /chat/stop (the หยุด button) cuts it short; deleting
+# the chat drops it. A request without client_id (a page cached from before)
+# keeps the old rule: the browser going away = หยุด.
+
+_TURNS: dict[str, dict] = {}
+_TURNS_LOCK = threading.Lock()
+_TURN_MAX_AGE_S = 20 * 60
+_CLIENT_ID_RE = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
+
+
+def _session_last_mid(session_id: int | None) -> int:
+    if session_id is None or not use_postgres_auth():
+        return 0
+    from db_pg import get_pg_conn
+
+    with get_pg_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT COALESCE(MAX(id), 0) FROM chat_history WHERE session_id = %s", (session_id,))
+            return int(cur.fetchone()[0])
+
+
+def _turn_start(client_id: str | None, user: dict, question: str, stopped: threading.Event,
+                live: dict) -> dict | None:
+    """Register a turn (see above). None: no usable client_id → old rule."""
+    if not isinstance(client_id, str) or not _CLIENT_ID_RE.match(client_id):
+        return None
+    try:
+        after = _session_last_mid(live.get("sid"))
+    except Exception:  # noqa: BLE001 — only the pending marker needs it
+        after = 0
+    turn = {"id": client_id, "user_id": user["id"], "question": question, "stopped": stopped,
+            "live": live, "after_mid": after, "user_stop": False, "t0": time.monotonic()}
+    with _TURNS_LOCK:
+        _TURNS[client_id] = turn
+    return turn
+
+
+def _turn_end(turn: dict | None) -> None:
+    if turn is not None:
+        with _TURNS_LOCK:
+            if _TURNS.get(turn["id"]) is turn:
+                del _TURNS[turn["id"]]
+
+
+def _turn_stop(turn: dict, discard: bool = False) -> None:
+    turn["user_stop"] = True
+    if discard:
+        turn["live"]["discard"] = True  # the chat is gone: save nothing
+    turn["stopped"].set()
+
+
+def _pending_turn(user_id: int, session_id: int, messages: list[dict]) -> dict | None:
+    """The answer still being written for this chat (its browser went away or
+    is another tab), unless it has been saved already."""
+    with _TURNS_LOCK:
+        for cid in [c for c, t in _TURNS.items() if time.monotonic() - t["t0"] > _TURN_MAX_AGE_S]:
+            del _TURNS[cid]  # never started streaming (client gone first) — don't show it forever
+        turns = [t for t in _TURNS.values() if t["user_id"] == user_id and t["live"].get("sid") == session_id]
+    for t in turns:
+        if t["user_stop"] or any((m.get("id") or 0) > t["after_mid"] for m in messages):
+            continue
+        return {"id": t["id"], "question": t["question"]}
+    return None
+
+
+def _stop_session_turns(user_id: int, session_id: int) -> None:
+    with _TURNS_LOCK:
+        turns = [t for t in _TURNS.values() if t["user_id"] == user_id and t["live"].get("sid") == session_id]
+    for t in turns:
+        _turn_stop(t, discard=True)
+
+
+class ChatStopIn(BaseModel):
+    client_id: str
+
+
+@app.post("/chat/stop")
+def chat_stop(body: ChatStopIn, user: dict = Depends(current_user)):
+    """หยุด: stop the answer this browser asked for (by its client_id)."""
+    with _TURNS_LOCK:
+        turn = _TURNS.get(body.client_id)
+    if turn is None or turn["user_id"] != user["id"]:
+        return {"ok": False}
+    _turn_stop(turn)
+    return {"ok": True}
+
+
+def _finish_in_background(it, lock: threading.Lock, turn: dict) -> None:
+    """Drive a stream whose browser went away to its end — gen() saves the
+    answer as usual. หยุด (or deleting the chat) meanwhile closes it instead."""
+    try:
+        with lock:  # waits for the step that was running when the client left
+            while not turn["user_stop"]:
+                if next(it, _END) is _END:
+                    break
+            else:
+                it.close()  # → gen()'s GeneratorExit: _save_stopped
+    except Exception as e:  # noqa: BLE001
+        audit_log("chat_background_finish_failed", detail={"error_type": e.__class__.__name__, "error": str(e)[:300]})
+    finally:
+        _turn_end(turn)
+
+
+async def _close_on_disconnect(it, stopped: threading.Event | None = None, turn: dict | None = None):
     lock = threading.Lock()  # held while a step runs; close waits for it
 
     def step():
         with lock:
             return next(it, _END)
 
+    finished = False
     try:
         while True:
             # abandon_on_cancel: the client is gone → stop waiting for a slow
             # step at once (it finishes in its thread; `stopped` says to drop it)
             chunk = await anyio.to_thread.run_sync(step, abandon_on_cancel=True)
             if chunk is _END:
+                finished = True
                 break
             yield chunk
+            if turn is not None and turn["user_stop"]:
+                break  # หยุด came by /chat/stop while still connected
     finally:
-        if stopped is not None:
-            stopped.set()
+        if turn is not None and not finished and not turn["user_stop"]:
+            # the browser went away without หยุด: finish and save the answer
+            threading.Thread(target=_finish_in_background, args=(it, lock, turn), daemon=True).start()
+        else:
+            _turn_end(turn)
+            if stopped is not None:
+                stopped.set()
 
-        def close():
-            with lock:
-                it.close()
+            def close():
+                with lock:
+                    it.close()
 
-        # we are being cancelled — shield the close; it runs in a worker
-        # thread because it may write to the DB (_save_stopped)
-        with anyio.CancelScope(shield=True):
-            await anyio.to_thread.run_sync(close)
+            # we are being cancelled — shield the close; it runs in a worker
+            # thread because it may write to the DB (_save_stopped)
+            with anyio.CancelScope(shield=True):
+                await anyio.to_thread.run_sync(close)
 
 
 async def _watch_disconnect(request: Request, stopped: threading.Event) -> None:
@@ -3200,7 +3395,7 @@ def _save_stopped(user: dict, question: str, mode: str, request: Request, live: 
     """Save the answer text a stopped stream had sent (`live`, kept by gen()).
     Nothing when no answer text went out or the answer was already saved."""
     text = "".join(live["parts"]).strip()
-    if not live["source"] or not text:
+    if not live["source"] or not text or live.get("discard"):
         return
     from chat_pg import ensure_session_pg, save_chat_message_pg
 
@@ -3237,6 +3432,7 @@ async def chat_stream(
     message: str = Form(...),
     session_id: int | None = Form(None),
     mode: str = Form("normal"),
+    client_id: str | None = Form(None),
     user: dict = Depends(current_user),
 ):
     """Streaming twin of /chat for text questions (no file uploads).
@@ -3254,6 +3450,7 @@ async def chat_stream(
     company_only = mode == "company"
     if not question:
         raise HTTPException(400, "empty message")
+    _check_message_length(question)
 
     # Safety-classifier usage for this question: added once to the row named by
     # the final `done` event (whatever step saved it). Blocked → audit entry.
@@ -3264,17 +3461,17 @@ async def chat_stream(
             _charge_safety_usage(obj["message_id"], safety_usages)
         return json.dumps(obj, ensure_ascii=False) + "\n"
 
-    stopped = threading.Event()  # set by _close_on_disconnect when the client goes away
+    stopped = threading.Event()  # หยุด (/chat/stop, or the old rule: the client went away)
+    # Answer text sent while the model streams, saved by _save_stopped if
+    # หยุด comes before it is done. source=None: nothing to save.
+    live: dict = {"sid": session_id, "source": None, "kid": None, "parts": []}
+    turn = await run_in_threadpool(_turn_start, client_id, user, question, stopped, live)
 
     def gen():
         from chat_pg import (
             ensure_session_pg,
             save_chat_message_pg,
         )
-
-        # Answer text sent while the model streams, saved by _save_stopped if
-        # the client stops before it is done. source=None: nothing to save.
-        live: dict = {"sid": session_id, "source": None, "kid": None, "parts": []}
 
         try:
             # 1) Safety — keyword then classifier. Mirror /chat: blocked answers
@@ -3554,6 +3751,8 @@ async def chat_stream(
                 return
 
             # 4) Normal answer — stream the LLM tokens.
+            if stopped.is_set():
+                return  # หยุด, or the chat was deleted, before the answer began
             sid, stitle = ensure_session_pg(
                 user_id=user["id"], session_id=session_id,
                 first_question=question, mode=mode,
@@ -3561,7 +3760,7 @@ async def chat_stream(
             live["sid"] = sid
             # the chat exists now — a client that stops mid-answer stays in it
             yield ev({"type": "session", "session_id": sid, "session_title": stitle})
-            history = _turn_history(user, session_id)
+            history = _with_memory_note(user, question, _turn_history(user, session_id))
             knowledge_id: int | None = None
             source_file_hit: str | None = None
             similarity = None
@@ -3698,6 +3897,11 @@ async def chat_stream(
             )
             usage_row.update(_route_stats(route, category, chosen_model, stream_usage, t_answer, first_token_at))
 
+            if live.get("discard"):  # the chat was deleted while the answer was written
+                import usage_log
+
+                usage_log.log_usage_pg(user["id"], usage_log.feature_for(source), source, usage_row)
+                return
             mid = save_chat_message_pg(
                 user_id=user["id"], session_id=sid, question=question,
                 answer=answer, source=source, knowledge_id=knowledge_id,
@@ -3732,10 +3936,10 @@ async def chat_stream(
                 detail={"error_type": e.__class__.__name__, "error": str(e)},
                 request=request,
             )
-            yield ev({"type": "error", "detail": "เกิดข้อผิดพลาดในการสร้างคำตอบ"})
+            yield ev({"type": "error", "detail": _answer_error_text(e)})
 
     return StreamingResponse(
-        _close_on_disconnect(gen(), stopped),
+        _close_on_disconnect(gen(), stopped, turn),
         media_type="application/x-ndjson",
         # Defeat reverse-proxy/response buffering so tokens reach the browser
         # as they're produced rather than all at once at the end.
@@ -4107,6 +4311,8 @@ def get_session(session_id: int, user: dict = Depends(current_user)):
         session = get_session_messages_pg(session_id, user["id"])
         if not session:
             raise HTTPException(404, "session not found")
+        # an answer still being written (its tab was reloaded or closed)
+        session["pending"] = _pending_turn(user["id"], session_id, session.get("messages") or [])
         return session
 
     conn = get_db()
@@ -4338,6 +4544,8 @@ def delete_session(request: Request, session_id: int, user: dict = Depends(curre
         file_paths = delete_session_pg(session_id, user["id"])
         if file_paths is None:
             raise HTTPException(404, "session not found")
+        # an answer still being written for it: stop it, save nothing
+        _stop_session_turns(user["id"], session_id)
 
         deleted_files = 0
         for fp in file_paths:
@@ -5564,9 +5772,15 @@ from pathlib import Path as _Path
 
 
 DOCX_CT = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-# A follow-up about a translation done in this chat ("สรุปฉบับแปล", "ในฉบับแปล หน้า 2…")
+# A follow-up about a translation done in this chat ("สรุปฉบับแปล", "ในฉบับแปล
+# หน้า 2…"). Only words that point at the translated document — "คำแปลของคำว่า
+# interlock", "คำนี้แปลว่าอะไร" are ordinary questions and go to the normal answer.
 _TRANSLATION_FOLLOWUP_RE = re.compile(
-    r"ฉบับแปล|คำแปล|ที่แปล(?:ไว้|แล้ว|มา|ให้)?|แปลแล้ว|ไฟล์แปล|\btranslat(?:ed|ion)\b", re.IGNORECASE,
+    r"ฉบับแปล|(?:ไฟล์|เอกสาร|งาน)(?:ที่)?แปล|ที่แปล(?:ไว้|แล้ว|มา|ให้)"
+    r"|คำแปล(?:ของ)?(?:ไฟล์|เอกสาร|หน้า|บทที่|ส่วน|ทั้ง)"
+    r"|\btranslated\s+(?:file|version|document|text|copy|pdf|manual)\b"
+    r"|\btranslation\s+(?:file|document|version)\b",
+    re.IGNORECASE,
 )
 TRANSLATION_CONTEXT_CHARS = 40_000   # of the translated text given to the model per follow-up
 

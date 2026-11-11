@@ -24,7 +24,7 @@ import {
   Users,
   X,
 } from "lucide-react";
-import { API_BASE, api, getRole, getToken, goSignIn } from "@/lib/api";
+import { API_BASE, api, getRole, getToken, goSignIn, rememberRole } from "@/lib/api";
 import { ConfirmModal } from "@/components/Modal";
 import { DashboardPanel } from "@/components/admin/DashboardPanel";
 import { UsagePanel } from "@/components/admin/UsagePanel";
@@ -132,10 +132,15 @@ export default function AdminPage() {
   useEffect(() => {
     if (!getToken()) return goSignIn();
     if (getRole() !== "admin") return router.replace("/chat");
-    api<{ id: number }>("/auth/me")
-      .then((u) => setCurrentUserId(u.id))
+    // the role from sign-in may be stale: an admin demoted since goes back to chat
+    api<{ id: number; role?: string }>("/auth/me")
+      .then((u) => {
+        rememberRole(u.role);
+        if (u.role && u.role !== "admin") return router.replace("/chat");
+        setCurrentUserId(u.id);
+        refresh();
+      })
       .catch(() => {});
-    refresh();
   }, [router]);
 
   async function refresh() {

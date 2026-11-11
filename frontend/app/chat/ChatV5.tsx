@@ -53,8 +53,16 @@ import {
 import {
   API_BASE,
   api,
+  friendlyError,
   goSignIn,
+  messageTooLong,
+  newClientId,
+  rememberRole,
+  setDraftSource,
   signOut,
+  StreamStartError,
+  stopTurn,
+  takeDraft,
   exportAnswerDocx,
   exportAnswerPdf,
   exportAnswerXlsx,
@@ -71,6 +79,7 @@ import {
   sendFeedback,
   shareSession,
   type ShareUser,
+  getUiConfig,
 } from "@/lib/api";
 import { AlertModal, ConfirmModal, PromptModal } from "@/components/Modal";
 import ThemeToggle from "@/components/ThemeToggle";
@@ -89,6 +98,7 @@ import {
   findPriorBotMessage,
   findPriorUserQuestion,
   isAcceptedFile,
+  unsupportedFileMessage,
   splitAttachments,
   type Attachment,
   type Msg,
@@ -97,6 +107,13 @@ import {
   type SharedTeamSession,
   type TeamSession,
 } from "./ClassicChatPage";
+
+type SessionData = {
+  messages: LoadedMessage[];
+  turn_count?: number;
+  shared_token?: string | null;
+  pending?: { id: string; question: string } | null;
+};
 
 type LoadedMessage = {
   id?: number;
@@ -189,6 +206,14 @@ export default function ChatV5() {
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
   const abortRef = useRef<AbortController | null>(null);
+  // the answer being asked for (its client id) — หยุด names it to the server
+  const turnIdRef = useRef<string | null>(null);
+  // an answer the server is still finishing for the chat on screen (its tab
+  // was reloaded/closed mid-answer) — shown as pending, หยุด stops it
+  const resumeRef = useRef<string | null>(null);
+  const inputValRef = useRef("");
+  // the question on its way: a 401 that answers it keeps it as the draft
+  const lastSentRef = useRef("");
   const loadSeq = useRef(0);
   // Bumped whenever another chat (or a new one) is put on screen. An answer
   // still coming in for the chat that was left keeps running and is saved by
@@ -205,6 +230,19 @@ export default function ChatV5() {
     }
     setRole(getRole());
     setUsername(getUsername());
+    // the role from sign-in may be stale (an admin demoted since)
+    getUiConfig()
+      .then((c) => {
+        if (c.role) {
+          rememberRole(c.role);
+          setRole(c.role);
+        }
+      })
+      .catch(() => {});
+    // a message typed before the session ran out comes back after sign-in
+    const draft = takeDraft();
+    if (draft) setInput(draft);
+    setDraftSource(() => (inputValRef.current.trim() ? inputValRef.current : lastSentRef.current));
     getMemory()
       .then((m) => setMemoryAvailable(m.available))
       .catch(() => setMemoryAvailable(false));
@@ -240,6 +278,11 @@ export default function ChatV5() {
   useEffect(() => {
     currentSidRef.current = currentSid;
   }, [currentSid]);
+
+  useEffect(() => {
+    inputValRef.current = input;
+  }, [input]);
+  useEffect(() => () => setDraftSource(null), []);
 
   // auto-grow the composer (up to ~8 lines); a scrollbar only past that —
   // otherwise Windows shows an empty one beside a single line
@@ -280,6 +323,8 @@ export default function ChatV5() {
   function leaveView() {
     viewSeq.current++;
     abortRef.current = null;
+    turnIdRef.current = null;
+    resumeRef.current = null;
     setSending(false);
   }
 
@@ -298,17 +343,48 @@ export default function ChatV5() {
     const seq = ++loadSeq.current;
     openChat(sid, null, null);
     try {
-      const data = await api<{ messages: LoadedMessage[]; turn_count?: number; shared_token?: string | null }>(
-        `/chat/sessions/${sid}`,
-      );
+      const data = await api<SessionData>(`/chat/sessions/${sid}`);
       if (seq !== loadSeq.current) return;
       setMessages(hydrate(data.messages));
       setTurnCount(data.turn_count ?? 0);
       setSharedToken(data.shared_token ?? null);
       setChatState("idle");
+      if (data.pending) followPending(sid, data.pending);
       requestAnimationFrame(() => scrollToBottom(false));
     } catch {
       if (seq === loadSeq.current) setChatState("error");
+    }
+  }
+
+  // The server is still finishing an answer for this chat (the page was
+  // reloaded or closed mid-answer): show it as pending, check every few
+  // seconds, and show the saved answer once it lands.
+  async function followPending(sid: number, p: { id: string; question: string }) {
+    const view = viewSeq.current;
+    resumeRef.current = p.id;
+    setSending(true);
+    setMessages((m) => [
+      ...m,
+      { role: "user", text: p.question },
+      { role: "bot", text: "", question: p.question, streaming: true, startedAt: Date.now(), waitLabel: "กำลังตอบต่อจากครั้งก่อน…" },
+    ]);
+    for (;;) {
+      await new Promise((r) => setTimeout(r, 3000));
+      if (viewSeq.current !== view) return;
+      let data: SessionData;
+      try {
+        data = await api<SessionData>(`/chat/sessions/${sid}`);
+      } catch {
+        continue; // offline for a moment — try again
+      }
+      if (viewSeq.current !== view) return;
+      if (data.pending) continue;
+      resumeRef.current = null;
+      setSending(false);
+      setMessages(hydrate(data.messages));
+      setTurnCount(data.turn_count ?? 0);
+      requestAnimationFrame(() => scrollToBottom(true));
+      return;
     }
   }
 
@@ -593,7 +669,7 @@ export default function ChatV5() {
     const valid: File[] = [];
     for (const f of files) {
       if (f.size > 100 * 1024 * 1024) setAlertMsg(`ไฟล์ "${f.name}" ใหญ่เกิน 100MB`);
-      else if (!isAcceptedFile(f)) setAlertMsg(`ไฟล์ "${f.name}" ไม่รองรับ`);
+      else if (!isAcceptedFile(f)) setAlertMsg(unsupportedFileMessage(f));
       else valid.push(f);
     }
     if (!valid.length) return;
@@ -642,6 +718,8 @@ export default function ChatV5() {
     e?.preventDefault();
     const text = input.trim();
     if ((!text && pendingFiles.length === 0) || sending || readOnlyOwner) return;
+    const tooLong = messageTooLong(text);
+    if (tooLong) return setAlertMsg(tooLong);
     const files = pendingFiles;
     const optimistic: Attachment[] = files.map((f, i) => ({
       id: -(i + 1),
@@ -658,15 +736,20 @@ export default function ChatV5() {
     requestAnimationFrame(() => scrollToBottom(true));
     const controller = new AbortController();
     abortRef.current = controller;
+    const clientId = newClientId();
+    turnIdRef.current = clientId;
+    lastSentRef.current = text;
     const view = viewSeq.current;
     try {
-      if (files.length) await runNonStream(text, files, controller, view);
-      else await runStreaming(text, controller, view);
+      if (files.length) await runNonStream(text, files, controller, view, clientId);
+      else await runStreaming(text, controller, view, clientId);
     } finally {
       if (viewSeq.current === view) {
         setSending(false);
         abortRef.current = null;
+        turnIdRef.current = null;
       }
+      lastSentRef.current = "";
     }
   }
 
@@ -677,7 +760,7 @@ export default function ChatV5() {
   }
 
   // Files go through /chat (no streaming). A placeholder answer shows the wait.
-  async function runNonStream(text: string, files: File[], controller: AbortController, view: number) {
+  async function runNonStream(text: string, files: File[], controller: AbortController, view: number, clientId?: string) {
     const here = () => viewSeq.current === view;
     const proof = files.length > 0 && PROOFREAD_RE.test(text);
     const heavy = files.some((f) => DATA_FILE_RE.test(f.name));
@@ -694,7 +777,7 @@ export default function ChatV5() {
       },
     ]);
     try {
-      const res = await sendChat({ message: text, sessionId: currentSid, files, signal: controller.signal });
+      const res = await sendChat({ message: text, sessionId: currentSid, files, signal: controller.signal, clientId });
       refreshSessions();
       if (role === "admin") refreshTeamSessions();
       if (!here()) return landedElsewhere(res.session_id);
@@ -728,12 +811,12 @@ export default function ChatV5() {
       const aborted = e instanceof DOMException && e.name === "AbortError";
       patchLastBot({
         streaming: false,
-        text: aborted ? "ยกเลิกการถามแล้ว" : `⚠️ เกิดข้อผิดพลาด: ${e instanceof Error ? e.message : ""}`,
+        text: aborted ? "ยกเลิกการถามแล้ว" : `⚠️ ${friendlyError(e)}`,
       });
     }
   }
 
-  async function runStreaming(text: string, controller: AbortController, view: number) {
+  async function runStreaming(text: string, controller: AbortController, view: number, clientId?: string) {
     const here = () => viewSeq.current === view;
     // only while this chat is still the one on screen
     const patch: typeof patchLastBot = (p) => {
@@ -758,7 +841,7 @@ export default function ChatV5() {
     let sentText = false;
     try {
       await sendChatStream(
-        { message: text, sessionId: currentSid, signal: controller.signal },
+        { message: text, sessionId: currentSid, signal: controller.signal, clientId },
         {
           onDelta: (t) => {
             receivedAny = sentText = true;
@@ -814,14 +897,20 @@ export default function ChatV5() {
           setTurnCount((c) => c + 1);
           refreshSessions();
         }
+      } else if (e instanceof StreamStartError && e.status !== 501) {
+        // refused (too many requests, chat full…): say why, in Thai
+        patch({ text: `⚠️ ${e.message}` });
       } else if (!receivedAny) {
         // never started (e.g. sqlite → 501): drop the bubble, use /chat instead
         if (!here()) return;
         setMessages((m) => (m[m.length - 1]?.role === "bot" && !m[m.length - 1].text ? m.slice(0, -1) : m));
-        await runNonStream(text, [], controller, view);
+        await runNonStream(text, [], controller, view, clientId);
         return;
       } else {
-        patch((last) => ({ text: last.text + "\n\n⚠️ การเชื่อมต่อขัดข้อง" }));
+        // the connection dropped mid-answer; the server finishes and saves it
+        patch((last) => ({
+          text: last.text + "\n\n⚠️ การเชื่อมต่อขาดระหว่างตอบ — ระบบตอบต่อจนจบให้แล้ว เปิดแชทนี้อีกครั้งเพื่อดูคำตอบเต็ม",
+        }));
       }
     } finally {
       flush();
@@ -830,6 +919,10 @@ export default function ChatV5() {
   }
 
   function cancelSend() {
+    // หยุด: tell the server first (closing the connection alone no longer
+    // stops an answer — a reload or closed tab must not), then let go of it
+    const id = turnIdRef.current ?? resumeRef.current;
+    if (id) stopTurn(id);
     abortRef.current?.abort();
   }
 

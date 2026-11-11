@@ -211,9 +211,25 @@ _IMAGE_ENHANCE_SYSTEM = (
     "company's logo). If the user asks for their logo (e.g. 'ใส่โลโก้', 'logo from "
     "the file'), draw NO logo or placeholder: just leave a clean, empty area at the "
     "top centre where the real logo can be placed later.\n"
+    "- Refuse ONLY when the user explicitly asks for a real third-party brand's "
+    "LOGO, trademark or emblem to appear in the image (e.g. 'โลโก้ Coca-Cola', 'Nike "
+    "logo on the box') or for a copyrighted character (e.g. Mickey Mouse, Doraemon, "
+    "Pikachu): then output exactly REFUSE_TRADEMARK and nothing else. A brand merely "
+    "named as a product or machine ('เครื่องพิมพ์ Heidelberg', 'รถ Toyota') is NOT a "
+    "refusal — draw it generically with no readable logo. Generic things ('a red soda "
+    "can') and the user's own logo described above are never refused.\n"
     "Output ONLY the final image prompt as one flowing paragraph — no preamble, no "
     "surrounding quotes, no explanation."
 )
+
+
+class ImageRequestRefused(Exception):
+    """A request to draw another brand's logo/trademark or a copyrighted
+    character: the image model would leave it out silently (QA I-03), so the
+    user is told instead. Raised before any image is made (no image cost)."""
+
+    def __init__(self) -> None:
+        super().__init__("content_policy: trademark or copyrighted character requested")
 
 
 def _enhance_image_prompt(prompt: str) -> str:
@@ -234,9 +250,11 @@ def _enhance_image_prompt(prompt: str) -> str:
             **_model_kwargs(IMAGE_PROMPT_MODEL, 2000),
         )
         enhanced = (res.choices[0].message.content or "").strip()
-        return enhanced or prompt
     except Exception:
         return prompt
+    if enhanced.strip(" .\"'`") == "REFUSE_TRADEMARK":
+        raise ImageRequestRefused()
+    return enhanced or prompt
 
 
 def _render_image(prompt: str, size: str) -> bytes:

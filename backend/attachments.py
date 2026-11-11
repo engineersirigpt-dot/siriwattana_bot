@@ -56,7 +56,31 @@ TEXT_EXTENSIONS = {
     ".vue", ".svelte", ".gradle", ".pl", ".pm",
 }
 
-MIME_ALLOWED = IMAGE_TYPES | PDF_TYPES | DOCX_TYPES | XLSX_TYPES | XLS_TYPES | PPTX_TYPES | AUDIO_TYPES
+# Legacy Word/PowerPoint (.doc/.ppt): read by converting to .docx/.pptx with
+# LibreOffice (in the backend image for the Document Engine and translation).
+DOC_TYPES = {"application/msword"}
+PPT_TYPES = {"application/vnd.ms-powerpoint"}
+LEGACY_OFFICE_EXTENSIONS = {".doc": ".docx", ".ppt": ".pptx"}
+
+MIME_ALLOWED = (IMAGE_TYPES | PDF_TYPES | DOCX_TYPES | XLSX_TYPES | XLS_TYPES | PPTX_TYPES | AUDIO_TYPES
+                | DOC_TYPES | PPT_TYPES)
+
+SUPPORTED_KINDS_TH = (
+    "PDF, Word (.docx/.doc), Excel (.xlsx/.xls), PowerPoint (.pptx/.ppt), "
+    "รูปภาพ (JPG/PNG/WebP/GIF), ไฟล์ข้อความหรือโค้ด และไฟล์เสียง"
+)
+
+
+def unsupported_message(filename: str, content_type: str) -> str:
+    """Why an upload was refused, in plain Thai (no MIME names)."""
+    name = filename or "ไฟล์นี้"
+    ext = Path(filename or "").suffix.lower()
+    if ext in {".heic", ".heif"} or content_type in {"image/heic", "image/heif"}:
+        return (
+            f'รูป "{name}" เป็นแบบ HEIC ของ iPhone ซึ่งระบบยังอ่านไม่ได้ — แนบรูปจากแอปรูปภาพ '
+            "(iPhone จะแปลงเป็น JPG ให้เอง) หรือแปลงเป็น JPG/PNG ก่อนแล้วแนบใหม่"
+        )
+    return f'ไฟล์ "{name}" เป็นประเภทที่ระบบยังไม่รองรับ — รองรับ {SUPPORTED_KINDS_TH}'
 
 
 def _upload_root() -> Path:
@@ -102,7 +126,8 @@ def _is_allowed(content_type: str, filename: str) -> bool:
     if content_type in MIME_ALLOWED:
         return True
     ext = Path(filename or "").suffix.lower()
-    return ext in TEXT_EXTENSIONS or ext in XLS_EXTENSIONS or ext in AUDIO_EXTENSIONS
+    return (ext in TEXT_EXTENSIONS or ext in XLS_EXTENSIONS or ext in AUDIO_EXTENSIONS
+            or ext in LEGACY_OFFICE_EXTENSIONS)
 
 
 def is_audio(content_type: str, filename: str = "") -> bool:
@@ -172,10 +197,7 @@ def save_generated_file(data: bytes, display_name: str, content_type: str) -> tu
 
 async def save_upload(upload: UploadFile) -> tuple[str, str, int, str]:
     if not _is_allowed(upload.content_type or "", upload.filename or ""):
-        raise HTTPException(
-            400,
-            f"ไฟล์ประเภทนี้ไม่รองรับ ({upload.content_type or Path(upload.filename or '').suffix or 'unknown'})",
-        )
+        raise HTTPException(400, unsupported_message(upload.filename or "", upload.content_type or ""))
 
     _ensure_dir()
 
@@ -208,7 +230,35 @@ async def save_upload(upload: UploadFile) -> tuple[str, str, int, str]:
         file_path.unlink(missing_ok=True)
         raise HTTPException(status_code=500, detail=f"บันทึกไฟล์ไม่สำเร็จ: {e}")
 
+    locked = locked_file_message(str(file_path), upload.filename or stored_name, upload.content_type or "")
+    if locked:
+        file_path.unlink(missing_ok=True)
+        raise HTTPException(400, locked)
+
     return upload.filename or stored_name, upload.content_type or "", size, str(file_path)
+
+
+_OLE_MAGIC = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"  # a password-protected .docx/.xlsx/.pptx is one
+
+
+def locked_file_message(path: str, filename: str, content_type: str) -> str | None:
+    """A file that can only be opened with a password: say so in Thai (the
+    bot can't read it, and would otherwise answer from nothing)."""
+    name = filename or "ไฟล์นี้"
+    ext = Path(filename or "").suffix.lower()
+    how = "กรุณาเปิดไฟล์แล้วบันทึกใหม่แบบไม่ใส่รหัสผ่าน (หรือสั่งพิมพ์เป็น PDF) แล้วแนบอีกครั้ง"
+    try:
+        if content_type in PDF_TYPES or ext == ".pdf":
+            with fitz.open(path) as doc:
+                if doc.needs_pass:
+                    return f'ไฟล์ "{name}" ตั้งรหัสผ่านไว้ ระบบจึงเปิดอ่านไม่ได้ — {how}'
+        elif ext in {".docx", ".xlsx", ".pptx"}:
+            with open(path, "rb") as fh:
+                if fh.read(8) == _OLE_MAGIC:
+                    return f'ไฟล์ "{name}" ตั้งรหัสผ่านไว้ ระบบจึงเปิดอ่านไม่ได้ — {how}'
+    except Exception:  # noqa: BLE001 — unreadable for another reason: the extractors say so
+        return None
+    return None
 
 
 def is_image(content_type: str) -> bool:
@@ -487,8 +537,68 @@ def extract_text_file(file_path: str, max_chars: int = MAX_EXTRACT_CHARS) -> str
     return "(อ่านไฟล์ไม่สำเร็จ: encoding ไม่รองรับ)"
 
 
+def legacy_office_target(content_type: str, filename: str) -> str | None:
+    """'.docx' / '.pptx' for a legacy .doc / .ppt upload, else None."""
+    ext = Path(filename or "").suffix.lower()
+    if ext in LEGACY_OFFICE_EXTENSIONS:
+        return LEGACY_OFFICE_EXTENSIONS[ext]
+    if content_type in DOC_TYPES:
+        return ".docx"
+    if content_type in PPT_TYPES:
+        return ".pptx"
+    return None
+
+
+LEGACY_CONVERT_TIMEOUT_S = 90
+
+
+def extract_legacy_office_text(file_path: str, target: str) -> str:
+    """Text of a .doc/.ppt: LibreOffice converts it to .docx/.pptx in a temp
+    dir (inside UPLOAD_DIR so the extractors accept it), then the usual
+    extractor reads that copy."""
+    import shutil
+    import subprocess
+    import tempfile
+
+    kind = "Word" if target == ".docx" else "PowerPoint"
+    fallback = (f"(อ่านไฟล์ {kind} รุ่นเก่าไม่สำเร็จ — กรุณาเปิดไฟล์แล้วบันทึกเป็น {target} "
+                "แล้วแนบใหม่)")
+    try:
+        from translate_manual import _find_soffice
+
+        soffice = _find_soffice()
+        src = validate_upload_path(file_path)
+    except HTTPException:
+        raise
+    except Exception:  # noqa: BLE001
+        return fallback
+    if not soffice:
+        return fallback
+    _ensure_dir()
+    work = Path(tempfile.mkdtemp(prefix="legacy_", dir=str(_upload_root())))
+    try:
+        with tempfile.TemporaryDirectory(prefix="lo_") as profile:
+            subprocess.run(
+                [soffice, "-env:UserInstallation=" + Path(profile).as_uri(), "--headless", "--norestore",
+                 "--convert-to", target.lstrip("."), "--outdir", str(work), str(src)],
+                check=True, capture_output=True, timeout=LEGACY_CONVERT_TIMEOUT_S,
+            )
+        out = work / (src.stem + target)
+        if not out.exists():
+            return fallback
+        text = extract_docx_text(str(out)) if target == ".docx" else extract_pptx_text(str(out))
+        return text or fallback
+    except Exception:  # noqa: BLE001
+        return fallback
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
 def extract_any_text(file_path: str, content_type: str, filename: str) -> str:
     """Dispatch text extraction by file type. Returns '' for images (use vision instead)."""
+    legacy = legacy_office_target(content_type, filename)
+    if legacy:
+        return extract_legacy_office_text(file_path, legacy)
     if is_pdf(content_type):
         return extract_pdf_text(file_path)
     if is_docx(content_type, filename):
@@ -612,9 +722,15 @@ def wants_whole_translation(question: str) -> bool:
     return bool(_WHOLE_TRANSLATE_RE.search(q)) and not _PART_RE.search(q) and not _OTHER_TARGET_RE.search(q)
 
 
+# Share of Thai letters above which a PDF counts as already Thai (no English →
+# Thai job). A spec or manual with Thai headings over English text sits well
+# below it and is translated — the translator copies Thai text as it is.
+THAI_DOC_SHARE = 0.6
+
+
 def _mostly_thai(text: str) -> bool:
     letters = [c for c in text if c.isalpha()]
-    return bool(letters) and sum(1 for c in letters if _THAI_CHAR_RE.match(c)) / len(letters) > 0.3
+    return bool(letters) and sum(1 for c in letters if _THAI_CHAR_RE.match(c)) / len(letters) > THAI_DOC_SHARE
 
 
 def _scanned_first_page_text(file_path: str) -> str | None:

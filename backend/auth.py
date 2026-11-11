@@ -122,7 +122,8 @@ def current_user(request: Request, token: str = Depends(oauth2)) -> dict:
         user_row = get_user_by_id_pg(user_id)
     else:
         row = get_db().execute(
-            "SELECT id, username, role FROM users WHERE id = ?",
+            "SELECT id, username, role, COALESCE(is_disabled, 0) AS is_disabled "
+            "FROM users WHERE id = ?",
             (user_id,),
         ).fetchone()
         user_row = (
@@ -130,6 +131,7 @@ def current_user(request: Request, token: str = Depends(oauth2)) -> dict:
                 "id": row["id"],
                 "username": row["username"],
                 "role": row["role"],
+                "is_disabled": bool(row["is_disabled"]),
             }
             if row
             else None
@@ -146,6 +148,21 @@ def current_user(request: Request, token: str = Depends(oauth2)) -> dict:
             request=request,
         )
         raise _credential_exception()
+
+    # Checked on every request, not only at login: an account an admin
+    # disables stops working at once instead of when its token expires (8h).
+    if user_row.pop("is_disabled", False):
+        audit_log(
+            "invalid_or_expired_token",
+            user=user_row,
+            detail={"reason": "user_disabled"},
+            request=request,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="บัญชีนี้ถูกระงับการใช้งาน กรุณาติดต่อผู้ดูแลระบบ",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
 
     return user_row
 

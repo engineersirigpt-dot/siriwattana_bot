@@ -49,9 +49,70 @@ export function goSignIn(): void {
   window.location.replace(dest);
 }
 
-// A response that says the session is gone → sign in again.
+// A response that says the session is gone → sign in again. A message typed
+// but not sent yet is kept first (restored by the chat page after sign-in).
+const DRAFT_KEY = "chatbot_draft";
+let draftSource: (() => string) | null = null;
+export function setDraftSource(fn: (() => string) | null): void {
+  draftSource = fn;
+}
+export function keepDraft(text: string): void {
+  try {
+    if (text.trim()) localStorage.setItem(DRAFT_KEY, text);
+  } catch {
+    /* storage unavailable */
+  }
+}
+export function takeDraft(): string {
+  try {
+    const t = localStorage.getItem(DRAFT_KEY) ?? "";
+    localStorage.removeItem(DRAFT_KEY);
+    return t;
+  } catch {
+    return "";
+  }
+}
+
 function checkAuth(res: Response): void {
-  if (res.status === 401) goSignIn();
+  if (res.status === 401) {
+    if (draftSource) keepDraft(draftSource());
+    goSignIn();
+  }
+}
+
+// What a failed request tells the user — Thai, never raw JSON or an HTML
+// error page. The server's own Thai `detail` is used when it sent one.
+export async function errorMessage(res: Response): Promise<string> {
+  let detail = "";
+  try {
+    const text = await res.text();
+    try {
+      const body = JSON.parse(text);
+      if (typeof body?.detail === "string") detail = body.detail;
+      else if (Array.isArray(body?.detail)) detail = "ข้อมูลที่ส่งไม่ถูกต้อง";
+    } catch {
+      /* not JSON (an HTML page from a proxy, plain text…) */
+    }
+  } catch {
+    /* body unreadable */
+  }
+  const thai = /[฀-๿]/.test(detail);
+  if (res.status === 429) return thai ? detail : "ส่งคำขอถี่เกินไป กรุณารอสักครู่ (ประมาณ 1 นาที) แล้วลองใหม่";
+  if (res.status === 413) return "ไฟล์ใหญ่เกินกว่าที่ระบบรับได้ (สูงสุด 100MB ต่อไฟล์)";
+  if (res.status === 401) return "หมดเวลาการเข้าสู่ระบบ กรุณาเข้าสู่ระบบใหม่";
+  if (res.status >= 502 && res.status <= 504) return "ระบบไม่ตอบสนองชั่วคราว กรุณาลองใหม่อีกครั้งในอีกสักครู่";
+  if (thai) return detail;
+  if (res.status >= 500) return "ระบบขัดข้องชั่วคราว กรุณาลองใหม่อีกครั้ง";
+  if (res.status === 404) return "ไม่พบข้อมูลที่ต้องการ (อาจถูกลบไปแล้ว)";
+  if (res.status === 403) return "คุณไม่มีสิทธิ์ทำรายการนี้";
+  return `ทำรายการไม่สำเร็จ (รหัส ${res.status})`;
+}
+
+// A fetch that never got an answer (offline, connection dropped) → Thai text.
+export function friendlyError(e: unknown): string {
+  if (e instanceof TypeError || (e instanceof Error && /fetch|network|load failed/i.test(e.message)))
+    return "เชื่อมต่อระบบไม่ได้ กรุณาตรวจสอบอินเทอร์เน็ตแล้วลองใหม่";
+  return e instanceof Error && e.message ? e.message : "เกิดข้อผิดพลาด กรุณาลองใหม่";
 }
 
 export function getToken(): string | null {
@@ -84,11 +145,68 @@ export async function api<T = unknown>(
   });
   if (!res.ok) {
     checkAuth(res);
-    const text = await res.text();
-    throw new Error(text || res.statusText);
+    throw new Error(await errorMessage(res));
   }
   if (res.status === 204) return undefined as T;
   return res.json() as Promise<T>;
+}
+
+// The role in this browser is the one from sign-in; the server's is current
+// (an admin may have been demoted since) — keep the server's.
+export function rememberRole(role: string | null | undefined): void {
+  if (typeof window === "undefined" || !role) return;
+  try {
+    localStorage.setItem(ROLE_KEY, role);
+  } catch {
+    /* storage unavailable */
+  }
+}
+
+export async function refreshRole(): Promise<string | null> {
+  const me = await api<{ role?: string }>("/auth/me");
+  rememberRole(me.role);
+  return me.role ?? null;
+}
+
+// Public sign-in settings: the MI portal an SSO user goes back to (or null).
+export async function getAuthConfig(): Promise<{ mi_portal_url: string | null }> {
+  const res = await fetch(`${API_BASE}/auth/config`);
+  if (!res.ok) throw new Error(await errorMessage(res));
+  return res.json();
+}
+
+// Same limit as the backend (main.MAX_MESSAGE_CHARS): a longer paste is
+// refused before sending, with a hint to attach it as a file instead.
+export const MAX_MESSAGE_CHARS = 120_000;
+export function messageTooLong(text: string): string | null {
+  if (text.length <= MAX_MESSAGE_CHARS) return null;
+  return `ข้อความยาวเกินไป (${text.length.toLocaleString()} ตัวอักษร — สูงสุด ${MAX_MESSAGE_CHARS.toLocaleString()}) กรุณาบันทึกเป็นไฟล์ (Word, PDF หรือ .txt) แล้วแนบไฟล์แทนการวาง`;
+}
+
+// One id per question asked: หยุด names the answer to stop by it, and a
+// reload or closed tab (no หยุด) lets the server finish the answer.
+export function newClientId(): string {
+  try {
+    return crypto.randomUUID();
+  } catch {
+    return `c${Date.now().toString(36)}${Math.random().toString(36).slice(2, 12)}`;
+  }
+}
+
+// หยุด: tell the server to stop that answer (keepalive: still sent if the page
+// is closing). Never throws — aborting the request is the fallback.
+export async function stopTurn(clientId: string): Promise<void> {
+  const token = getToken();
+  try {
+    await fetch(`${API_BASE}/chat/stop`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+      body: JSON.stringify({ client_id: clientId }),
+      keepalive: true,
+    });
+  } catch {
+    /* offline — the aborted request still ends it on old servers */
+  }
 }
 
 export async function login(username: string, password: string) {
@@ -171,6 +289,7 @@ export async function sendChat(opts: {
   files: File[];
   mode?: "normal" | "company";
   signal?: AbortSignal;
+  clientId?: string;
 }): Promise<{
   answer: string;
   source: string;
@@ -192,6 +311,7 @@ export async function sendChat(opts: {
   if (opts.sessionId !== null) fd.append("session_id", String(opts.sessionId));
   if (opts.mode && opts.mode !== "normal") fd.append("mode", opts.mode);
   for (const f of opts.files) fd.append("files", f, f.name);
+  if (opts.clientId) fd.append("client_id", opts.clientId);
 
   const token = getToken();
   const res = await fetch(`${API_BASE}/chat`, {
@@ -202,10 +322,17 @@ export async function sendChat(opts: {
   });
   if (!res.ok) {
     checkAuth(res);
-    const text = await res.text();
-    throw new Error(text || res.statusText);
+    throw new Error(await errorMessage(res));
   }
   return res.json();
+}
+
+// /chat/stream refused to start (status): 501 → the caller uses /chat instead;
+// anything else (429, 400…) is shown — sending it again won't help.
+export class StreamStartError extends Error {
+  constructor(public status: number, message: string) {
+    super(message);
+  }
 }
 
 export type StreamDone = {
@@ -239,6 +366,7 @@ export async function sendChatStream(
     sessionId: number | null;
     mode?: "normal" | "company";
     signal?: AbortSignal;
+    clientId?: string;
   },
   handlers: {
     onDelta: (text: string) => void;
@@ -256,6 +384,7 @@ export async function sendChatStream(
   fd.append("message", opts.message);
   if (opts.sessionId !== null) fd.append("session_id", String(opts.sessionId));
   if (opts.mode && opts.mode !== "normal") fd.append("mode", opts.mode);
+  if (opts.clientId) fd.append("client_id", opts.clientId);
 
   const token = getToken();
   const res = await fetch(`${API_BASE}/chat/stream`, {
@@ -266,8 +395,7 @@ export async function sendChatStream(
   });
   if (!res.ok || !res.body) {
     checkAuth(res);
-    const text = await res.text().catch(() => "");
-    throw new Error(text || res.statusText);
+    throw new StreamStartError(res.status, await errorMessage(res));
   }
 
   const reader = res.body.getReader();
@@ -429,8 +557,7 @@ export async function exportAnswerPdf(opts: {
     }),
   });
   if (!res.ok) {
-    const text = await res.text();
-    throw new Error(text || "สร้าง PDF ไม่สำเร็จ");
+    throw new Error(await errorMessage(res));
   }
   triggerDownload(await res.blob(), opts.filename ?? "Sirivatana_chat.pdf");
 }
@@ -450,8 +577,7 @@ export async function exportAnswerXlsx(opts: {
     body: JSON.stringify({ content: opts.content, title: opts.title }),
   });
   if (!res.ok) {
-    const text = await res.text();
-    throw new Error(text || "สร้าง Excel ไม่สำเร็จ");
+    throw new Error(await errorMessage(res));
   }
   triggerDownload(await res.blob(), opts.filename ?? "Sirivatana_table.xlsx");
 }
@@ -471,8 +597,7 @@ export async function exportAnswerDocx(opts: {
     body: JSON.stringify({ content: opts.content, title: opts.title }),
   });
   if (!res.ok) {
-    const text = await res.text();
-    throw new Error(text || "สร้าง Word ไม่สำเร็จ");
+    throw new Error(await errorMessage(res));
   }
   triggerDownload(await res.blob(), opts.filename ?? "Sirivatana_chat.docx");
 }
@@ -483,8 +608,7 @@ export async function downloadSourceFile(knowledgeId: number): Promise<void> {
     headers: token ? { Authorization: `Bearer ${token}` } : undefined,
   });
   if (!res.ok) {
-    const text = await res.text();
-    throw new Error(text || "ดาวน์โหลดเอกสารต้นฉบับไม่สำเร็จ");
+    throw new Error(await errorMessage(res));
   }
   // Preserve the server-provided filename so Thai-named docs land with the
   // right name on the user's disk instead of "download.docx".
@@ -532,8 +656,9 @@ export async function fetchAttachmentBlobUrl(id: number): Promise<string> {
 // ── V5 chat UI ──────────────────────────────────────────────────────────────
 
 // Which chat page this user gets (backend UI_V5_MODE). Any failure → classic.
-export async function getUiConfig(): Promise<{ ui_v5: boolean }> {
-  return api<{ ui_v5: boolean }>("/ui/config");
+// role: the current one on the server (see rememberRole).
+export async function getUiConfig(): Promise<{ ui_v5: boolean; role?: string }> {
+  return api<{ ui_v5: boolean; role?: string }>("/ui/config");
 }
 
 // An attachment fetch that says WHY it failed (gone / not yours / other), so a
@@ -612,8 +737,7 @@ export async function startTranslation(file: File): Promise<TranslateJob> {
     body: fd,
   });
   if (!res.ok) {
-    const t = await res.text();
-    throw new Error(t || res.statusText);
+    throw new Error(await errorMessage(res));
   }
   return res.json();
 }
@@ -637,7 +761,7 @@ export async function downloadTranslation(
   const res = await fetch(`${API_BASE}/translate/download/${jobId}?fmt=${fmt}`, {
     headers: token ? { Authorization: `Bearer ${token}` } : undefined,
   });
-  if (!res.ok) throw new Error((await res.text()) || res.statusText);
+  if (!res.ok) throw new Error(await errorMessage(res));
   const blob = await res.blob();
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");

@@ -31,6 +31,9 @@ def _query_cost_in_range(cur, since: datetime, until: datetime) -> tuple[float, 
                 WHERE cost_usd IS NULL
                   AND source <> 'export_offer'
                   AND source <> 'blocked'
+                  -- "เริ่มแปล…" from a chat: the job's own cost is counted
+                  -- once, by _translation_cost — no flat-rate guess for it
+                  AND source <> 'translate_job'
             )
         FROM chat_history
         WHERE asked_at >= %s AND asked_at < %s

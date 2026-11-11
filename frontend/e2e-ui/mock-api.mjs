@@ -136,6 +136,8 @@ function freshState() {
     memory: { 1: { available: true, enabled: true, items: [{ id: 1, content: "ฉันอยู่ฝ่ายผลิต กะเช้า", created_at: null }] }, 2: { available: false, enabled: false, items: [] } },
     sessions, messages, nextSid: 900, nextMid: 7100, nextAtt: 600, requests: [],
     jobs: {}, // translation jobs started from the chat, see /translate/*
+    turns: {}, // answers being written, by client_id (see streamAnswer)
+    roles: {}, // a role changed since sign-in (A-02), by user id
   };
 }
 let S = freshState();
@@ -169,9 +171,11 @@ function formFields(buf, contentType) {
 }
 
 // Like /chat/stream: a `session` event names the chat before the answer
-// starts; if the client goes away mid-answer the text sent so far is saved
-// with STOPPED_NOTE; a finished answer is saved too.
-async function streamAnswer(req, res, user, message, sid) {
+// starts. With a client_id (current pages): the browser going away doesn't
+// stop it — the answer is finished and saved whole (pending meanwhile); only
+// /chat/stop saves the text so far with STOPPED_NOTE. Without one: going away
+// = stop (the old rule). A finished answer is saved too.
+async function streamAnswer(req, res, user, message, sid, cid) {
   res.writeHead(200, { "Content-Type": "application/x-ndjson", "Access-Control-Allow-Origin": "*" });
   let closed = false;
   let sessionId = sid;
@@ -181,14 +185,22 @@ async function streamAnswer(req, res, user, message, sid) {
     saved = true;
     (S.messages[sessionId] ??= []).push({ id: S.nextMid++, question: message, answer, source, attachments });
   };
+  const turn = cid ? (S.turns[cid] = { user: user.id, sid, question: message, stop: false }) : null;
+  const halted = () => closed && (!turn || turn.stop);
+  const stopNow = () => {
+    if (!saved && sent) save(sent.trim() + STOPPED_NOTE, "llm");
+    saved = true;
+  };
   res.on("close", () => {
     closed = true;
-    if (!saved && sent) save(sent.trim() + STOPPED_NOTE, "llm");
+    if (!turn || turn.stop) stopNow(); // else: the loop below finishes it
   });
   const emit = (o) => !closed && res.write(JSON.stringify(o) + "\n");
   const startAnswer = () => {
     if (sessionId) return emit({ type: "session", session_id: sessionId, session_title: "" });
     sessionId = S.nextSid++;
+    S.messages[sessionId] ??= []; // the chat exists before its first answer is saved
+    if (turn) turn.sid = sessionId;
     S.sessions.unshift({ id: sessionId, title: message.slice(0, 40), is_saved: 0, created_at: "", updated_at: "", message_count: 1, last_preview: null });
     emit({ type: "session", session_id: sessionId, session_title: message.slice(0, 40) });
   };
@@ -220,17 +232,18 @@ async function streamAnswer(req, res, user, message, sid) {
     done({ source: "document", attachments: [meta(502), meta(503)] });
     return res.end();
   }
-  const slow = message.includes("ช้า");
-  const text = slow ? "คำตอบยาวที่ส่งมาช้า ๆ ".repeat(60) : message.includes("ตาราง") ? RICH_ANSWER : "ได้เลยค่ะ นี่คือคำตอบสำหรับคำถามของคุณ พร้อม **ตัวหนา** และรายการ:\n\n- ข้อหนึ่ง\n- ข้อสอง";
+  const slow = message.includes("ช้า") || message.includes("ค่อย ๆ");
+  const text = message.includes("ค่อย ๆ") ? "คำตอบยาวที่ส่งมาช้า ๆ ".repeat(20) + "จบคำตอบแล้ว"
+    : slow ? "คำตอบยาวที่ส่งมาช้า ๆ ".repeat(60) : message.includes("ตาราง") ? RICH_ANSWER : "ได้เลยค่ะ นี่คือคำตอบสำหรับคำถามของคุณ พร้อม **ตัวหนา** และรายการ:\n\n- ข้อหนึ่ง\n- ข้อสอง";
   startAnswer();
-  for (let i = 0; i < text.length && !closed; i += 4) {
+  for (let i = 0; i < text.length && !halted() && !turn?.stop; i += 4) {
     delta(text.slice(i, i + 4));
     await sleep(slow ? 60 : 8);
   }
-  if (!closed) {
-    done();
-    res.end();
-  }
+  if (turn?.stop) stopNow(); // หยุด (/chat/stop), connected or not
+  else if (!saved) done();
+  if (cid) delete S.turns[cid];
+  if (!closed) res.end();
 }
 
 const server = http.createServer(async (req, res) => {
@@ -246,11 +259,13 @@ const server = http.createServer(async (req, res) => {
     const b = JSON.parse((await readBody(req)).toString() || "{}");
     if (b.ui) Object.assign(S.ui, b.ui);
     if (b.memory) Object.assign(S.memory, b.memory);
+    if (b.roles) Object.assign(S.roles, b.roles);
     return send(res, 200, { ok: true });
   }
   if (path === "/__mock/requests") return send(res, 200, S.requests);
   // MI portal SSO: /sso?token=… → our session + where "ออกจากระบบ" goes back to
   if (path === "/mi-portal") return send(res, 200, "<h1>MI Authentication System</h1>", "text/html");
+  if (path === "/auth/config") return send(res, 200, { mi_portal_url: `http://127.0.0.1:${PORT}/mi-portal` });
   if (path === "/auth/mi-sso" && req.method === "POST") {
     const { token } = JSON.parse((await readBody(req)).toString() || "{}");
     if (token !== "mi-jwt-staff") return send(res, 401, { detail: "Token จาก MI ไม่ถูกต้องหรือหมดอายุ" });
@@ -262,8 +277,16 @@ const server = http.createServer(async (req, res) => {
   if (!user) return send(res, 401, { detail: "unauthorized" });
   S.requests.push(`${req.method} ${path}`);
 
-  if (path === "/ui/config") return send(res, 200, { ui_v5: !!S.ui[user.id] });
-  if (path === "/auth/me") return send(res, 200, user);
+  const role = S.roles[user.id] ?? user.role;
+  if (path === "/ui/config") return send(res, 200, { ui_v5: !!S.ui[user.id], role });
+  if (path === "/auth/me") return send(res, 200, { ...user, role });
+  if (path === "/chat/stop" && req.method === "POST") {
+    const { client_id } = JSON.parse((await readBody(req)).toString() || "{}");
+    const t = S.turns[client_id];
+    if (!t || t.user !== user.id) return send(res, 200, { ok: false });
+    t.stop = true;
+    return send(res, 200, { ok: true });
+  }
   if (path === "/memory" && req.method === "GET") {
     const m = S.memory[user.id];
     return send(res, 200, m.available ? { available: true, enabled: m.enabled, items: m.items, limit: 50 } : { available: false, enabled: false, items: [], limit: 50 });
@@ -293,7 +316,9 @@ const server = http.createServer(async (req, res) => {
     const msgs = user.id === 1 ? S.messages[sm[1]] : undefined;
     if (!msgs) return send(res, 404, { detail: "session not found" });
     if (sm[1] === "102") await sleep(400); // a slower one, to see the loading state
-    return send(res, 200, { messages: msgs, mode: "normal", turn_count: msgs.length, shared_token: null });
+    const t = Object.entries(S.turns).find(([, x]) => x.user === user.id && x.sid === Number(sm[1]) && !x.stop);
+    const pending = t ? { id: t[0], question: t[1].question } : null;
+    return send(res, 200, { messages: msgs, mode: "normal", turn_count: msgs.length, shared_token: null, pending });
   }
   if (sm && req.method === "PATCH") {
     const b = JSON.parse((await readBody(req)).toString());
@@ -334,7 +359,7 @@ const server = http.createServer(async (req, res) => {
   }
   if (path === "/chat/stream" && req.method === "POST") {
     const form = formFields(await readBody(req), req.headers["content-type"]);
-    return streamAnswer(req, res, user, form.fields.message || "", Number(form.fields.session_id) || null);
+    return streamAnswer(req, res, user, form.fields.message || "", Number(form.fields.session_id) || null, form.fields.client_id || null);
   }
   // Background translation (doc_translation): each status call moves a job on
   // (queued → 6 more pages → … → done), so a test sees real progress quickly.
