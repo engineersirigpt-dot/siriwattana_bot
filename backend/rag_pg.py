@@ -118,6 +118,9 @@ def _save_cached_embedding_pg(text: str, vector: list[float]) -> None:
 
 
 def embed_pg(text: str) -> list[float]:
+    from rag import EMBED_MAX_CHARS
+
+    text = (text or "")[:EMBED_MAX_CHARS]  # the model's 8,192-token limit (see rag.embed)
     cached = _get_cached_embedding_pg(text)
     if cached is not None:
         return cached

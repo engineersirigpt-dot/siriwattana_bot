@@ -6,7 +6,7 @@ def get_user_by_id_pg(user_id: int) -> dict | None:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT id, username, role
+                SELECT id, username, role, COALESCE(is_disabled, false)
                 FROM users
                 WHERE id = %s
                 """,
@@ -21,6 +21,7 @@ def get_user_by_id_pg(user_id: int) -> dict | None:
         "id": row[0],
         "username": row[1],
         "role": row[2],
+        "is_disabled": bool(row[3]),
     }
 
 

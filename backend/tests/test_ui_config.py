@@ -18,7 +18,7 @@ def test_ui_v5_flag(monkeypatch, mode, users, user, expected):
     monkeypatch.setattr(main, "UI_V5_USERS", users)
     main.app.dependency_overrides[main.current_user] = lambda: user
     try:
-        assert TestClient(main.app).get("/ui/config").json() == {"ui_v5": expected}
+        assert TestClient(main.app).get("/ui/config").json() == {"ui_v5": expected, "role": user["role"]}
     finally:
         main.app.dependency_overrides.pop(main.current_user, None)
 
