@@ -51,6 +51,7 @@ import {
   rememberRole,
   setDraftSource,
   signOut,
+  CONNECTION_LOST_NOTE,
   StreamStartError,
   stopTurn,
   takeDraft,
@@ -1353,7 +1354,7 @@ export default function ClassicChatPage() {
         return;
       } else {
         // the connection dropped mid-answer; the server finishes and saves it
-        appendLastBot("\n\n⚠️ การเชื่อมต่อขาดระหว่างตอบ — ระบบตอบต่อจนจบให้แล้ว เปิดแชทนี้อีกครั้งเพื่อดูคำตอบเต็ม");
+        appendLastBot("\n\n⚠️ " + CONNECTION_LOST_NOTE);
       }
     } finally {
       // Belt-and-suspenders: never leave the trailing bubble stuck "streaming".
