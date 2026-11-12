@@ -574,8 +574,11 @@ def extract_legacy_office_text(file_path: str, target: str) -> str:
         return fallback
     if not soffice:
         return fallback
-    _ensure_dir()
-    work = Path(tempfile.mkdtemp(prefix="legacy_", dir=str(_upload_root())))
+    try:  # a working dir we can't make must not fail the whole answer
+        _ensure_dir()
+        work = Path(tempfile.mkdtemp(prefix="legacy_", dir=str(_upload_root())))
+    except OSError:
+        return fallback
     try:
         with tempfile.TemporaryDirectory(prefix="lo_") as profile:
             subprocess.run(

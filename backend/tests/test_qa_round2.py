@@ -500,3 +500,20 @@ def test_answer_error_text_names_the_cause():
     resp = hx.Response(429, request=req)
     assert "โควตา" in main._answer_error_text(openai.RateLimitError("x", response=resp, body=None))
     assert "ลองใหม่" in main._answer_error_text(ValueError("x"))
+
+
+def test_legacy_office_without_a_work_dir_says_what_to_do(monkeypatch, tmp_path):
+    import tempfile
+
+    import translate_manual
+
+    monkeypatch.setattr(att, "UPLOAD_DIR", tmp_path)
+    (tmp_path / "a.ppt").write_bytes(b"\xd0\xcf\x11\xe0")
+    monkeypatch.setattr(translate_manual, "_find_soffice", lambda: "/usr/bin/soffice")
+
+    def no_dir(*a, **kw):
+        raise OSError("read-only")
+
+    monkeypatch.setattr(tempfile, "mkdtemp", no_dir)
+    text = att.extract_any_text(str(tmp_path / "a.ppt"), "application/vnd.ms-powerpoint", "a.ppt")
+    assert ".pptx" in text and "ไม่สำเร็จ" in text
