@@ -108,6 +108,11 @@ export async function errorMessage(res: Response): Promise<string> {
   return `ทำรายการไม่สำเร็จ (รหัส ${res.status})`;
 }
 
+// The connection dropped mid-answer. The server usually finishes and saves
+// the answer, but not if it restarts (a deploy) at that moment — so no promise.
+export const CONNECTION_LOST_NOTE =
+  "การเชื่อมต่อขาดระหว่างตอบ — ระบบจะพยายามตอบต่อให้จนจบ เปิดแชทนี้อีกครั้งในอีกสักครู่เพื่อดูคำตอบ (ถ้ายังไม่มีคำตอบ ให้ถามใหม่อีกครั้ง)";
+
 // A fetch that never got an answer (offline, connection dropped) → Thai text.
 export function friendlyError(e: unknown): string {
   if (e instanceof TypeError || (e instanceof Error && /fetch|network|load failed/i.test(e.message)))
