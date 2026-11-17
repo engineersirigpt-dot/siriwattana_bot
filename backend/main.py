@@ -2097,6 +2097,115 @@ def _try_linsip_answer(
     }
 
 
+def _priced_jobs_previous(session_id: int | None, user_id: int) -> str:
+    """The most recent estimate question in this chat (one of the last 3 user
+    turns), so a short follow-up ('แล้วเดือนที่แล้วล่ะ') keeps its filters."""
+    if not session_id:
+        return ""
+    try:
+        from chat_pg import get_session_history_pg
+        from priced_jobs import mentions
+
+        hist = get_session_history_pg(session_id=session_id, user_id=user_id, limit=HISTORY_TURNS)
+    except Exception:
+        return ""
+    asked = [m.get("content") or "" for m in (hist or []) if m.get("role") == "user"][-3:]
+    for q in reversed(asked):
+        if mentions(q):
+            return q
+    return ""
+
+
+def _resolve_priced_jobs(question: str, session_id: int | None, user_id: int) -> tuple[dict | None, dict]:
+    """(filters, planner usage) when the question looks up the estimate system
+    ("งานใหม่ที่เคาะราคาแล้ว", "E26110001 ราคาเท่าไหร่", or a short follow-up
+    to one), else (None, {}). Only questions that mention estimates/prices —
+    or short follow-ups to one — reach the small AI planner."""
+    try:
+        import priced_jobs
+    except Exception:
+        return None, {}
+    if not question or not priced_jobs.enabled():
+        return None, {}
+    previous = _priced_jobs_previous(session_id, user_id)
+    if priced_jobs.mentions(question):
+        return priced_jobs.plan(question, previous)
+    if previous and len(question.strip()) <= 80:
+        return priced_jobs.plan(question, previous)
+    return None, {}
+
+
+def _is_priced_jobs_query(question: str, session_id: int | None = None, user: dict | None = None) -> bool:
+    """True for an estimate-system lookup. Answered only from fixed read-only
+    queries the owner opened to everyone (2026-11-17), so — like a job-number
+    lookup — it skips the AI sensitivity classifier (which would block 'ราคา').
+    The hard keyword filter (ราคาทุน, margin, …) still runs."""
+    if not user:
+        return False
+    return _resolve_priced_jobs(question, session_id, user["id"])[0] is not None
+
+
+def _try_priced_jobs_answer(
+    user: dict, question: str, session_id: int | None, mode: str, request: Request
+) -> dict | None:
+    """Answer from the MI estimate system (priced jobs / one estimate). None when
+    it isn't such a question; a clear Thai message when the system can't be read."""
+    import priced_jobs
+
+    p, plan_usage = _resolve_priced_jobs(question, session_id, user["id"])
+    if p is None:
+        return None
+
+    from chat_pg import ensure_session_pg, get_session_history_pg, save_chat_message_pg
+
+    sid, stitle = ensure_session_pg(
+        user_id=user["id"], session_id=session_id, first_question=question, mode=mode,
+    )
+    try:
+        if p.get("doc_id") or p.get("quotation_id"):
+            data = priced_jobs.lookup_doc(p.get("doc_id"), p.get("quotation_id"))
+        else:
+            data = priced_jobs.search(p)
+    except Exception as e:
+        text = ("ขออภัยค่ะ ตอนนี้ดึงข้อมูลจากระบบประเมินราคาไม่สำเร็จ (ระบบอาจไม่ตอบชั่วคราว) "
+                "ลองถามใหม่อีกครั้งในอีกสักครู่ หรือเปิดดูในระบบประเมินราคาโดยตรงค่ะ")
+        mid = save_chat_message_pg(
+            user_id=user["id"], session_id=sid, question=question, answer=text,
+            source="priced_jobs_error", knowledge_id=None, mode=mode,
+            usage=accumulate_usage(plan_usage) if plan_usage else None,  # the planner call was paid
+        )
+        audit_log("priced_jobs_failed", user=user, request=request,
+                  detail={"session_id": sid, "error": f"{type(e).__name__}: {str(e)[:200]}"})
+        return {"answer": text, "source": "priced_jobs_error", "session_id": sid,
+                "session_title": stitle, "message_id": mid}
+
+    context = priced_jobs.to_context(p, data)
+    history = get_session_history_pg(session_id=session_id, user_id=user["id"], limit=HISTORY_TURNS)
+    try:
+        from llm import SYSTEM_PROMPT_PRICED_JOBS
+
+        answer, answer_usage = answer_with_files(
+            question, [], [("ระบบประเมินราคา", context)], history=history,
+            system_prompt=SYSTEM_PROMPT_PRICED_JOBS,
+        )
+    except Exception as e:
+        audit_log("priced_jobs_failed", user=user, request=request,
+                  detail={"session_id": sid, "error": f"answer: {type(e).__name__}: {str(e)[:200]}"})
+        return None  # fall through to the normal pipeline
+
+    usage_row = accumulate_usage(plan_usage, answer_usage, primary_model=(answer_usage or {}).get("model"))
+    mid = save_chat_message_pg(
+        user_id=user["id"], session_id=sid, question=question, answer=answer,
+        source="priced_jobs", knowledge_id=None, mode=mode, usage=usage_row,
+    )
+    audit_log("priced_jobs_lookup", user=user, request=request, detail={
+        "session_id": sid, "message_id": mid, "status": p.get("status"), "doc_id": p.get("doc_id"),
+        "found": len(data.get("rows") or []),
+    })
+    return {"answer": answer, "source": "priced_jobs", "session_id": sid,
+            "session_title": stitle, "message_id": mid}
+
+
 def _get_session_history(conn, session_id: int | None, user_id: int) -> list[dict]:
     if not session_id:
         return []
@@ -2301,7 +2410,8 @@ async def _chat_turn(
     file_scoped = False
     code_limited = False
     pending_scope: str | None = None
-    if question and not _is_linsip_query(question, session_id, user):
+    if question and not _is_linsip_query(question, session_id, user) \
+            and not _is_priced_jobs_query(question, session_id, user):
         classification = classify_sensitivity(question, safety_usages)
         if classification is not None:
             category, reason = classification
@@ -2520,6 +2630,22 @@ async def _chat_turn(
                 session_title=li["session_title"],
                 message_id=li["message_id"],
                 turn_count=_count_session_turns(li["session_id"]),
+                turn_limit=MAX_TURNS_PER_SESSION,
+            )
+
+    # Estimate system ("งานใหม่ที่เคาะราคาแล้ว", "E26110001 ราคาเท่าไหร่") —
+    # fixed read-only queries on MI2_ESTIMATE, answered from that data.
+    if question and not files and use_postgres_auth():
+        pj = await run_in_threadpool(_try_priced_jobs_answer, user, question, session_id, mode, request)
+        if pj is not None:
+            return ChatResponse(
+                answer=pj["answer"],
+                source=pj["source"],
+                similarity=None,
+                session_id=pj["session_id"],
+                session_title=pj["session_title"],
+                message_id=pj["message_id"],
+                turn_count=_count_session_turns(pj["session_id"]),
                 turn_limit=MAX_TURNS_PER_SESSION,
             )
 
@@ -3498,7 +3624,8 @@ async def chat_stream(
                 yield ev(_memory_done_event(mr))
                 return
             flagged = None
-            if not keyword_hit and not _is_linsip_query(question, session_id, user):
+            if not keyword_hit and not _is_linsip_query(question, session_id, user) \
+                    and not _is_priced_jobs_query(question, session_id, user):
                 flagged = classify_sensitivity(question, safety_usages)
             decision = "denied" if flagged is None else _file_scope_decision(
                 user, question, session_id, mode, flagged[0], request, usages=safety_usages
@@ -3683,6 +3810,23 @@ async def chat_stream(
                     "turn_limit": MAX_TURNS_PER_SESSION,
                 })
                 return
+
+            # 3.5.5) Estimate system — "งานใหม่ที่เคาะราคาแล้ว", "E26110001 ราคา
+            #        เท่าไหร่": fixed read-only queries on MI2_ESTIMATE, answered
+            #        from that data. Non-streaming — emitted as one delta.
+            if use_postgres_auth():
+                pj = _try_priced_jobs_answer(user, question, session_id, mode, request)
+                if pj is not None:
+                    yield ev({"type": "delta", "v": pj["answer"]})
+                    yield ev({
+                        "type": "done", "source": pj["source"],
+                        "session_id": pj["session_id"],
+                        "session_title": pj["session_title"],
+                        "message_id": pj["message_id"],
+                        "turn_count": _count_session_turns(pj["session_id"]),
+                        "turn_limit": MAX_TURNS_PER_SESSION,
+                    })
+                    return
 
             # 3.54) Agent router (AGENT_V1_MODE / CODE_INTERPRETER_MODE flags) —
             #       the model decides whether to search the web / read links /

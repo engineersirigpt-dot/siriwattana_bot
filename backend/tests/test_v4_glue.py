@@ -50,6 +50,8 @@ def pipe(monkeypatch):
     monkeypatch.setattr(memory, "answer_from_memory", scoped_answer)
     monkeypatch.setattr(main, "_is_linsip_query", lambda *a: False)
     monkeypatch.setattr(main, "_try_linsip_answer", lambda *a, **kw: None)
+    monkeypatch.setattr(main, "_is_priced_jobs_query", lambda *a: False)
+    monkeypatch.setattr(main, "_try_priced_jobs_answer", lambda *a, **kw: None)
     monkeypatch.setattr(main, "_try_url_answer", lambda *a, **kw: None)
     monkeypatch.setattr(main, "_try_web_search_answer", lambda *a, **kw: None)
     monkeypatch.setattr(main, "_agent_enabled", lambda *a: False)
