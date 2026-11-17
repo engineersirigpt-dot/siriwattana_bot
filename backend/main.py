@@ -1141,11 +1141,19 @@ _COMPANY_FACT_NOTE = (
     "กรุณายืนยันกับฝ่ายที่เกี่ยวข้อง (เช่น HR / หัวหน้างาน / ฝ่ายขาย) ก่อนนำไปใช้อ้างอิงค่ะ*"
 )
 
+# Off by default (2026-11-17): the owner asked to drop the note. It was also
+# tacked onto answers that only asked the user a question back ("งานใหม่ที่
+# เคาะราคาแล้ว" → "ขอรายละเอียดเพิ่ม…"), where it made no sense. The answer
+# prompts still forbid inventing company facts. COMPANY_FACT_NOTE=1 brings it back.
+COMPANY_FACT_NOTE_ENABLED = os.getenv("COMPANY_FACT_NOTE", "0").strip().lower() in {"1", "true", "yes", "on"}
+
 
 def _company_fact_note(question: str, source: str) -> str:
     """Return an honesty note for an UNGROUNDED answer to a company-specific
     factual question, else empty. Grounded answers (brain/rag/web/url/files) and
-    non-company questions get nothing."""
+    non-company questions get nothing. Off unless COMPANY_FACT_NOTE is set."""
+    if not COMPANY_FACT_NOTE_ENABLED:
+        return ""
     if source not in _UNGROUNDED_SOURCES:
         return ""
     if not question or not _COMPANY_FACT_RE.search(question):
