@@ -216,6 +216,10 @@ def test_offers_and_promises_are_trimmed_from_data_answers():
     assert got == "มีใบแจ้งซ่อมค้าง 140 ใบ\n- MR1 ..."
     plain = "สัปดาห์นี้มีงานต้องส่ง 229 งาน\n| เลขงาน | ชื่องาน |"
     assert tidy(plain) == plain
+    # prod 2026-11-18: an offer phrased with verbs the first list didn't have
+    got = tidy("เดือนนี้ยังไม่มีงานเคาะราคาเลยค่ะ\n- ระบบระบุว่าพบทั้งหมด 0 งาน\n"
+               "หากต้องการดูย้อนหลังมากกว่านี้หรือเปลี่ยนช่วงวันที่ สามารถระบุช่วงใหม่เพื่อให้ดึงข้อมูลเพิ่มเติมได้ค่ะ")
+    assert got == "เดือนนี้ยังไม่มีงานเคาะราคาเลยค่ะ\n- ระบบระบุว่าพบทั้งหมด 0 งาน"
 
 
 def test_a_record_copied_as_one_piped_bullet_is_split():
