@@ -2148,13 +2148,26 @@ def _fix_tables(text: str) -> str:
     return "\n".join(out)
 
 
+# Notes written for the model, copied into the answer — "(ระบบจะแนบตารางรายละเอียด
+# รายการต่อท้ายคำตอบให้เอง)" above the table (prod, 2026-11-18). A parenthesis with
+# one goes, and so does a short line that is only that note.
+_INTERNAL_WORDS = r"ระบบจะแนบตาราง|ข้อมูลประกอบด้านล่าง|เป็นข้อมูลภายใน|ห้ามเขียนตาราง"
+_INTERNAL_PAREN = re.compile(r"[ \t]*[(（][^()（）\n]*(?:" + _INTERNAL_WORDS + r")[^()（）\n]*[)）]")
+_INTERNAL_RE = re.compile(_INTERNAL_WORDS)
+
+
+def _drop_internal_notes(text: str) -> str:
+    text = _INTERNAL_PAREN.sub("", text or "")
+    return "\n".join(ln for ln in text.split("\n") if not (_INTERNAL_RE.search(ln) and len(ln.strip()) < 100))
+
+
 def _tidy_data_answer(answer: str) -> str:
     """Answers built from MI data must not end with offers ('หากต้องการ… แจ้งได้')
     or promises to follow up — the bot can't — and 'ครับ/ค่ะ' reads oddly. Only
     the last 6 lines are touched; facts before an offer on the same line stay.
     A data record copied as one '… | … | …' bullet is split into sub-bullets,
     and a closing 'ข้อมูลอ้างอิงจาก…' line (the source is in the first sentence) goes."""
-    lines = "\n".join(_unpipe(ln) for ln in (answer or "").rstrip().split("\n")).split("\n")
+    lines = "\n".join(_unpipe(ln) for ln in _drop_internal_notes(answer).rstrip().split("\n")).split("\n")
     for i in range(len(lines) - 1, max(-1, len(lines) - 7), -1):
         if not _OFFER.search(lines[i]):
             continue
