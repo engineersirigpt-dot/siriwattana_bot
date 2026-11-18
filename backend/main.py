@@ -2161,6 +2161,9 @@ def _try_priced_jobs_answer(
     sid, stitle = ensure_session_pg(
         user_id=user["id"], session_id=session_id, first_question=question, mode=mode,
     )
+    import time as _time
+
+    t0 = _time.monotonic()
     try:
         if p.get("doc_id") or p.get("quotation_id"):
             data = priced_jobs.lookup_doc(p.get("doc_id"), p.get("quotation_id"))
@@ -2179,6 +2182,7 @@ def _try_priced_jobs_answer(
         return {"answer": text, "source": "priced_jobs_error", "session_id": sid,
                 "session_title": stitle, "message_id": mid}
 
+    db_ms = round((_time.monotonic() - t0) * 1000)
     context = priced_jobs.to_context(p, data)
     history = get_session_history_pg(session_id=session_id, user_id=user["id"], limit=HISTORY_TURNS)
     try:
@@ -2200,10 +2204,137 @@ def _try_priced_jobs_answer(
     )
     audit_log("priced_jobs_lookup", user=user, request=request, detail={
         "session_id": sid, "message_id": mid, "status": p.get("status"), "doc_id": p.get("doc_id"),
-        "found": len(data.get("rows") or []),
+        "found": len(data.get("rows") or []), "db_ms": db_ms,
     })
     return {"answer": answer, "source": "priced_jobs", "session_id": sid,
             "session_title": stitle, "message_id": mid}
+
+
+def _recent_user_questions(session_id: int | None, user_id: int, n: int) -> list[str]:
+    if not session_id:
+        return []
+    try:
+        from chat_pg import get_session_history_pg
+
+        hist = get_session_history_pg(session_id=session_id, user_id=user_id, limit=HISTORY_TURNS)
+    except Exception:
+        return []
+    return [m.get("content") or "" for m in (hist or []) if m.get("role") == "user"][-n:]
+
+
+def _factory_job(question: str, session_id: int | None, user_id: int) -> str | None:
+    """The job this question is about: a number in it (J82602753 / งาน 26110209),
+    or — for a follow-up ('ส่งไปกี่ชิ้นแล้ว') — one from the last 2 questions."""
+    import factory
+
+    job = factory.extract_job(question)
+    if job:
+        return job
+    if factory.looks_like_job_followup(question):
+        for q in reversed(_recent_user_questions(session_id, user_id, 2)):
+            job = factory.extract_job(q)
+            if job:
+                return job
+    return None
+
+
+def _resolve_factory(question: str, session_id: int | None, user_id: int) -> tuple[str, object, dict]:
+    """('job', job no., {}) | ('ops', plan, planner usage) | ('', None, {}).
+    Ops questions (due dates, repairs, QC) go through a small AI planner, but
+    only when they mention those topics — or are a short follow-up to one."""
+    try:
+        import factory
+    except Exception:
+        return "", None, {}
+    if not question or not factory.enabled():
+        return "", None, {}
+    job = _factory_job(question, session_id, user_id)
+    if job:
+        return "job", job, {}
+    previous = next((q for q in reversed(_recent_user_questions(session_id, user_id, 3)) if factory.mentions_ops(q)), "")
+    if factory.mentions_ops(question) or (previous and len(question.strip()) <= 80):
+        p, usage = factory.plan(question, previous)
+        if p is not None:
+            return "ops", p, usage
+    return "", None, {}
+
+
+def _is_factory_query(question: str, session_id: int | None = None, user: dict | None = None) -> bool:
+    """A lookup in the live MI job system (job status / delivery / production /
+    due dates / repairs / QC). Answered only from fixed read-only queries the
+    owner opened to everyone (2026-11-17), so — like linsip — it skips the AI
+    sensitivity classifier (customer names would trip it); the keyword filter still runs."""
+    if not user:
+        return False
+    return bool(_resolve_factory(question, session_id, user["id"])[0])
+
+
+def _try_factory_answer(
+    user: dict, question: str, session_id: int | None, mode: str, request: Request
+) -> dict | None:
+    """Answer from the live MI job system. None when it isn't such a question;
+    a clear Thai message when MI can't be read (never a guess)."""
+    import time as _time
+
+    import factory
+
+    kind, target, plan_usage = _resolve_factory(question, session_id, user["id"])
+    if not kind:
+        return None
+
+    from chat_pg import ensure_session_pg, get_session_history_pg, save_chat_message_pg
+
+    sid, stitle = ensure_session_pg(user_id=user["id"], session_id=session_id, first_question=question, mode=mode)
+    t0 = _time.monotonic()
+    try:
+        if kind == "job":
+            data = factory.job_overview(target)
+            context = factory.job_context(data)
+        else:
+            data = factory.run_plan(target)
+            context = factory.ops_context(target, data)
+    except Exception as e:
+        text = ("ขออภัยค่ะ ตอนนี้ดึงข้อมูลจากระบบงาน MI ไม่สำเร็จ (ระบบอาจไม่ตอบชั่วคราว) "
+                "ลองถามใหม่อีกครั้งในอีกสักครู่ หรือเปิดดูในระบบ MI โดยตรงค่ะ")
+        mid = save_chat_message_pg(user_id=user["id"], session_id=sid, question=question, answer=text,
+                                   source="factory_error", knowledge_id=None, mode=mode,
+                                   usage=accumulate_usage(plan_usage) if plan_usage else None)
+        audit_log("factory_failed", user=user, request=request, detail={
+            "session_id": sid, "kind": kind, "error": f"{type(e).__name__}: {str(e)[:200]}",
+            "db_ms": round((_time.monotonic() - t0) * 1000)})
+        return {"answer": text, "source": "factory_error", "session_id": sid, "session_title": stitle,
+                "message_id": mid}
+    db_ms = round((_time.monotonic() - t0) * 1000)
+
+    docs = [("ระบบงาน MI", context)]
+    if kind == "job" and str(target).upper().startswith("J"):
+        # the WI page adds the job's specs (glue, paper, AE…) when linsip is on
+        try:
+            from linsip import LINSIP_ENABLED, fetch_job_wi
+
+            wi = fetch_job_wi(str(target).split("-")[0]) if LINSIP_ENABLED else None
+            if wi:
+                docs.append(wi)
+        except Exception:
+            pass
+    history = get_session_history_pg(session_id=session_id, user_id=user["id"], limit=HISTORY_TURNS)
+    try:
+        from llm import SYSTEM_PROMPT_FACTORY
+
+        answer, answer_usage = answer_with_files(question, [], docs, history=history,
+                                                 system_prompt=SYSTEM_PROMPT_FACTORY)
+    except Exception as e:
+        audit_log("factory_failed", user=user, request=request,
+                  detail={"session_id": sid, "kind": kind, "error": f"answer: {type(e).__name__}: {str(e)[:200]}"})
+        return None
+    source = "factory_job" if kind == "job" else "factory"
+    mid = save_chat_message_pg(user_id=user["id"], session_id=sid, question=question, answer=answer, source=source,
+                               knowledge_id=None, mode=mode, usage=accumulate_usage(
+                                   plan_usage, answer_usage, primary_model=(answer_usage or {}).get("model")))
+    audit_log("factory_lookup", user=user, request=request, detail={
+        "session_id": sid, "message_id": mid, "kind": target["kind"] if kind == "ops" else "job",
+        "job": target if kind == "job" else None, "db_ms": db_ms})
+    return {"answer": answer, "source": source, "session_id": sid, "session_title": stitle, "message_id": mid}
 
 
 def _get_session_history(conn, session_id: int | None, user_id: int) -> list[dict]:
@@ -2411,7 +2542,8 @@ async def _chat_turn(
     code_limited = False
     pending_scope: str | None = None
     if question and not _is_linsip_query(question, session_id, user) \
-            and not _is_priced_jobs_query(question, session_id, user):
+            and not _is_priced_jobs_query(question, session_id, user) \
+            and not _is_factory_query(question, session_id, user):
         classification = classify_sensitivity(question, safety_usages)
         if classification is not None:
             category, reason = classification
@@ -2616,6 +2748,23 @@ async def _chat_turn(
             turn_count=_count_session_turns(res["session_id"]),
             turn_limit=MAX_TURNS_PER_SESSION,
         )
+
+    # Live MI job system (on .19): a job number → status / production / delivery
+    # / QC (plus its WI page when linsip is on); due dates, repairs, QC overviews.
+    # When it's off or not such a question, the linsip WI lookup below runs as before.
+    if question and not files and use_postgres_auth():
+        fa = await run_in_threadpool(_try_factory_answer, user, question, session_id, mode, request)
+        if fa is not None:
+            return ChatResponse(
+                answer=fa["answer"],
+                source=fa["source"],
+                similarity=None,
+                session_id=fa["session_id"],
+                session_title=fa["session_title"],
+                message_id=fa["message_id"],
+                turn_count=_count_session_turns(fa["session_id"]),
+                turn_limit=MAX_TURNS_PER_SESSION,
+            )
 
     # linsip job lookup — the user mentioned a job number (e.g. J12600091).
     # Fetch that job's WI page and answer from it. Runs before URL/web search.
@@ -3625,7 +3774,8 @@ async def chat_stream(
                 return
             flagged = None
             if not keyword_hit and not _is_linsip_query(question, session_id, user) \
-                    and not _is_priced_jobs_query(question, session_id, user):
+                    and not _is_priced_jobs_query(question, session_id, user) \
+                    and not _is_factory_query(question, session_id, user):
                 flagged = classify_sensitivity(question, safety_usages)
             decision = "denied" if flagged is None else _file_scope_decision(
                 user, question, session_id, mode, flagged[0], request, usages=safety_usages
@@ -3794,6 +3944,22 @@ async def chat_stream(
                     done_evt["attachments"] = [res["attachment"]]
                 yield ev(done_evt)
                 return
+
+            # 3.5.35) Live MI job system (on .19): job status / production /
+            #         delivery / QC, due dates, repairs. Non-streaming — one delta.
+            if use_postgres_auth():
+                fa = _try_factory_answer(user, question, session_id, mode, request)
+                if fa is not None:
+                    yield ev({"type": "delta", "v": fa["answer"]})
+                    yield ev({
+                        "type": "done", "source": fa["source"],
+                        "session_id": fa["session_id"],
+                        "session_title": fa["session_title"],
+                        "message_id": fa["message_id"],
+                        "turn_count": _count_session_turns(fa["session_id"]),
+                        "turn_limit": MAX_TURNS_PER_SESSION,
+                    })
+                    return
 
             # 3.5.4) linsip job lookup — the user mentioned a job number
             #        (e.g. J12600091). Fetch that job's WI page and answer from

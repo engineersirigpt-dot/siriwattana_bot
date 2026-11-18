@@ -948,6 +948,9 @@ const SOURCE_LABELS: Record<string, string> = {
   document: "Document Engine (เอกสาร)",
   priced_jobs: "ระบบประเมินราคา (งานเคาะราคา)",
   priced_jobs_error: "ระบบประเมินราคา (ดึงข้อมูลไม่สำเร็จ)",
+  factory_job: "ระบบงาน MI (สถานะงาน)",
+  factory: "ระบบงาน MI (กำหนดส่ง/ซ่อม/QC)",
+  factory_error: "ระบบงาน MI (ดึงข้อมูลไม่สำเร็จ)",
 };
 
 function MetricCard({

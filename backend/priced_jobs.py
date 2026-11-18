@@ -240,8 +240,13 @@ def search(p: dict) -> dict:
     rows_sql, totals_sql, params = build_search(p)
     rows = _query(rows_sql, params)
     tot = (_query(totals_sql, params) or [{}])[0]
-    return {"rows": rows, "count": int(tot.get("n") or 0), "total": tot.get("total"),
-            "priced": int(tot.get("priced") or 0)}
+    out = {"rows": rows, "count": int(tot.get("n") or 0), "total": tot.get("total"),
+           "priced": int(tot.get("priced") or 0)}
+    if not out["count"] and (p.get("date_from") or p.get("date_to")):
+        # nothing in that range: give the newest matching ones instead of a bare "0"
+        latest_sql, _, latest_params = build_search(dict(p, date_from=None, date_to=None))
+        out["latest"] = _query(latest_sql.replace(f"TOP {MAX_ROWS} ", "TOP 3 ", 1), latest_params)
+    return out
 
 
 def lookup_doc(doc_id: str | None, quotation_id: str | None) -> dict:
@@ -336,4 +341,7 @@ def to_context(p: dict, data: dict) -> str:
             lines.append(f"(แสดงรายละเอียด {len(data['rows'])} งานล่าสุด)")
         lines.append("รายการ:")
         lines += [_row_text(r) for r in data["rows"]]
+    elif data.get("latest"):
+        lines.append("งานล่าสุดที่ตรงสถานะ/คำค้นนี้ (อยู่นอกช่วงวันที่ที่ถาม):")
+        lines += [_row_text(r) for r in data["latest"]]
     return "\n".join(lines)
