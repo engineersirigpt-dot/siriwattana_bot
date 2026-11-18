@@ -261,7 +261,7 @@ def test_priced_jobs_empty_range_gives_the_latest(monkeypatch):
                                                      "estimate_status": "approve", "mid_qty": 2000,
                                                      "mid_total_ex_vat": Decimal("31947.09")}]
 
-    monkeypatch.setattr(pj, "_query", fake_query)
+    monkeypatch.setattr(pj, "_run", lambda sqls: [fake_query(s) for s in sqls])   # one session, three queries
     p = {"status": "approve", "date_from": dt.date(2026, 11, 16), "date_to": dt.date(2026, 11, 18), "keyword": None}
     data = pj.search(p)
     assert data["count"] == 0 and data["latest"][0]["doc_id"] == "E26110001"

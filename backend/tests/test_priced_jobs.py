@@ -76,27 +76,35 @@ def test_date_anchors_for_the_planner():
 
 # ── SQL ─────────────────────────────────────────────────────────────────────
 
-def test_search_sql_is_parameterised_and_leaves_out_test_rows():
+def test_search_sql_reads_the_live_server_and_leaves_out_test_rows():
     p = {"status": "approve", "date_from": dt.date(2026, 11, 16), "date_to": dt.date(2026, 11, 17),
          "keyword": "AROMA'; DROP TABLE x--"}
-    rows_sql, totals_sql, params = pj.build_search(p)
-    assert "estimate_status = %s" in rows_sql and "approved_at >= %s" in rows_sql and "approved_at < %s" in rows_sql
-    assert "NOT IN (%s)" in rows_sql and "%%test%%" in rows_sql and "%%เทส%%" in rows_sql
-    assert params[0] == "approve" and "C9999998" in params
-    assert "2026-11-18" in params                       # date_to is inclusive
-    assert "%AROMA'; DROP TABLE x--%" in params        # the keyword only ever travels as a parameter
+    rows_sql, totals_sql = pj.build_search(p)
     for sql in (rows_sql, totals_sql):
-        assert sql.count("%s") == len(params)
-        filled = sql % tuple("'v'" for _ in params)     # what pymssql does with the quoted params
-        assert "N'%test%'" in filled and "DROP" not in filled
+        # fully qualified: runs on .19 through OPENQUERY (the .10 copy is the test system)
+        assert "FROM MI2_ESTIMATE.dbo.tb_rfq WITH (NOLOCK)" in sql
+        assert "estimate_status = 'approve'" in sql
+        assert "approved_at >= '2026-11-16'" in sql and "approved_at < '2026-11-18'" in sql   # date_to inclusive
+        assert "customer_id NOT IN ('C9999998')" in sql
+        assert "N'%test%'" in sql and "N'%เทส%'" in sql
+        # OPENQUERY takes no parameters: the keyword is reduced to safe characters
+        assert "N'%AROMA DROP TABLE x--%'" in sql and "';" not in sql
     assert rows_sql.startswith(f"SELECT TOP {pj.MAX_ROWS} ")
     assert "contact" not in rows_sql and "ae_emp_name" not in rows_sql   # no personal columns
 
 
 def test_any_status_list_excludes_drafts():
-    rows_sql, _, params = pj.build_search({"status": "any"})
+    rows_sql, _ = pj.build_search({"status": "any"})
     assert "estimate_status IN ('approve', 'pending', 'reject', 'over_limit_approve')" in rows_sql
-    assert rows_sql.count("%s") == len(params) >= 1
+    assert pj.build_search({"status": "weird'; --"})[0] == rows_sql     # unknown status → any
+
+
+def test_doc_lookup_validates_numbers(monkeypatch):
+    seen = []
+    monkeypatch.setattr(pj, "_run", lambda sqls: seen.extend(sqls) or [[] for _ in sqls])
+    assert pj.lookup_doc("E2611'; DROP", None) == {"rows": [], "quotes": []} and seen == []
+    pj.lookup_doc("e26110334", None)
+    assert "WHERE doc_id = 'E26110334'" in seen[0] and "FROM MI2_ESTIMATE.dbo.tb_quotation" in seen[1]
 
 
 # ── context for the answer model ────────────────────────────────────────────
