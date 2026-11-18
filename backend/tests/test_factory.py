@@ -218,6 +218,26 @@ def test_offers_and_promises_are_trimmed_from_data_answers():
     assert tidy(plain) == plain
 
 
+def test_a_record_copied_as_one_piped_bullet_is_split():
+    # the estimate answer on prod, 2026-11-18
+    got = main._tidy_data_answer(
+        "มีงานเคาะราคาแล้วเดือนนี้ 1 งาน รวมมูลค่า 31,947.09 บาท (ราคาก่อน VAT)\n\n"
+        "รายละเอียดจากระบบประเมินราคา:\n"
+        "- E26110001 | กล่อง AROMA OIL แบบปลอกสวม | ลูกค้า: ศิริ แลบอราทอรีส์ | จำนวนที่ขอราคา: 2,000 ชิ้น | "
+        "ราคา: 31,947.09 บาท (ก่อน VAT ที่จำนวน 2,000 ชิ้น) | อนุมัติ: 2026-11-06 14:52\n\n"
+        "ข้อมูลอ้างอิงจากระบบประเมินราคา ช่วงวันที่ 2026-11-01 ถึง 2026-11-18 โดยแสดงเฉพาะรายการล่าสุดตามเงื่อนไขดังกล่าว")
+    assert got.endswith(
+        "- **E26110001 กล่อง AROMA OIL แบบปลอกสวม**\n"
+        "  - ลูกค้า: ศิริ แลบอราทอรีส์\n"
+        "  - จำนวนที่ขอราคา: 2,000 ชิ้น\n"
+        "  - ราคา: 31,947.09 บาท (ก่อน VAT ที่จำนวน 2,000 ชิ้น)\n"
+        "  - อนุมัติ: 2026-11-06 14:52")
+    assert "ข้อมูลอ้างอิงจาก" not in got and " | " not in got
+    table = "สัปดาห์นี้ 2 งาน\n\n| เลขที่ | ชื่องาน | จำนวน |\n|---|---|---|\n| E1 | กล่อง | 100 |\n| E2 | ซอง | 50 |"
+    assert main._tidy_data_answer(table) == table              # real tables stay as they are
+    assert main._tidy_data_answer("- ส่งแล้ว 2,350 | เหลือ 0") == "- ส่งแล้ว 2,350 | เหลือ 0"   # one bar: left alone
+
+
 def test_off_switch(monkeypatch):
     import mi_auth
 

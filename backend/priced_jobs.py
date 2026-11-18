@@ -293,14 +293,21 @@ def _row_text(r: dict) -> str:
     else:
         price_s = "ยังไม่มีราคา"
     status = STATUS_TH.get(str(r.get("estimate_status") or ""), r.get("estimate_status") or "-")
-    return (
-        f"- {r.get('doc_id')} | {r.get('estimate_name') or '-'} | ลูกค้า: {r.get('customer_name') or '-'} "
-        f"({r.get('customer_id') or '-'}) | ทีมขาย: {r.get('ae_team_name') or '-'} | สถานะ: {status} | "
-        f"จำนวนที่ขอราคา: {r.get('qty_list') or '-'} | ราคา: {price_s} | งานพิมพ์: {r.get('print_type') or '-'} | "
-        f"แบบกล่อง: {r.get('box_type') or '-'} | ประกบลูกฟูก: {r.get('component_type') or '-'} | "
-        f"เครดิต: {r.get('credit_term') or '-'} | วันที่ประเมิน: {_when(r.get('estimate_date'))} | "
-        f"ส่งขออนุมัติ: {_when(r.get('request_for_approve_at'))} | อนุมัติ: {_when(r.get('approved_at'))}"
-    )
+    # one labelled field per line: a one-line "a | b | c" record got copied
+    # into the answer as is (prod, 2026-11-18)
+    return "\n".join([
+        f"[ใบประเมิน {r.get('doc_id')}] {r.get('estimate_name') or '-'}",
+        f"  ลูกค้า: {r.get('customer_name') or '-'} ({r.get('customer_id') or '-'})",
+        f"  ทีมขาย: {r.get('ae_team_name') or '-'}",
+        f"  สถานะ: {status}",
+        f"  จำนวนที่ขอราคา: {r.get('qty_list') or '-'}",
+        f"  ราคา: {price_s}",
+        f"  งานพิมพ์: {r.get('print_type') or '-'} · แบบกล่อง: {r.get('box_type') or '-'} · "
+        f"ประกบลูกฟูก: {r.get('component_type') or '-'}",
+        f"  เครดิต: {r.get('credit_term') or '-'}",
+        f"  วันที่ประเมิน: {_when(r.get('estimate_date'))} · ส่งขออนุมัติ: {_when(r.get('request_for_approve_at'))}"
+        f" · อนุมัติ: {_when(r.get('approved_at'))}",
+    ])
 
 
 def describe_filters(p: dict) -> str:
