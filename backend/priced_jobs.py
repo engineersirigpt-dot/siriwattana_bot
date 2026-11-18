@@ -1,14 +1,15 @@
 """Priced jobs ("งานเคาะราคา") — read-only lookups in the MI estimate system.
 
-Source: MI2_ESTIMATE.dbo.tb_rfq — one row per estimate request (doc_id E + 8
-digits, e.g. E26110001). estimate_status: approve (= "เคาะราคาแล้ว"), pending
-(waiting for approval), reject, draft. Quotations (QE…) hang off it by doc_id.
+Source: MI2_ESTIMATE.dbo.tb_rfq on the LIVE MI server 192.168.5.19 — one row
+per estimate request (doc_id E + 8 digits, e.g. E26110334). estimate_status:
+approve (= "เคาะราคาแล้ว"), pending (waiting for approval), reject, draft.
+Quotations (QE…) hang off it by doc_id.
 
-Only fixed, parameterised SELECTs on a few non-personal columns; nothing is
-ever written. Owner decision 2026-11-17: every signed-in user may ask, prices
-included. Test rows (test customer, "test"/"เทส" in the name) are left out.
-
-Uses the MI login connection settings (mi_auth). PRICED_JOBS_MODE=off disables it.
+Only fixed SELECTs on a few non-personal columns, through factory.session()
+(OPENQUERY via the MI login server's linked server, or a direct .19 account);
+nothing is ever written. Owner decision 2026-11-17: every signed-in user may
+ask, prices included. Test rows (test customer, "test"/"เทส" in the name) are
+left out. PRICED_JOBS_MODE=off disables it.
 """
 from __future__ import annotations
 
@@ -44,6 +45,8 @@ TRIGGER_RE = re.compile(
 def enabled() -> bool:
     if PRICED_JOBS_MODE in {"off", "0", "false", "no"}:
         return False
+    if os.getenv("FACTORY_DB_SERVER", "").strip():
+        return True
     try:
         from mi_auth import mi_enabled
     except Exception:
@@ -170,21 +173,23 @@ def plan(question: str, previous: str = "") -> tuple[dict | None, dict]:
 
 
 # ── database (fixed SELECTs only) ──────────────────────────────────────────
+# The LIVE estimate system is on 192.168.5.19. The MI2_ESTIMATE on the MI login
+# server (.10) is the test copy (E26110001…E26110011, mostly "Test" rows) —
+# the first version read that one by mistake (found 2026-11-18). Queries now go
+# through factory.session(): OPENQUERY over the linked server to .19, or a
+# direct .19 connection once FACTORY_DB_SERVER is set. OPENQUERY takes no
+# parameters, so every value below is validated or reduced to safe characters.
 
-def _query(sql: str, params: tuple = ()) -> list[dict]:
-    import pymssql
+_DB = PRICED_JOBS_DB if re.fullmatch(r"[A-Za-z0-9_]{1,64}", PRICED_JOBS_DB) else "MI2_ESTIMATE"
+_RFQ = f"{_DB}.dbo.tb_rfq"
+_QUOTE = f"{_DB}.dbo.tb_quotation"
 
-    from mi_auth import MI_DB_PASSWORD, MI_DB_PORT, MI_DB_SERVER, MI_DB_USER
 
-    conn = pymssql.connect(server=MI_DB_SERVER, port=MI_DB_PORT, user=MI_DB_USER, password=MI_DB_PASSWORD,
-                           database=PRICED_JOBS_DB, login_timeout=10, timeout=_DB_TIMEOUT, charset="UTF-8")
-    try:
-        cur = conn.cursor(as_dict=True)
-        cur.execute("SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED")
-        cur.execute(sql, params)
-        return list(cur.fetchall())
-    finally:
-        conn.close()
+def _run(sqls: list[str]) -> list[list[dict]]:
+    import factory
+
+    with factory.session() as s:
+        return [s.run(q) for q in sqls]
 
 
 _COLS = ("doc_id, estimate_name, customer_id, customer_name, ae_team_name, estimate_status, estimate_date, "
@@ -195,75 +200,77 @@ _DATE_COL = {"approve": "approved_at", "pending": "request_for_approve_at", "rej
              "draft": "created_at", "any": "COALESCE(approved_at, request_for_approve_at, created_at)"}
 
 
-def _not_test_sql() -> tuple[str, tuple]:
-    # always at least one parameter: pymssql only turns %% into % when params are given
-    ids = TEST_CUSTOMERS or ("__none__",)
-    marks = ", ".join(["%s"] * len(ids))
-    return (f"customer_id NOT IN ({marks}) AND estimate_name NOT LIKE N'%%test%%' "
-            f"AND estimate_name NOT LIKE N'%%เทส%%'"), ids
+def _not_test_sql() -> str:
+    ids = [c for c in TEST_CUSTOMERS if re.fullmatch(r"[A-Za-z0-9_\-]{1,20}", c)]
+    parts = [f"customer_id NOT IN ({', '.join(repr(c) for c in ids)})"] if ids else []
+    parts += ["estimate_name NOT LIKE N'%test%'", "estimate_name NOT LIKE N'%เทส%'"]
+    return " AND ".join(parts)
 
 
-def build_search(p: dict) -> tuple[str, str, tuple]:
-    """(rows SQL, totals SQL, params) for a list question."""
+def build_search(p: dict) -> tuple[str, str]:
+    """(rows SQL, totals SQL) for a list question — values inlined, all validated."""
+    import factory
+
     status = p.get("status") or "any"
+    if status not in _DATE_COL:
+        status = "any"
     date_col = _DATE_COL[status]
     where = ["ISNULL(is_deleted, 0) = 0"]
-    params: list = []
     if status == "any":
         where.append("estimate_status IN ('approve', 'pending', 'reject', 'over_limit_approve')")
     else:
-        where.append("estimate_status = %s")
-        params.append(status)
-    nt_sql, nt_params = _not_test_sql()
-    where.append(nt_sql)
-    params += list(nt_params)
-    if p.get("date_from"):
-        where.append(f"{date_col} >= %s")
-        params.append(p["date_from"].isoformat())
-    if p.get("date_to"):
-        where.append(f"{date_col} < %s")
-        params.append((p["date_to"] + dt.timedelta(days=1)).isoformat())
-    if p.get("keyword"):
-        where.append("(estimate_name LIKE %s OR customer_name LIKE %s OR ae_team_name LIKE %s OR customer_id = %s)")
-        like = f"%{p['keyword']}%"
-        params += [like, like, like, p["keyword"]]
+        where.append(f"estimate_status = '{status}'")
+    where.append(_not_test_sql())
+    if isinstance(p.get("date_from"), dt.date):
+        where.append(f"{date_col} >= '{p['date_from'].isoformat()}'")
+    if isinstance(p.get("date_to"), dt.date):
+        where.append(f"{date_col} < '{(p['date_to'] + dt.timedelta(days=1)).isoformat()}'")
+    kw = factory.safe_keyword(p.get("keyword"))
+    if kw:
+        where.append(f"(estimate_name LIKE N'%{kw}%' OR customer_name LIKE N'%{kw}%' "
+                     f"OR ae_team_name LIKE N'%{kw}%' OR customer_id = N'{kw}')")
     w = " AND ".join(where)
-    rows_sql = (f"SELECT TOP {MAX_ROWS} {_COLS} FROM dbo.tb_rfq WITH (NOLOCK) WHERE {w} "
+    rows_sql = (f"SELECT TOP {MAX_ROWS} {_COLS} FROM {_RFQ} WITH (NOLOCK) WHERE {w} "
                 f"ORDER BY {date_col} DESC")
     totals_sql = (f"SELECT COUNT(*) AS n, SUM(CASE WHEN mid_total_ex_vat > 0 THEN mid_total_ex_vat END) AS total, "
                   f"SUM(CASE WHEN mid_total_ex_vat > 0 THEN 1 ELSE 0 END) AS priced "
-                  f"FROM dbo.tb_rfq WITH (NOLOCK) WHERE {w}")
-    return rows_sql, totals_sql, tuple(params)
+                  f"FROM {_RFQ} WITH (NOLOCK) WHERE {w}")
+    return rows_sql, totals_sql
 
 
 def search(p: dict) -> dict:
-    rows_sql, totals_sql, params = build_search(p)
-    rows = _query(rows_sql, params)
-    tot = (_query(totals_sql, params) or [{}])[0]
+    rows_sql, totals_sql = build_search(p)
+    sqls = [rows_sql, totals_sql]
+    if p.get("date_from") or p.get("date_to"):
+        # in case nothing is in that range: the newest matching ones instead of a bare "0"
+        latest_sql, _ = build_search(dict(p, date_from=None, date_to=None))
+        sqls.append(latest_sql.replace(f"TOP {MAX_ROWS} ", "TOP 3 ", 1))
+    got = _run(sqls)
+    rows, tot = got[0], (got[1] or [{}])[0]
     out = {"rows": rows, "count": int(tot.get("n") or 0), "total": tot.get("total"),
            "priced": int(tot.get("priced") or 0)}
-    if not out["count"] and (p.get("date_from") or p.get("date_to")):
-        # nothing in that range: give the newest matching ones instead of a bare "0"
-        latest_sql, _, latest_params = build_search(dict(p, date_from=None, date_to=None))
-        out["latest"] = _query(latest_sql.replace(f"TOP {MAX_ROWS} ", "TOP 3 ", 1), latest_params)
+    if not out["count"] and len(got) > 2:
+        out["latest"] = got[2]
     return out
 
 
 def lookup_doc(doc_id: str | None, quotation_id: str | None) -> dict:
     """One estimate (any status, test rows included — the user named it) and
     its quotations."""
+    doc_id = doc_id.upper() if doc_id and DOC_RE.fullmatch(doc_id) else None
+    quotation_id = quotation_id.upper() if quotation_id and QUOTE_RE.fullmatch(quotation_id) else None
     if not doc_id and quotation_id:
-        got = _query("SELECT TOP 1 doc_id FROM dbo.tb_quotation WITH (NOLOCK) WHERE quotation_id = %s",
-                     (quotation_id,))
-        doc_id = got[0]["doc_id"] if got else None
+        got = _run([f"SELECT TOP 1 doc_id FROM {_QUOTE} WITH (NOLOCK) WHERE quotation_id = '{quotation_id}'"])[0]
+        found = (got[0].get("doc_id") or "") if got else ""
+        doc_id = found.upper() if DOC_RE.fullmatch(found) else None
     if not doc_id:
         return {"rows": [], "quotes": []}
-    rows = _query(f"SELECT TOP 1 {_COLS} FROM dbo.tb_rfq WITH (NOLOCK) "
-                  "WHERE doc_id = %s AND ISNULL(is_deleted, 0) = 0", (doc_id,))
-    quotes = _query(
-        "SELECT quotation_id, revision, status_label, currency, qty_list, grand_total, issue_date, expiry_date, "
-        "approved_at FROM dbo.tb_quotation WITH (NOLOCK) WHERE doc_id = %s AND ISNULL(is_deleted, 0) = 0 "
-        "ORDER BY created_at DESC", (doc_id,))
+    rows, quotes = _run([
+        f"SELECT TOP 1 {_COLS} FROM {_RFQ} WITH (NOLOCK) WHERE doc_id = '{doc_id}' AND ISNULL(is_deleted, 0) = 0",
+        f"SELECT quotation_id, revision, status_label, currency, qty_list, grand_total, issue_date, expiry_date, "
+        f"approved_at FROM {_QUOTE} WITH (NOLOCK) WHERE doc_id = '{doc_id}' AND ISNULL(is_deleted, 0) = 0 "
+        f"ORDER BY created_at DESC",
+    ])
     return {"rows": rows, "quotes": quotes, "doc_id": doc_id}
 
 
