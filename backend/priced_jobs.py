@@ -1,15 +1,18 @@
-"""Priced jobs ("งานเคาะราคา") — read-only lookups in the MI estimate system.
+"""Priced jobs ("งานเคาะราคา") — read-only lookups in the estimate systems.
 
-Source: MI2_ESTIMATE.dbo.tb_rfq on the LIVE MI server 192.168.5.19 — one row
-per estimate request (doc_id E + 8 digits, e.g. E26110334). estimate_status:
-approve (= "เคาะราคาแล้ว"), pending (waiting for approval), reject, draft.
-Quotations (QE…) hang off it by doc_id.
+Source (LIVE, on 192.168.5.19): ESTIMATE.dbo.tb_rfq_list — the master list of
+estimates from BOTH estimate systems (source_system V1 = the old one, V2 = the
+new MI2 one, which syncs its estimates in), so nothing is counted twice.
+status_id 0 ร่าง · 1 ยืนยัน/รออนุมัติ · 2 ไม่อนุมัติ · 3 อนุมัติ (= "เคาะราคาแล้ว");
+estimate_date is the approval time. Selling prices per quantity are in
+ESTIMATE.dbo.tb_rfq_price1 (cost columns there are never read). V2 estimates
+also have details and quotations (QE…) in MI2_ESTIMATE. Numbers: E/EB/EP + 8 digits.
 
-Only fixed SELECTs on a few non-personal columns, through factory.session()
-(OPENQUERY via the MI login server's linked server, or a direct .19 account);
-nothing is ever written. Owner decision 2026-11-17: every signed-in user may
-ask, prices included. Test rows ("test"/"เทส"/"ทดสอบ" in the name) are
-left out. PRICED_JOBS_MODE=off disables it.
+Only fixed SELECTs, through factory.session() (OPENQUERY via the MI login
+server's linked server, or a direct .19 account); nothing is ever written.
+Owner decision 2026-11-17: every signed-in user may ask, prices included. Test
+rows ("test"/"เทส"/"ทดสอบ" in the name) are left out. PRICED_JOBS_MODE=off
+disables it.
 """
 from __future__ import annotations
 
@@ -20,24 +23,19 @@ import re
 from functools import lru_cache
 
 PRICED_JOBS_MODE = os.getenv("PRICED_JOBS_MODE", "on").strip().lower()
-PRICED_JOBS_DB = os.getenv("PRICED_JOBS_DB", "MI2_ESTIMATE").strip()
 TEST_CUSTOMERS = tuple(
     c.strip() for c in os.getenv("PRICED_JOBS_TEST_CUSTOMERS", "").split(",") if c.strip()
 )
 MAX_ROWS = 40
-_DB_TIMEOUT = 20
 
-STATUS_TH = {"approve": "อนุมัติแล้ว (เคาะราคาแล้ว)", "pending": "รออนุมัติ", "reject": "ไม่อนุมัติ",
-             "draft": "ร่าง (ยังไม่ส่งอนุมัติ)", "over_limit_approve": "เกินวงเงิน รออนุมัติพิเศษ"}
-
-DOC_RE = re.compile(r"\bE\d{8}\b", re.IGNORECASE)
+DOC_RE = re.compile(r"\bE[BP]?\d{8}\b", re.IGNORECASE)
 QUOTE_RE = re.compile(r"\bQE\d{7}\b", re.IGNORECASE)
 # Cheap pre-filter: only questions that mention estimates / approved prices go on
 # to the (small) AI planner, which decides whether it really is a lookup.
 TRIGGER_RE = re.compile(
     r"เคาะราคา|เคาะแล้ว|ประเมินราคา|อนุมัติราคา|ราคา.{0,12}(อนุมัติ|ผ่านแล้ว)|"
     r"ใบประเมิน|ใบเสนอราคา|ใบขอราคา|\brfq\b|estimate|quotation|"
-    r"\bE\d{8}\b|\bQE\d{7}\b",
+    r"\bE[BP]?\d{8}\b|\bQE\d{7}\b",
     re.IGNORECASE,
 )
 
@@ -87,11 +85,11 @@ def _date_anchors(today: dt.date) -> str:
 
 _PLAN_PROMPT = (
     "คุณเป็นตัวแยกคำสั่งของ chatbot ภายในบริษัทโรงพิมพ์ บริษัทมี 'ระบบประเมินราคา' ที่เก็บใบประเมินราคา "
-    "(เลข E ตามด้วยตัวเลข 8 หลัก เช่น E26110001) แต่ละใบมีสถานะ: approve = อนุมัติแล้ว/เคาะราคาแล้ว, "
+    "(เลข E, EB หรือ EP ตามด้วยตัวเลข 8 หลัก เช่น E26110334, EB26110174) แต่ละใบมีสถานะ: approve = อนุมัติแล้ว/เคาะราคาแล้ว, "
     "pending = รออนุมัติ/รอเคาะ, reject = ไม่อนุมัติ/ตีกลับ, draft = ร่าง และอาจมีใบเสนอราคา (เลข QE + 7 หลัก)\n"
     "ตัดสินว่าผู้ใช้ต้องการ 'ดูข้อมูลที่บันทึกในระบบประเมินราคา' หรือไม่ (รายการ จำนวน มูลค่ารวม "
     "หรือรายละเอียดใบใดใบหนึ่ง) แล้วตอบ JSON เท่านั้น:\n"
-    '{"lookup": true|false, "doc_id": "E…"|null, "quotation_id": "QE…"|null, '
+    '{"lookup": true|false, "doc_id": "E…/EB…/EP…"|null, "quotation_id": "QE…"|null, '
     '"status": "approve"|"pending"|"reject"|"draft"|"any", "date_from": "YYYY-MM-DD"|null, '
     '"date_to": "YYYY-MM-DD"|null, "keyword": string|null}\n'
     "กติกา:\n"
@@ -173,16 +171,24 @@ def plan(question: str, previous: str = "") -> tuple[dict | None, dict]:
 
 
 # ── database (fixed SELECTs only) ──────────────────────────────────────────
-# The LIVE estimate system is on 192.168.5.19. The MI2_ESTIMATE on the MI login
-# server (.10) is the test copy (E26110001…E26110011, mostly "Test" rows) —
-# the first version read that one by mistake (found 2026-11-18). Queries now go
-# through factory.session(): OPENQUERY over the linked server to .19, or a
-# direct .19 connection once FACTORY_DB_SERVER is set. OPENQUERY takes no
+# Everything is read on the LIVE server 192.168.5.19. (The MI2_ESTIMATE on the
+# MI login server .10 is a test copy — the first version read it by mistake.)
+# One master list covers both estimate systems: ESTIMATE.dbo.tb_rfq_list,
+# source_system V1 (old app) / V2 (new MI2 app, synced in). OPENQUERY takes no
 # parameters, so every value below is validated or reduced to safe characters.
 
-_DB = PRICED_JOBS_DB if re.fullmatch(r"[A-Za-z0-9_]{1,64}", PRICED_JOBS_DB) else "MI2_ESTIMATE"
-_RFQ = f"{_DB}.dbo.tb_rfq"
-_QUOTE = f"{_DB}.dbo.tb_quotation"
+_LIST = "ESTIMATE.dbo.tb_rfq_list"
+_PRICE = "ESTIMATE.dbo.tb_rfq_price1"
+_LOG = "ESTIMATE.dbo.tb_rfq_status_log"
+_MI2_RFQ = "MI2_ESTIMATE.dbo.tb_rfq"
+_MI2_QUOTE = "MI2_ESTIMATE.dbo.tb_quotation"
+
+STATUS_ID = {"draft": 0, "pending": 1, "reject": 2, "approve": 3}
+STATUS_NAME = {0: "ร่าง (ยังไม่ส่งอนุมัติ)", 1: "ส่งขออนุมัติแล้ว รออนุมัติ", 2: "ไม่อนุมัติ",
+               3: "อนุมัติแล้ว (เคาะราคาแล้ว)", 4: "เกินวงเงิน รออนุมัติพิเศษ"}
+# the date that matters for each status (estimate_date = when it was approved)
+_DATE_COL = {"approve": "l.estimate_date", "pending": "l.updated", "reject": "l.updated", "draft": "l.created",
+             "any": "COALESCE(l.estimate_date, l.updated, l.created)"}
 
 
 def _run(sqls: list[str]) -> list[list[dict]]:
@@ -192,22 +198,25 @@ def _run(sqls: list[str]) -> list[list[dict]]:
         return [s.run(q) for q in sqls]
 
 
-_COLS = ("doc_id, estimate_name, customer_id, customer_name, ae_team_name, estimate_status, estimate_date, "
-         "request_for_approve_at, approved_at, qty_list, mid_qty, mid_total_ex_vat, print_type, box_type, "
-         "component_type, credit_term")
-# the date that matters for each status
-_DATE_COL = {"approve": "approved_at", "pending": "request_for_approve_at", "reject": "updated_at",
-             "draft": "created_at", "any": "COALESCE(approved_at, request_for_approve_at, created_at)"}
+# the price shown for a job: the line at its main quantity, else its smallest quantity
+_PRICE_APPLY = f"""OUTER APPLY (SELECT TOP 1 x.qty AS price_qty, x.unit_price, x.total_price, x.currency_no
+        FROM {_PRICE} x WITH (NOLOCK) WHERE x.job_id = l.job_id
+        ORDER BY CASE WHEN x.qty = x.main_qty THEN 0 ELSE 1 END, x.qty) p
+    OUTER APPLY (SELECT COUNT(*) AS tiers FROM {_PRICE} y WITH (NOLOCK) WHERE y.job_id = l.job_id) t
+    OUTER APPLY (SELECT TOP 1 r.mid_qty, r.mid_total_ex_vat FROM {_MI2_RFQ} r WITH (NOLOCK)
+        WHERE l.source_system = 'V2' AND r.doc_id COLLATE DATABASE_DEFAULT = l.job_id COLLATE DATABASE_DEFAULT) v"""
+
+_LIST_COLS = ("l.job_id, l.job_name, l.customer_id, c.custName, l.est_type, l.status_id, l.source_system, "
+              "l.estimate_date, l.created, l.updated")
 
 
 def _not_test_sql() -> str:
     ids = [c for c in TEST_CUSTOMERS if re.fullmatch(r"[A-Za-z0-9_\-]{1,20}", c)]
-    parts = [f"customer_id NOT IN ({', '.join(repr(c) for c in ids)})"] if ids else []
+    parts = [f"l.customer_id NOT IN ({', '.join(repr(c) for c in ids)})"] if ids else []
     # C9999998 is NOT a test customer: it is "ลูกค้าใหม่" (a customer not registered
-    # yet). Every approved estimate on the live system used it, so excluding it
+    # yet). Every approved estimate on the new system used it, so excluding it
     # gave "0 งาน" (2026-11-18). Test rows are recognised by their name only.
-    parts += ["estimate_name NOT LIKE N'%test%'", "estimate_name NOT LIKE N'%เทส%'",
-              "estimate_name NOT LIKE N'%ทดสอบ%'"]
+    parts += ["l.job_name NOT LIKE N'%test%'", "l.job_name NOT LIKE N'%เทส%'", "l.job_name NOT LIKE N'%ทดสอบ%'"]
     return " AND ".join(parts)
 
 
@@ -215,30 +224,27 @@ def build_search(p: dict) -> tuple[str, str]:
     """(rows SQL, totals SQL) for a list question — values inlined, all validated."""
     import factory
 
-    status = p.get("status") or "any"
-    if status not in _DATE_COL:
-        status = "any"
+    status = p.get("status") if p.get("status") in _DATE_COL else "any"
     date_col = _DATE_COL[status]
-    where = ["ISNULL(is_deleted, 0) = 0"]
-    if status == "any":
-        where.append("estimate_status IN ('approve', 'pending', 'reject', 'over_limit_approve')")
-    else:
-        where.append(f"estimate_status = '{status}'")
-    where.append(_not_test_sql())
+    where = ["l.status_id IN (1, 2, 3)" if status == "any" else f"l.status_id = {STATUS_ID[status]}", _not_test_sql()]
     if isinstance(p.get("date_from"), dt.date):
         where.append(f"{date_col} >= '{p['date_from'].isoformat()}'")
     if isinstance(p.get("date_to"), dt.date):
         where.append(f"{date_col} < '{(p['date_to'] + dt.timedelta(days=1)).isoformat()}'")
     kw = factory.safe_keyword(p.get("keyword"))
     if kw:
-        where.append(f"(estimate_name LIKE N'%{kw}%' OR customer_name LIKE N'%{kw}%' "
-                     f"OR ae_team_name LIKE N'%{kw}%' OR customer_id = N'{kw}')")
-    w = " AND ".join(where)
-    rows_sql = (f"SELECT TOP {MAX_ROWS} {_COLS} FROM {_RFQ} WITH (NOLOCK) WHERE {w} "
-                f"ORDER BY {date_col} DESC")
-    totals_sql = (f"SELECT COUNT(*) AS n, SUM(CASE WHEN mid_total_ex_vat > 0 THEN mid_total_ex_vat END) AS total, "
-                  f"SUM(CASE WHEN mid_total_ex_vat > 0 THEN 1 ELSE 0 END) AS priced "
-                  f"FROM {_RFQ} WITH (NOLOCK) WHERE {w}")
+        where.append(f"(l.job_name LIKE N'%{kw}%' OR c.custName LIKE N'%{kw}%' OR l.customer_id = '{kw}' "
+                     f"OR l.job_id = '{kw}')")
+    base = (f"FROM {_LIST} l WITH (NOLOCK) LEFT JOIN mi.dbo.customer c WITH (NOLOCK) ON c.custID = l.customer_id "
+            f"{_PRICE_APPLY} WHERE {' AND '.join(where)}")
+    rows_sql = (f"SELECT TOP {MAX_ROWS} {_LIST_COLS}, p.price_qty, p.unit_price, p.total_price, p.currency_no, "
+                f"t.tiers, v.mid_qty, v.mid_total_ex_vat {base} ORDER BY {date_col} DESC")
+    amount = "COALESCE(p.total_price, v.mid_total_ex_vat)"
+    totals_sql = (f"SELECT COUNT(*) AS n, "
+                  f"SUM(CASE WHEN ISNULL(p.currency_no, 'THB') = 'THB' AND {amount} > 0 THEN {amount} END) AS total, "
+                  f"SUM(CASE WHEN ISNULL(p.currency_no, 'THB') = 'THB' AND {amount} > 0 THEN 1 ELSE 0 END) AS priced, "
+                  f"SUM(CASE WHEN ISNULL(p.currency_no, 'THB') <> 'THB' THEN 1 ELSE 0 END) AS other_currency "
+                  f"{base}")
     return rows_sql, totals_sql
 
 
@@ -252,30 +258,39 @@ def search(p: dict) -> dict:
     got = _run(sqls)
     rows, tot = got[0], (got[1] or [{}])[0]
     out = {"rows": rows, "count": int(tot.get("n") or 0), "total": tot.get("total"),
-           "priced": int(tot.get("priced") or 0)}
+           "priced": int(tot.get("priced") or 0), "other_currency": int(tot.get("other_currency") or 0)}
     if not out["count"] and len(got) > 2:
         out["latest"] = got[2]
     return out
 
 
 def lookup_doc(doc_id: str | None, quotation_id: str | None) -> dict:
-    """One estimate (any status, test rows included — the user named it) and
-    its quotations."""
+    """One estimate (any status, test rows included — the user named it): its
+    list entry, price per quantity, status history, and — for new-system (V2)
+    estimates — print details and quotations."""
     doc_id = doc_id.upper() if doc_id and DOC_RE.fullmatch(doc_id) else None
     quotation_id = quotation_id.upper() if quotation_id and QUOTE_RE.fullmatch(quotation_id) else None
     if not doc_id and quotation_id:
-        got = _run([f"SELECT TOP 1 doc_id FROM {_QUOTE} WITH (NOLOCK) WHERE quotation_id = '{quotation_id}'"])[0]
-        found = (got[0].get("doc_id") or "") if got else ""
+        got = _run([f"SELECT TOP 1 doc_id FROM {_MI2_QUOTE} WITH (NOLOCK) WHERE quotation_id = '{quotation_id}'"])[0]
+        found = str((got[0].get("doc_id") or "") if got else "")
         doc_id = found.upper() if DOC_RE.fullmatch(found) else None
     if not doc_id:
-        return {"rows": [], "quotes": []}
-    rows, quotes = _run([
-        f"SELECT TOP 1 {_COLS} FROM {_RFQ} WITH (NOLOCK) WHERE doc_id = '{doc_id}' AND ISNULL(is_deleted, 0) = 0",
+        return {"rows": [], "prices": [], "history": [], "detail": [], "quotes": []}
+    rows, prices, history, detail, quotes = _run([
+        f"SELECT TOP 1 {_LIST_COLS}, l.credit_term_name FROM {_LIST} l WITH (NOLOCK) "
+        f"LEFT JOIN mi.dbo.customer c WITH (NOLOCK) ON c.custID = l.customer_id WHERE l.job_id = '{doc_id}'",
+        f"SELECT TOP 12 qty, unit_price, total_price, currency_no FROM {_PRICE} WITH (NOLOCK) "
+        f"WHERE job_id = '{doc_id}' ORDER BY qty",
+        f"SELECT TOP 20 from_status_id, to_status_id, created FROM {_LOG} WITH (NOLOCK) "
+        f"WHERE job_id = '{doc_id}' ORDER BY created",
+        f"SELECT TOP 1 qty_list, mid_qty, mid_total_ex_vat, print_type, box_type, component_type "
+        f"FROM {_MI2_RFQ} WITH (NOLOCK) WHERE doc_id = '{doc_id}' AND ISNULL(is_deleted, 0) = 0",
         f"SELECT quotation_id, revision, status_label, currency, qty_list, grand_total, issue_date, expiry_date, "
-        f"approved_at FROM {_QUOTE} WITH (NOLOCK) WHERE doc_id = '{doc_id}' AND ISNULL(is_deleted, 0) = 0 "
+        f"approved_at FROM {_MI2_QUOTE} WITH (NOLOCK) WHERE doc_id = '{doc_id}' AND ISNULL(is_deleted, 0) = 0 "
         f"ORDER BY created_at DESC",
     ])
-    return {"rows": rows, "quotes": quotes, "doc_id": doc_id}
+    return {"rows": rows, "prices": prices, "history": history, "detail": detail, "quotes": quotes,
+            "doc_id": doc_id}
 
 
 # ── data → text for the answer model ───────────────────────────────────────
@@ -295,34 +310,49 @@ def _when(v) -> str:
     return str(v)[:16]
 
 
+def _qty(v) -> str:
+    try:
+        return f"{int(float(v)):,}"
+    except (TypeError, ValueError):
+        return "-"
+
+
+def _price_text(r: dict) -> str:
+    """The price line for one job: the selling price at its main quantity (old-
+    system price lines), else the new system's ex-VAT price at its middle quantity."""
+    total, qty = r.get("total_price"), r.get("price_qty")
+    if total and float(total) > 0:
+        cur = r.get("currency_no") or "THB"
+        per = f" (≈ {float(r['unit_price']):,.2f} {cur}/ชิ้น)" if r.get("unit_price") else ""
+        tiers = r.get("tiers") or 0
+        more = f" · มีราคาทั้งหมด {tiers} ระดับจำนวน" if tiers and int(tiers) > 1 else ""
+        return f"{_money(total)} {cur} ที่จำนวน {_qty(qty)} ชิ้น{per}{more}"
+    mid_total, mid_qty = r.get("mid_total_ex_vat"), r.get("mid_qty")
+    if mid_total and float(mid_total) > 0:
+        per = f" (≈ {float(mid_total) / float(mid_qty):,.2f} บาท/ชิ้น)" if mid_qty else ""
+        return f"{_money(mid_total)} บาท ก่อน VAT ที่จำนวน {_qty(mid_qty)} ชิ้น{per}"
+    return "ยังไม่มีราคา"
+
+
 def _row_text(r: dict) -> str:
-    price = r.get("mid_total_ex_vat")
-    mid = r.get("mid_qty")
-    if price and float(price) > 0:
-        per = f" (≈ {float(price) / float(mid):,.2f} บาท/ชิ้น)" if mid else ""
-        price_s = f"{_money(price)} บาท ก่อน VAT ที่จำนวน {int(mid):,} ชิ้น{per}" if mid else f"{_money(price)} บาท ก่อน VAT"
-    else:
-        price_s = "ยังไม่มีราคา"
-    status = STATUS_TH.get(str(r.get("estimate_status") or ""), r.get("estimate_status") or "-")
+    status = STATUS_NAME.get(r.get("status_id"), str(r.get("status_id")))
+    system = {"V1": "ระบบประเมินราคาเดิม", "V2": "ระบบประเมินราคาใหม่ (MI2)"}.get(str(r.get("source_system")), "-")
+    approved = f" · อนุมัติเมื่อ {_when(r.get('estimate_date'))}" if r.get("status_id") == 3 else ""
     # one labelled field per line: a one-line "a | b | c" record got copied
     # into the answer as is (prod, 2026-11-18)
     return "\n".join([
-        f"[ใบประเมิน {r.get('doc_id')}] {r.get('estimate_name') or '-'}",
-        f"  ลูกค้า: {r.get('customer_name') or '-'} ({r.get('customer_id') or '-'})",
-        f"  ทีมขาย: {r.get('ae_team_name') or '-'}",
-        f"  สถานะ: {status}",
-        f"  จำนวนที่ขอราคา: {r.get('qty_list') or '-'}",
-        f"  ราคา: {price_s}",
-        f"  งานพิมพ์: {r.get('print_type') or '-'} · แบบกล่อง: {r.get('box_type') or '-'} · "
-        f"ประกบลูกฟูก: {r.get('component_type') or '-'}",
-        f"  เครดิต: {r.get('credit_term') or '-'}",
-        f"  วันที่ประเมิน: {_when(r.get('estimate_date'))} · ส่งขออนุมัติ: {_when(r.get('request_for_approve_at'))}"
-        f" · อนุมัติ: {_when(r.get('approved_at'))}",
+        f"[ใบประเมิน {r.get('job_id')}] {(r.get('job_name') or '-').strip()}",
+        f"  ลูกค้า: {(r.get('custName') or '-').strip()} ({r.get('customer_id') or '-'})",
+        f"  ประเภทงาน: {r.get('est_type') or '-'} · บันทึกใน: {system}",
+        f"  สถานะ: {status}{approved}",
+        f"  ราคา: {_price_text(r)}",
+        f"  สร้างใบ: {_when(r.get('created'))} · แก้ไขล่าสุด: {_when(r.get('updated'))}",
     ])
 
 
 def describe_filters(p: dict) -> str:
-    parts = [f"สถานะ: {STATUS_TH.get(p.get('status'), 'ทุกสถานะ (ไม่รวมร่าง)')}"]
+    names = {"approve": STATUS_NAME[3], "pending": STATUS_NAME[1], "reject": STATUS_NAME[2], "draft": STATUS_NAME[0]}
+    parts = [f"สถานะ: {names.get(p.get('status'), 'ทุกสถานะ (ไม่รวมร่าง)')}"]
     if p.get("date_from") or p.get("date_to"):
         parts.append(f"ช่วงวันที่: {p.get('date_from') or 'เริ่มต้น'} ถึง {p.get('date_to') or 'วันนี้'}")
     else:
@@ -334,27 +364,46 @@ def describe_filters(p: dict) -> str:
 
 def to_context(p: dict, data: dict) -> str:
     now = _bangkok_now().strftime("%Y-%m-%d %H:%M")
-    head = f"ข้อมูลจากระบบประเมินราคา (MI) ณ {now}\n"
-    if "quotes" in data:
+    head = f"ข้อมูลจากระบบประเมินราคา (ทั้งระบบเดิมและระบบใหม่ MI2) ณ {now}\n"
+    if "prices" in data:
         if not data["rows"]:
             return head + f"ไม่พบใบประเมินราคา {p.get('doc_id') or p.get('quotation_id')} ในระบบ"
-        out = [head, "ใบประเมินราคา:", _row_text(data["rows"][0])]
-        if data["quotes"]:
+        r = dict(data["rows"][0])
+        if data["prices"]:
+            first = data["prices"][0]
+            r.update(price_qty=first.get("qty"), unit_price=first.get("unit_price"),
+                     total_price=first.get("total_price"), currency_no=first.get("currency_no"),
+                     tiers=len(data["prices"]))
+        if data.get("detail"):
+            r.update(mid_qty=data["detail"][0].get("mid_qty"), mid_total_ex_vat=data["detail"][0].get("mid_total_ex_vat"))
+        out = [head, "ใบประเมินราคา:", _row_text(r)]
+        if r.get("credit_term_name"):
+            out.append(f"  เครดิต: {r['credit_term_name']}")
+        if data["prices"]:
+            out.append("ราคาขายตามจำนวน:")
+            out += [f"  - {_qty(x.get('qty'))} ชิ้น: {_money(x.get('total_price'))} {x.get('currency_no') or 'THB'} "
+                    f"(≈ {_money(x.get('unit_price'))} ต่อชิ้น)" for x in data["prices"]]
+        if data.get("detail"):
+            d = data["detail"][0]
+            out.append(f"รายละเอียดในระบบใหม่: จำนวนที่ขอราคา {d.get('qty_list') or '-'} · งานพิมพ์ {d.get('print_type') or '-'} "
+                       f"· แบบกล่อง {d.get('box_type') or '-'} · ประกบลูกฟูก {d.get('component_type') or '-'}")
+        if data.get("history"):
+            out.append("ประวัติสถานะ:")
+            out += [f"  - {_when(h.get('created'))}: {STATUS_NAME.get(h.get('to_status_id'), h.get('to_status_id'))}"
+                    for h in data["history"]]
+        if data.get("quotes"):
             out.append("ใบเสนอราคาที่ออกจากใบนี้:")
-            for q in data["quotes"]:
-                out.append(
-                    f"- {q.get('quotation_id')} (แก้ไขครั้งที่ {q.get('revision') or 0}) | สถานะ: {q.get('status_label') or '-'} "
-                    f"| จำนวน: {q.get('qty_list') or '-'} | ยอดรวม: {_money(q.get('grand_total'))} {q.get('currency') or ''} "
-                    f"| วันที่ออก: {_when(q.get('issue_date'))} | ใช้ได้ถึง: {_when(q.get('expiry_date'))} "
-                    f"| อนุมัติ: {_when(q.get('approved_at'))}")
-        else:
-            out.append("ยังไม่มีใบเสนอราคาที่ออกจากใบนี้")
+            out += [f"  - {q.get('quotation_id')} (แก้ไขครั้งที่ {q.get('revision') or 0}): {q.get('status_label') or '-'}, "
+                    f"จำนวน {q.get('qty_list') or '-'}, ยอดรวม {_money(q.get('grand_total'))} {q.get('currency') or ''}, "
+                    f"ออก {_when(q.get('issue_date'))}, ใช้ได้ถึง {_when(q.get('expiry_date'))}" for q in data["quotes"]]
         return "\n".join(out)
     lines = [head, f"เงื่อนไขที่ค้น: {describe_filters(p)} (ไม่รวมรายการทดสอบ)",
              f"พบทั้งหมด: {data['count']} งาน"]
     if data["count"]:
-        lines.append(f"มูลค่ารวม (ราคาก่อน VAT ที่จำนวนกลางของแต่ละงาน, เฉพาะ {data['priced']} งานที่มีราคา): "
+        lines.append(f"มูลค่ารวม (ราคาที่จำนวนหลักของแต่ละงาน รวมเฉพาะ {data['priced']} งานที่มีราคาเป็นบาท): "
                      f"{_money(data['total'])} บาท")
+        if data.get("other_currency"):
+            lines.append(f"(มี {data['other_currency']} งานที่ราคาเป็นสกุลเงินอื่น ไม่ได้รวมในยอดนี้)")
         if data["count"] > len(data["rows"]):
             lines.append(f"(แสดงรายละเอียด {len(data['rows'])} งานล่าสุด)")
         lines.append("รายการ:")
