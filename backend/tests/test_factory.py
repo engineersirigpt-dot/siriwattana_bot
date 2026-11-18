@@ -184,11 +184,12 @@ def test_ops_contexts():
     assert "พบทั้งหมด: 251 งาน" in due and "ห้ามบอกผู้ใช้ว่าระบบแสดงหรือดึงได้แค่กี่งาน" in due
     assert "รายการด้านล่างคือ" not in due      # the cap got echoed as "แสดง 40 งานแรก" (2026-11-18)
     assert "กำหนดส่ง 2026-11-20" in due
-    assert "ส่งแล้ว 0" in due and "2026-11-20 = 120 งาน, 2026-11-21 = 131 งาน" in due
+    assert "ส่งแล้ว 0" in due and "- 2026-11-20: 120 งาน\n- 2026-11-21: 131 งาน" in due
     late = fx.ops_context({"kind": "overdue", "keyword": None},
                           {"rows": [{"jobid": "26090335", "qty1": 3300, "due1": "2026-10-19", "delivered": 0}],
                            "count": 746, "by_day": [("2026-10-19", 746)], "no_record": 600}, today=TODAY)
-    assert "ในจำนวนนี้ 600 งานไม่มีบันทึกการส่งในระบบเลย" in late and "ยังไม่ครบ มี 146 งาน" in late
+    assert "- ไม่มีบันทึกการส่งในระบบเลย (ไม่มีทั้งใบส่งของและพาเลทที่เบิกออก): 600 งาน" in late
+    assert "- มีบันทึกการส่งแล้วแต่ยังไม่ครบ: 146 งาน" in late
     assert "ยอดส่งแล้ว = ยอดที่มากกว่าระหว่างใบส่งของกับพาเลทที่เบิกออกจากคลัง" in late
     open_ = fx.ops_context({"kind": "repairs", "status": "open"},
                            {"counts": {0: 140, 1: 168, 2: 31}, "rows": [{"ma_id": "MR1", "ma_status": 0}]}, today=TODAY)
@@ -277,6 +278,25 @@ def test_notes_meant_for_the_model_are_not_shown():
     assert tidy("พบ 745 งานค่ะ\nตารางรายละเอียดรายงานฉบับเต็ม ระบบจะแนบต่อท้ายให้อัตโนมัติค่ะ") == "พบ 745 งานค่ะ"
     assert tidy("พบ 745 งานค่ะ\nดูรายละเอียดในตารางด้านล่างได้เลยค่ะ") == \
         "พบ 745 งานค่ะ\nดูรายละเอียดในตารางด้านล่างได้เลยค่ะ"          # pointing at the table is fine
+
+
+def test_a_long_overdue_range_is_summed_by_week():
+    # a 29-day list written on one line came back as one long "· a · b · c" bullet (prod 2026-11-18)
+    days = [((dt.date(2026, 10, 19) + dt.timedelta(days=i)).isoformat(), 10) for i in range(30)]
+    text = fx.ops_context({"kind": "overdue", "keyword": None},
+                          {"rows": [], "count": 300, "by_day": days, "no_record": 0}, today=TODAY)
+    assert "จำนวนงานแยกตามสัปดาห์ของวันกำหนดส่ง" in text
+    assert "- 2026-10-19 ถึง 2026-10-25: 70 งาน" in text and "- 2026-11-16 ถึง 2026-11-17: 20 งาน" in text
+    assert "2026-10-20: 10 งาน" not in text
+
+
+def test_a_list_written_on_one_line_becomes_sub_bullets():
+    tidy = main._tidy_data_answer
+    got = tidy("พบ 745 งานค่ะ\n- สรุปตามวันกำหนดส่ง: · 2026-10-19 = 12 งาน · 2026-10-20 = 26 งาน · 2026-10-21 = 20 งาน")
+    assert got == ("พบ 745 งานค่ะ\n- สรุปตามวันกำหนดส่ง:\n  - 2026-10-19 = 12 งาน\n  - 2026-10-20 = 26 งาน\n"
+                   "  - 2026-10-21 = 20 งาน")
+    assert tidy("- อนุมัติ 2026-11-18 11:25 · ราคา 100 · ลูกค้า ก") == "- อนุมัติ 2026-11-18 11:25 · ราคา 100 · ลูกค้า ก"
+    assert tidy("เฉลี่ยวันละ 36.7 งาน · ลูกค้า 214 ราย · นับทุกใบ") == "เฉลี่ยวันละ 36.7 งาน · ลูกค้า 214 ราย · นับทุกใบ"
 
 
 def test_ops_tables_are_built_in_code():

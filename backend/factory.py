@@ -667,6 +667,19 @@ def ops_table(p: dict, data: dict) -> str:
     return title + head + "\n" + "\n".join(body)
 
 
+def _by_week(by_day: list[tuple[str, int]], d_from: dt.date, d_to: dt.date) -> list[tuple[str, str, int]]:
+    """(first day, last day, jobs) per Monday–Sunday week, clipped to the range asked."""
+    weeks: dict[dt.date, int] = {}
+    for d, n in by_day:
+        try:
+            day = dt.date.fromisoformat(str(d)[:10])
+        except ValueError:
+            continue
+        monday = day - dt.timedelta(days=day.weekday())
+        weeks[monday] = weeks.get(monday, 0) + n
+    return [(_day(max(m, d_from)), _day(min(m + dt.timedelta(days=6), d_to)), n) for m, n in sorted(weeks.items())]
+
+
 def ops_context(p: dict, data: dict, today: dt.date | None = None) -> str:
     d_from, d_to = effective_range(p, today or _bangkok_today())
     rng = f"{_day(d_from)} ถึง {_day(d_to)}"
@@ -694,12 +707,20 @@ def ops_context(p: dict, data: dict, today: dt.date | None = None) -> str:
             # the model echoed this cap as "ตารางด้านล่างจะแสดง 40 งานแรก" over a 15-row table (2026-11-18)
             lines.append(f"(ข้อมูลประกอบด้านล่าง: {len(rows)} งานแรกตามวันกำหนดส่ง — เป็นข้อมูลภายใน "
                          "ห้ามบอกผู้ใช้ว่าระบบแสดงหรือดึงได้แค่กี่งาน ตารางที่ระบบแนบมีหัวตารางบอกจำนวนเอง)")
+        # one item per line: a 29-day list on one line came back as one long "· a · b · c" bullet
+        # (prod 2026-11-18); more than 10 days → by week
         if data.get("by_day"):
-            lines.append("จำนวนงานแยกตามวันกำหนดส่ง: " + ", ".join(f"{d} = {n} งาน" for d, n in data["by_day"]))
+            if len(data["by_day"]) > 10:
+                lines.append("จำนวนงานแยกตามสัปดาห์ของวันกำหนดส่ง (เขียนเป็นข้อย่อย ข้อละบรรทัด):")
+                lines += [f"- {a} ถึง {b}: {n} งาน" for a, b, n in _by_week(data["by_day"], d_from, d_to)]
+            else:
+                lines.append("จำนวนงานแยกตามวันกำหนดส่ง (เขียนเป็นข้อย่อย ข้อละบรรทัด):")
+                lines += [f"- {d}: {n} งาน" for d, n in data["by_day"]]
         if p["kind"] == "overdue" and data.get("no_record"):
-            lines.append(f"ในจำนวนนี้ {data['no_record']} งานไม่มีบันทึกการส่งในระบบเลย (ไม่มีทั้งใบส่งของและพาเลทที่เบิกออก) — "
-                         "ยืนยันไม่ได้ว่าค้างส่งจริง หรือส่งด้วยวิธีที่ระบบไม่ได้บันทึก: ต้องบอกผู้ใช้ข้อนี้ด้วย "
-                         f"ส่วนที่มีบันทึกการส่งแล้วแต่ยังไม่ครบ มี {data['count'] - data['no_record']} งาน")
+            lines += ["สถานะบันทึกการส่ง (เขียนเป็นข้อย่อย ข้อละบรรทัด และต้องบอกผู้ใช้ข้อนี้ด้วย):",
+                      f"- ไม่มีบันทึกการส่งในระบบเลย (ไม่มีทั้งใบส่งของและพาเลทที่เบิกออก): {data['no_record']} งาน — "
+                      "ยืนยันไม่ได้ว่าค้างส่งจริง หรือส่งด้วยวิธีที่ระบบไม่ได้บันทึก",
+                      f"- มีบันทึกการส่งแล้วแต่ยังไม่ครบ: {data['count'] - data['no_record']} งาน"]
         for r in rows:
             lines.append(f"- {r.get('jobid')} | {r.get('job_name') or '-'} | ลูกค้า: {r.get('custName') or '-'} | "
                          f"สั่ง {_n(r.get('qty1'))} | ส่งแล้ว {_n(r.get('delivered') or 0)} | "
