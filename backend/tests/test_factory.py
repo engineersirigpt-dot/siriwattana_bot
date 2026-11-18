@@ -181,7 +181,9 @@ def test_ops_contexts():
                          {"rows": [{"jobid": "J82602753", "job_name": "กล่อง", "custName": "ลูกค้า ก", "qty1": 5000,
                                     "due1": "2026-11-20", "printDate": "2026-11-19", "delivered": None}], "count": 251,
                           "by_day": [("2026-11-20", 120), ("2026-11-21", 131)]})
-    assert "พบทั้งหมด: 251 งาน (รายการด้านล่างคือ 1 งานแรก" in due and "กำหนดส่ง 2026-11-20" in due
+    assert "พบทั้งหมด: 251 งาน" in due and "ห้ามบอกผู้ใช้ว่าระบบแสดงหรือดึงได้แค่กี่งาน" in due
+    assert "รายการด้านล่างคือ" not in due      # the cap got echoed as "แสดง 40 งานแรก" (2026-11-18)
+    assert "กำหนดส่ง 2026-11-20" in due
     assert "ส่งแล้ว 0" in due and "2026-11-20 = 120 งาน, 2026-11-21 = 131 งาน" in due
     late = fx.ops_context({"kind": "overdue", "keyword": None},
                           {"rows": [{"jobid": "26090335", "qty1": 3300, "due1": "2026-10-19", "delivered": 0}],
@@ -191,7 +193,7 @@ def test_ops_contexts():
     open_ = fx.ops_context({"kind": "repairs", "status": "open"},
                            {"counts": {0: 140, 1: 168, 2: 31}, "rows": [{"ma_id": "MR1", "ma_status": 0}]}, today=TODAY)
     assert "ทั้งหมด 339 ใบ · ยังไม่เสร็จ 140 · ซ่อมเสร็จ 168" in open_
-    assert "ผู้ใช้ถามเฉพาะใบที่ยังไม่เสร็จ: 140 ใบ (รายการด้านล่างคือ 1 ใบล่าสุด)" in open_
+    assert "ผู้ใช้ถามเฉพาะใบที่ยังไม่เสร็จ: 140 ใบ" in open_ and "ห้ามบอกผู้ใช้ว่าระบบแสดงหรือดึงได้แค่กี่ใบ" in open_
     rep = fx.ops_context({"kind": "repairs", "date_from": None, "date_to": None, "keyword": "L444"},
                          {"counts": {0: 2, 1: 5}, "rows": [{"ma_id": "MR26110178", "notify_datetime": dt.datetime(2026, 11, 17, 15, 36),
                                                             "machine_name": "L444SP", "ma_status": 0, "approve_status": 1,

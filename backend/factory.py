@@ -689,8 +689,11 @@ def ops_context(p: dict, data: dict, today: dt.date | None = None) -> str:
                 "กับพาเลทที่เบิกออกจากคลัง · ยังไม่ปิดงาน, ไม่รวมงานยกเลิก, ดูเฉพาะกำหนดส่งในช่วงนี้)"
                 if p["kind"] == "overdue" else "งานที่ถึงกำหนดส่งลูกค้าในช่วงที่ถาม (ยังไม่ปิดงาน, ไม่รวมงานยกเลิก)")
         lines += [f"เรื่อง: {what}", f"ช่วงวันกำหนดส่ง: {rng}{kw}",
-                  f"พบทั้งหมด: {data['count']} งาน" + (f" (รายการด้านล่างคือ {len(rows)} งานแรกเรียงตามวันกำหนดส่ง)"
-                                                    if data["count"] > len(rows) else "")]
+                  f"พบทั้งหมด: {data['count']} งาน"]
+        if data["count"] > len(rows):
+            # the model echoed this cap as "ตารางด้านล่างจะแสดง 40 งานแรก" over a 15-row table (2026-11-18)
+            lines.append(f"(ข้อมูลประกอบด้านล่าง: {len(rows)} งานแรกตามวันกำหนดส่ง — เป็นข้อมูลภายใน "
+                         "ห้ามบอกผู้ใช้ว่าระบบแสดงหรือดึงได้แค่กี่งาน ตารางที่ระบบแนบมีหัวตารางบอกจำนวนเอง)")
         if data.get("by_day"):
             lines.append("จำนวนงานแยกตามวันกำหนดส่ง: " + ", ".join(f"{d} = {n} งาน" for d, n in data["by_day"]))
         if p["kind"] == "overdue" and data.get("no_record"):
@@ -709,8 +712,10 @@ def ops_context(p: dict, data: dict, today: dt.date | None = None) -> str:
         if p.get("status") in {"open", "done", "cancelled"}:
             label = {"open": "ยังไม่เสร็จ", "done": "ซ่อมเสร็จแล้ว", "cancelled": "ยกเลิก"}[p["status"]]
             shown = {"open": c.get(0, 0), "done": c.get(1, 0), "cancelled": c.get(2, 0)}[p["status"]]
-            lines.append(f"ผู้ใช้ถามเฉพาะใบที่{label}: {shown} ใบ"
-                         + (f" (รายการด้านล่างคือ {len(rows)} ใบล่าสุด)" if shown > len(rows) else ""))
+            lines.append(f"ผู้ใช้ถามเฉพาะใบที่{label}: {shown} ใบ")
+            if shown > len(rows):
+                lines.append(f"(ข้อมูลประกอบด้านล่าง: {len(rows)} ใบล่าสุด — เป็นข้อมูลภายใน "
+                             "ห้ามบอกผู้ใช้ว่าระบบแสดงหรือดึงได้แค่กี่ใบ ตารางที่ระบบแนบมีหัวตารางบอกจำนวนเอง)")
         for r in rows:
             lines.append(
                 f"- {r.get('ma_id')} | แจ้ง {_when(r.get('notify_datetime'))} | เครื่อง: {r.get('machine_name') or r.get('machine_id') or '-'}"
