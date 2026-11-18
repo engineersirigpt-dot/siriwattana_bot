@@ -428,8 +428,11 @@ def to_context(p: dict, data: dict) -> str:
                     f"จำนวน {q.get('qty_list') or '-'}, ยอดรวม {_money(q.get('grand_total'))} {q.get('currency') or ''}, "
                     f"ออก {_when(q.get('issue_date'))}, ใช้ได้ถึง {_when(q.get('expiry_date'))}" for q in data["quotes"]]
         return "\n".join(out)
-    lines = [head, f"เงื่อนไขที่ค้น: {describe_filters(p)} (ไม่รวมรายการทดสอบ)",
-             f"พบทั้งหมด: {data['count']} งาน"]
+    lines = [head, f"เงื่อนไขที่ค้น: {describe_filters(p)} (ไม่รวมรายการทดสอบ)"]
+    if p.get("status") == "approve":
+        lines.append("นิยาม (ยืนยันกับทีมแล้ว): 'เคาะราคาแล้ว' = ใบประเมินราคาที่หัวหน้าอนุมัติราคาแล้ว "
+                     "(Approved ในระบบประเมินราคา) — ยังไม่ใช่งานที่ลูกค้าสั่ง")
+    lines.append(f"พบทั้งหมด: {data['count']} งาน")
     if data["count"]:
         lines.append(f"มูลค่ารวม (ผลรวมราคาประเมินก่อน VAT ที่จำนวนหลักของแต่ละงาน รวมเฉพาะ {data['priced']} งาน"
                      f"ที่มีราคาเป็นบาท — เป็นมูลค่าราคาที่เสนอ ไม่ใช่ยอดขายจริง): {_money(data['total'])} บาท")

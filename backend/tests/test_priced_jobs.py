@@ -176,6 +176,10 @@ def test_list_context_has_count_total_and_prices():
     assert "แยกตามสกุลเงิน: THB 4 งาน รวม 52,927.45 THB · USD 1 งาน รวม 1,200.00 USD" in text
     assert "1) ลูกค้าใหม่ (รวมลูกค้าที่ยังไม่ลงทะเบียนหลายราย) 2 งาน 25,832.50 บาท" in text
     assert "ไม่ใช่ยอดขายจริง" in text
+    # the team's definition (confirmed 2026-11-18) travels with every approved-list answer
+    assert "'เคาะราคาแล้ว' = ใบประเมินราคาที่หัวหน้าอนุมัติราคาแล้ว (Approved ในระบบประเมินราคา)" in text
+    assert "นิยาม" not in pj.to_context(dict(p, status="pending"), {"rows": [], "count": 0, "total": None,
+                                                                    "priced": 0})
     assert "พบทั้งหมด: 5 งาน" in text and "52,927.45 บาท" in text and "1 งานที่ราคาเป็นสกุลเงินอื่น" in text
     # old system: its tax line taken off — 27,094.95 incl. 789.17 tax = the new system's 26,305.78 ex VAT
     assert "26,305.78 THB ก่อน VAT ที่จำนวน 3,000 ชิ้น (≈ 8.77 THB/ชิ้น)" in text and "27,094.95" not in text
