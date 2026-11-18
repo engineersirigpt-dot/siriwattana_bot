@@ -254,7 +254,7 @@ def _not_test_sql(name_col: str = "l.job_name", customer_col: str = "l.customer_
 # price_ex: the old system stores the price WITH its tax line (E26110464: 27,094.95 = 26,305.78 + 789.17
 # tax), MI2 before it (mid_total_ex_vat 26,305.78) — both are shown before tax.
 _PRICE_APPLY = f"""OUTER APPLY (SELECT TOP 1 x.qty AS price_qty, x.total_price - ISNULL(x.tax, 0) AS price_ex,
-            x.total_price, x.currency_no
+            x.total_price, x.currency_no, x.exchange_rate
         FROM {_PRICE} x WITH (NOLOCK) WHERE x.job_id = l.job_id
         ORDER BY CASE WHEN x.qty = x.main_qty THEN 0 ELSE 1 END, x.qty) p
     OUTER APPLY (SELECT COUNT(*) AS tiers FROM {_PRICE} y WITH (NOLOCK) WHERE y.job_id = l.job_id) t"""
@@ -266,9 +266,14 @@ _NOT_MI2 = (f"ISNULL(l.source_system, 'V1') <> 'V2' AND NOT EXISTS (SELECT 1 FRO
 
 _LIST_COLS = ("l.job_id, l.job_name, l.customer_id, c.custName, l.est_type, l.status_id, l.source_system, "
               "l.estimate_date, l.created, l.updated")
-_ROW_COLS = f"{_LIST_COLS}, p.price_qty, p.price_ex, p.total_price, p.currency_no, t.tiers"
+_ROW_COLS = f"{_LIST_COLS}, p.price_qty, p.price_ex, p.total_price, p.currency_no, p.exchange_rate, t.tiers"
 _AMOUNT = "p.price_ex"
-_AMOUNT_THB = f"CASE WHEN ISNULL(p.currency_no, 'THB') = 'THB' AND {_AMOUNT} > 0 THEN {_AMOUNT} END"
+# total_price is in BAHT for every currency: a USD / EUR estimate keeps baht there and
+# its rate in exchange_rate (EB26110201: 580,637.94 ÷ 15,810 ÷ 31.17 = 1.1782 =
+# unit_price_exchange, the USD price a copy; checked on 30 export jobs, 2026-11-18).
+# So export jobs are summed in baht too; their foreign amount is price ÷ rate.
+_AMOUNT_THB = f"CASE WHEN {_AMOUNT} > 0 THEN {_AMOUNT} END"
+_AMOUNT_FX = f"CASE WHEN {_AMOUNT} > 0 AND p.exchange_rate > 0 THEN {_AMOUNT} / p.exchange_rate END"
 
 
 def _base(p: dict) -> tuple[str, str]:
@@ -296,7 +301,7 @@ def build_search(p: dict) -> tuple[str, str]:
     top = factory.FULL_MAX if p.get("full_list") else MAX_ROWS   # "ขอดูทั้งหมด" → every row for the table
     rows_sql = f"SELECT TOP {top} {_ROW_COLS} {base} ORDER BY {date_col} DESC"
     totals_sql = (f"SELECT COUNT(*) AS n, SUM({_AMOUNT_THB}) AS total, "
-                  f"SUM(CASE WHEN ISNULL(p.currency_no, 'THB') = 'THB' AND {_AMOUNT} > 0 THEN 1 ELSE 0 END) AS priced, "
+                  f"SUM(CASE WHEN {_AMOUNT} > 0 THEN 1 ELSE 0 END) AS priced, "
                   f"SUM(CASE WHEN ISNULL(p.currency_no, 'THB') <> 'THB' THEN 1 ELSE 0 END) AS other_currency "
                   f"{base}")
     return rows_sql, totals_sql
@@ -312,7 +317,7 @@ def build_breakdowns(p: dict) -> list[str]:
         f"SELECT ISNULL(l.est_type, '-') AS est_type, COUNT(*) AS n, SUM({_AMOUNT_THB}) AS total {base} "
         f"GROUP BY ISNULL(l.est_type, '-') ORDER BY COUNT(*) DESC",
         f"SELECT ISNULL(p.currency_no, 'THB') AS currency, COUNT(*) AS n, "
-        f"SUM(CASE WHEN {_AMOUNT} > 0 THEN {_AMOUNT} END) AS total {base} "
+        f"SUM({_AMOUNT_THB}) AS total, SUM({_AMOUNT_FX}) AS total_fx {base} "
         f"GROUP BY ISNULL(p.currency_no, 'THB') ORDER BY COUNT(*) DESC",
         # top 10 here: MI2's own totals per customer are added before the top 5 is picked
         f"SELECT TOP 10 l.customer_id, MAX(c.custName) AS customer, COUNT(*) AS n, SUM({_AMOUNT_THB}) AS total {base} "
@@ -384,10 +389,10 @@ def _add(*values) -> float | None:
 
 
 def _thb(r: dict) -> float:
-    """A row's before-tax amount in baht (0 when it has none or another currency)."""
+    """A row's before-tax amount in baht (export jobs too: stored in baht), 0 when it has none."""
     ex = _f(r.get("price_ex"))
     if ex and ex > 0:
-        return ex if (r.get("currency_no") or "THB") == "THB" else 0.0
+        return ex
     return _f(r.get("mid_total_ex_vat")) or 0.0
 
 
@@ -425,9 +430,10 @@ def _merge(p: dict, legacy: list[list[dict]] | None, mi2: list[list[dict]]) -> d
     mi2_thb = [{"currency": "THB", "n": m_n, "total": mt.get("total")}] if m_n else []
     for b in list(l_cur) + mi2_thb:
         k = b.get("currency") or "THB"
-        cur = by_currency.setdefault(k, {"currency": k, "n": 0, "total": None})
+        cur = by_currency.setdefault(k, {"currency": k, "n": 0, "total": None, "total_fx": None})
         cur["n"] += int(b.get("n") or 0)
         cur["total"] = _add(cur["total"], b.get("total"))
+        cur["total_fx"] = _add(cur["total_fx"], b.get("total_fx"))
     customers: dict[str, dict] = {}
     for b in list(l_cust) + list(m_cust):
         k = str(b.get("customer_id") or "-").strip().upper()
@@ -488,7 +494,8 @@ def lookup_doc(doc_id: str | None, quotation_id: str | None) -> dict:
     legacy, (detail, quotes) = _run_both([
         f"SELECT TOP 1 {_LIST_COLS}, l.credit_term_name FROM {_LIST} l WITH (NOLOCK) "
         f"LEFT JOIN mi.dbo.customer c WITH (NOLOCK) ON c.custID = l.customer_id WHERE l.job_id = '{doc_id}'",
-        f"SELECT TOP 12 qty, total_price - ISNULL(tax, 0) AS price_ex, total_price, currency_no FROM {_PRICE} WITH (NOLOCK) "
+        f"SELECT TOP 12 qty, total_price - ISNULL(tax, 0) AS price_ex, total_price, currency_no, exchange_rate "
+        f"FROM {_PRICE} WITH (NOLOCK) "
         f"WHERE job_id = '{doc_id}' ORDER BY qty",
         f"SELECT TOP 20 from_status_id, to_status_id, created FROM {_LOG} WITH (NOLOCK) "
         f"WHERE job_id = '{doc_id}' ORDER BY created",
@@ -548,10 +555,14 @@ def list_table(p: dict, rows: list[dict], count: int, title: str | None = None) 
             "|---|---|---|---:|---:|---|")
     body = []
     for r in shown:
-        ex, qty, cur = r.get("price_ex"), r.get("price_qty"), r.get("currency_no") or "THB"
+        ex, qty = r.get("price_ex"), r.get("price_qty")
         if not (ex and float(ex) > 0):
-            ex, qty, cur = r.get("mid_total_ex_vat"), r.get("mid_qty"), "THB"
-        price = f"{_money(ex)} {cur}" if ex and float(ex) > 0 else "ยังไม่มีราคา"
+            ex, qty = r.get("mid_total_ex_vat"), r.get("mid_qty")
+        # baht for every job; an export job also shows what it is in the customer's currency
+        # (it showed "580,637.94 USD" for 580,637.94 baht, 2026-11-18)
+        fx = _fx(r)
+        price = (f"{_money(ex)} THB" + (f" (≈ {fx[0]:,.2f} {fx[1]})" if fx else "")
+                 if ex and float(ex) > 0 else "ยังไม่มีราคา")
         when = r.get("estimate_date") if approve else (r.get("updated") or r.get("created"))
         body.append(f"| {_cell(r.get('job_id'), 14)} | {_cell(r.get('job_name'))} | {_cell(r.get('custName'), 40)} | "
                     f"{_qty(qty)} | {price} | {_when(when)} |")
@@ -562,17 +573,30 @@ def list_table(p: dict, rows: list[dict], count: int, title: str | None = None) 
     return (f"**{title}**\n\n" if title else "") + head + "\n" + "\n".join(body)
 
 
+def _fx(r: dict) -> tuple[float, str, float] | None:
+    """(amount in the customer's currency, currency, baht per unit) for an export
+    job priced in USD / EUR — its stored price is baht at its own rate."""
+    cur = (r.get("currency_no") or "THB").strip().upper()
+    ex, rate = _f(r.get("price_ex")), _f(r.get("exchange_rate"))
+    if cur == "THB" or not ex or ex <= 0 or not rate or rate <= 0:
+        return None
+    return ex / rate, cur, rate
+
+
 def _price_text(r: dict) -> str:
-    """The price line for one job, before tax: the selling price at its main
-    quantity (old-system price lines, tax taken off), else the new system's
-    ex-VAT price at its middle quantity. Both systems agree on this basis."""
+    """The price line for one job, before tax and in baht: the selling price at
+    its main quantity (old-system price lines, tax taken off), else the new
+    system's ex-VAT price at its middle quantity. Both systems agree on this basis."""
     ex, qty = r.get("price_ex"), r.get("price_qty")
     if ex and float(ex) > 0:
-        cur = r.get("currency_no") or "THB"
-        per = f" (≈ {float(ex) / float(qty):,.2f} {cur}/ชิ้น)" if qty else ""
+        per = f" (≈ {float(ex) / float(qty):,.2f} บาท/ชิ้น)" if qty else ""
         tiers = r.get("tiers") or 0
         more = f" · มีราคาทั้งหมด {tiers} ระดับจำนวน" if tiers and int(tiers) > 1 else ""
-        return f"{_money(ex)} {cur} ก่อน VAT ที่จำนวน {_qty(qty)} ชิ้น{per}{more}"
+        fx = _fx(r)
+        export = (f" · เสนอลูกค้าเป็น {fx[1]}: ≈ {fx[0]:,.2f} {fx[1]}"
+                  + (f" (≈ {fx[0] / float(qty):,.4f} {fx[1]}/ชิ้น)" if qty else "")
+                  + f" ที่อัตรา {fx[2]:,.2f} บาท/{fx[1]}" if fx else "")
+        return f"{_money(ex)} บาท ก่อน VAT ที่จำนวน {_qty(qty)} ชิ้น{per}{export}{more}"
     mid_total, mid_qty = r.get("mid_total_ex_vat"), r.get("mid_qty")
     if mid_total and float(mid_total) > 0:
         per = f" (≈ {float(mid_total) / float(mid_qty):,.2f} บาท/ชิ้น)" if mid_qty else ""
@@ -622,7 +646,7 @@ def to_context(p: dict, data: dict) -> str:
             first = data["prices"][0]
             r.update(price_qty=first.get("qty"), price_ex=first.get("price_ex"),
                      total_price=first.get("total_price"), currency_no=first.get("currency_no"),
-                     tiers=len(data["prices"]))
+                     exchange_rate=first.get("exchange_rate"), tiers=len(data["prices"]))
         if data.get("detail"):
             r.update(mid_qty=data["detail"][0].get("mid_qty"), mid_total_ex_vat=data["detail"][0].get("mid_total_ex_vat"))
         out = [head, "ใบประเมินราคา:", _row_text(r)]
@@ -630,9 +654,12 @@ def to_context(p: dict, data: dict) -> str:
             out.append(f"  เครดิต: {r['credit_term_name']}")
         if data["prices"]:
             out.append("ราคาขายตามจำนวน:")
-            out += [f"  - {_qty(x.get('qty'))} ชิ้น: {_money(x.get('price_ex'))} {x.get('currency_no') or 'THB'} ก่อน VAT"
-                    + (f" (≈ {float(x['price_ex']) / float(x['qty']):,.2f} ต่อชิ้น)" if x.get("price_ex") and x.get("qty")
-                       else "") for x in data["prices"]]
+            for x in data["prices"]:
+                fx = _fx(x)
+                out.append(f"  - {_qty(x.get('qty'))} ชิ้น: {_money(x.get('price_ex'))} บาท ก่อน VAT"
+                           + (f" (≈ {float(x['price_ex']) / float(x['qty']):,.2f} บาท/ชิ้น)"
+                              if x.get("price_ex") and x.get("qty") else "")
+                           + (f" · ≈ {fx[0]:,.2f} {fx[1]}" if fx else ""))
         if data.get("detail"):
             d = data["detail"][0]
             out.append(f"รายละเอียดในระบบใหม่: จำนวนที่ขอราคา {d.get('qty_list') or '-'} · งานพิมพ์ {d.get('print_type') or '-'} "
@@ -653,23 +680,28 @@ def to_context(p: dict, data: dict) -> str:
                      "(Approved ในระบบประเมินราคา) — ยังไม่ใช่งานที่ลูกค้าสั่ง")
     lines.append(f"พบทั้งหมด: {data['count']} งาน")
     if data["count"]:
-        lines.append(f"มูลค่ารวม (ผลรวมราคาประเมินก่อน VAT ที่จำนวนหลักของแต่ละงาน รวมเฉพาะ {data['priced']} งาน"
-                     f"ที่มีราคาเป็นบาท — เป็นมูลค่าราคาที่เสนอ ไม่ใช่ยอดขายจริง): {_money(data['total'])} บาท")
+        unpriced = data["count"] - data["priced"]
+        lines.append(f"มูลค่ารวม (ผลรวมราคาประเมินก่อน VAT เป็นเงินบาท ที่จำนวนหลักของแต่ละงาน จาก {data['priced']} งาน"
+                     f"ที่มีราคา{f' — อีก {unpriced} งานยังไม่มีราคา' if unpriced > 0 else ''} — เป็นมูลค่าราคาที่เสนอ "
+                     f"ไม่ใช่ยอดขายจริง): {_money(data['total'])} บาท")
         if data.get("other_currency"):
-            lines.append(f"มี {data['other_currency']} งานที่ราคาเป็นสกุลเงินอื่น ไม่ได้รวมในยอดบาทข้างบน")
+            lines.append(f"ในจำนวนนี้มี {data['other_currency']} งานที่เสนอราคาลูกค้าเป็นเงินต่างประเทศ (USD/EUR) — "
+                         "ระบบเก็บราคาของงานเหล่านี้เป็นเงินบาทตามอัตราแลกเปลี่ยนในใบประเมินอยู่แล้ว "
+                         "จึงรวมอยู่ในมูลค่าบาทข้างบนด้วย")
         if data.get("by_type"):
             lines.append("แยกตามประเภทงาน: " + " · ".join(
                 f"{b.get('est_type') or '-'} {b.get('n') or 0} งาน "
-                + (f"(มูลค่า {_money(b.get('total'))} บาท)" if b.get("total") else "(ราคาไม่ได้เป็นเงินบาท)")
+                + (f"(มูลค่า {_money(b.get('total'))} บาท)" if b.get("total") else "(ยังไม่มีราคา)")
                 for b in data["by_type"]))
         if len(data.get("by_currency") or []) > 1:
-            # counts only: "USD 52 งาน รวม 41,110,437.31 USD" (2026-11-18) is ~790k USD a job — the
-            # amount is probably in baht with a foreign currency label. Not shown until checked.
-            lines.append("แยกตามสกุลเงิน (จำนวนงาน): " + " · ".join(
-                f"{b.get('currency') or 'THB'} {b.get('n') or 0} งาน" for b in data["by_currency"])
-                + " — ยังไม่แสดงมูลค่าของสกุลเงินอื่น")
+            # total is baht for every currency (export jobs keep baht at their own rate, 2026-11-18)
+            lines.append("แยกตามสกุลเงินที่เสนอลูกค้า: " + " · ".join(
+                f"{b.get('currency') or 'THB'} {b.get('n') or 0} งาน ({_money(b.get('total'))} บาท"
+                + (f" ≈ {_money(b.get('total_fx'))} {b.get('currency')}"
+                   if (b.get("currency") or "THB") != "THB" and b.get("total_fx") else "") + ")"
+                for b in data["by_currency"]))
         if data.get("top_customers"):
-            lines.append("ลูกค้าที่มูลค่ารวมสูงสุด (เฉพาะราคาเป็นบาท): " + " · ".join(
+            lines.append("ลูกค้าที่มูลค่ารวมสูงสุด: " + " · ".join(
                 f"{i}) {(b.get('customer') or '-').strip()}"
                 + (" (รวมลูกค้าที่ยังไม่ลงทะเบียนหลายราย)" if b.get("customer_id") == "C9999998" else "")
                 + f" {b.get('n') or 0} งาน {_money(b.get('total'))} บาท"
@@ -693,7 +725,7 @@ def to_context(p: dict, data: dict) -> str:
                          "ตรง ๆ เช่น 'ใช่ค่ะ…' แล้วอธิบายสั้น ๆ ว่าตัวเลขนี้นับอะไร ห้ามทวนคำตอบเดิมทั้งหมด "
                          "และไม่ต้องแสดงรายการหรือตาราง)")
         if data.get("priciest"):
-            lines.append(f"5 งานที่ราคาสูงสุดในเงื่อนไขนี้ (เทียบจากทั้งหมด {data['count']} งาน เฉพาะราคาเป็นบาท — "
+            lines.append(f"5 งานที่ราคาสูงสุดในเงื่อนไขนี้ (เทียบเป็นเงินบาทจากทั้งหมด {data['count']} งาน — "
                          "ใช้ตอบ 'งานไหนแพงสุด'):")
             lines += [_row_text(r) for r in data["priciest"]]
         rows = data["rows"][:MAX_ROWS]   # a full list goes to the table, not to the model

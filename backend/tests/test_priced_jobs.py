@@ -109,7 +109,9 @@ def test_search_reads_the_old_system_minus_what_mi2_owns():
     assert rows_sql.startswith(f"SELECT TOP {pj.MAX_ROWS} ")
     assert "ORDER BY CASE WHEN x.qty = x.main_qty THEN 0 ELSE 1 END, x.qty" in rows_sql   # price at the main qty
     assert "x.total_price - ISNULL(x.tax, 0) AS price_ex" in rows_sql                     # before tax, like MI2
-    assert "ISNULL(p.currency_no, 'THB') = 'THB' AND p.price_ex > 0" in totals_sql        # only baht is summed
+    # export jobs (USD / EUR) keep baht in total_price, so every priced job is summed
+    assert "SUM(CASE WHEN p.price_ex > 0 THEN p.price_ex END) AS total" in totals_sql
+    assert "x.currency_no, x.exchange_rate" in rows_sql and "p.exchange_rate" in rows_sql
 
 
 def test_mi2_is_read_directly_in_the_same_shape():
@@ -138,7 +140,8 @@ def test_long_lists_get_breakdowns_in_the_same_session(monkeypatch):
     assert sqls[0].startswith("SELECT DISTINCT l.customer_id ")
     assert "GROUP BY ISNULL(l.est_type, '-')" in sqls[1] and "GROUP BY ISNULL(p.currency_no, 'THB')" in sqls[2]
     assert sqls[3].startswith("SELECT TOP 10 l.customer_id") and "GROUP BY l.customer_id" in sqls[3]
-    assert sqls[4].startswith("SELECT TOP 5 l.job_id") and "ORDER BY CASE WHEN ISNULL(p.currency_no, 'THB')" in sqls[4]
+    assert "SUM(CASE WHEN p.price_ex > 0 AND p.exchange_rate > 0 THEN p.price_ex / p.exchange_rate END) AS total_fx"         in sqls[2]
+    assert sqls[4].startswith("SELECT TOP 5 l.job_id") and "ORDER BY CASE WHEN p.price_ex > 0" in sqls[4]
     assert all("l.estimate_date >= '2026-11-01'" in q for q in sqls)
     calls = []
     monkeypatch.setattr(pj, "_run_both", lambda a, b: calls.append((a, b)) or ([[] for _ in a], [[] for _ in b]))
@@ -296,28 +299,31 @@ def test_book_and_popup_numbers_are_estimates_too(q, doc):
 def test_list_context_has_count_total_and_prices():
     p = {"status": "approve", "date_from": dt.date(2026, 11, 16), "date_to": dt.date(2026, 11, 17), "keyword": None}
     free = dict(ROW, job_id="E26110465", price_ex=None, total_price=None, tiers=0)
-    text = pj.to_context(p, {"rows": [ROW, ROW_V2, free], "count": 5, "total": 52927.45, "priced": 2,
+    text = pj.to_context(p, {"rows": [ROW, ROW_V2, free], "count": 5, "total": 52927.45, "priced": 4,
                              "other_currency": 1,
                              "by_type": [{"est_type": "packaging", "n": 4, "total": 52927.45},
                                          {"est_type": "book", "n": 1, "total": None}],
                              "by_currency": [{"currency": "THB", "n": 4, "total": 52927.45},
-                                             {"currency": "USD", "n": 1, "total": 1200.0}],
+                                             {"currency": "USD", "n": 1, "total": 580637.94,
+                                              "total_fx": 18628.10}],
                              "top_customers": [{"customer": "ลูกค้าใหม่", "customer_id": "C9999998", "n": 2,
                                                 "total": 25832.50}]})
     # a long list is summarised: by type, by currency, the biggest customers — and it is not revenue
     assert "แยกตามประเภทงาน: packaging 4 งาน (มูลค่า 52,927.45 บาท) · book 1 งาน" in text
-    # counts only: other-currency amounts looked like baht with a foreign label (USD 41M for 52 jobs)
-    assert "แยกตามสกุลเงิน (จำนวนงาน): THB 4 งาน · USD 1 งาน — ยังไม่แสดงมูลค่าของสกุลเงินอื่น" in text
-    assert "1,200.00" not in text
+    # export jobs: baht, with the customer's currency beside it (checked on 30 jobs, 2026-11-18)
+    assert ("แยกตามสกุลเงินที่เสนอลูกค้า: THB 4 งาน (52,927.45 บาท) · "
+            "USD 1 งาน (580,637.94 บาท ≈ 18,628.10 USD)") in text
+    assert "1 งานที่เสนอราคาลูกค้าเป็นเงินต่างประเทศ" in text and "รวมอยู่ในมูลค่าบาทข้างบนด้วย" in text
+    assert "จาก 4 งานที่มีราคา — อีก 1 งานยังไม่มีราคา" in text
     assert "1) ลูกค้าใหม่ (รวมลูกค้าที่ยังไม่ลงทะเบียนหลายราย) 2 งาน 25,832.50 บาท" in text
     assert "ไม่ใช่ยอดขายจริง" in text
     # the team's definition (confirmed 2026-11-18) travels with every approved-list answer
     assert "'เคาะราคาแล้ว' = ใบประเมินราคาที่หัวหน้าอนุมัติราคาแล้ว (Approved ในระบบประเมินราคา)" in text
     assert "นิยาม" not in pj.to_context(dict(p, status="pending"), {"rows": [], "count": 0, "total": None,
                                                                     "priced": 0})
-    assert "พบทั้งหมด: 5 งาน" in text and "52,927.45 บาท" in text and "1 งานที่ราคาเป็นสกุลเงินอื่น" in text
+    assert "พบทั้งหมด: 5 งาน" in text and "52,927.45 บาท" in text
     # old system: its tax line taken off — 27,094.95 incl. 789.17 tax = the new system's 26,305.78 ex VAT
-    assert "26,305.78 THB ก่อน VAT ที่จำนวน 3,000 ชิ้น (≈ 8.77 THB/ชิ้น)" in text and "27,094.95" not in text
+    assert "26,305.78 บาท ก่อน VAT ที่จำนวน 3,000 ชิ้น (≈ 8.77 บาท/ชิ้น)" in text and "27,094.95" not in text
     assert "25,832.50 บาท ก่อน VAT ที่จำนวน 500 ชิ้น" in text                       # new system: ex VAT
     assert "ยังไม่มีราคา" in text and "ข้อมูลประกอบ: 3 งานล่าสุด" in text
     # the bot told users "ระบบแสดงเฉพาะรายการล่าสุด 40 งาน" — the row cap is internal now
@@ -329,6 +335,23 @@ def test_list_context_has_count_total_and_prices():
     assert ("[E26110464] Rep.SRP (Tray) - Can Pack 24 x 7\n"
             "  ลูกค้า: โชติวัฒน์อุตสาหกรรมการผลิต (C2014056)") in text
     assert " | " not in text
+
+
+EXPORT = dict(ROW, job_id="EB26110201", job_name="Mensa Crossword PAD 2028", custName="IMAGO PUBLISHING",
+              est_type="book", price_qty=15810, price_ex=580637.94, total_price=580637.94, currency_no="USD",
+              exchange_rate=31.17)
+
+
+def test_an_export_job_is_baht_with_its_foreign_amount_beside_it():
+    # prod 2026-11-18: the table said "580,637.94 USD" — the stored price is baht (580,637.94 ÷ 15,810 ÷ 31.17
+    # = 1.1782 USD a copy = unit_price_exchange)
+    table = pj.list_table({"status": "approve"}, [EXPORT], 1)
+    assert "| 15,810 | 580,637.94 THB (≈ 18,628.10 USD) |" in table and "580,637.94 USD" not in table
+    text = pj._price_text(EXPORT)
+    assert text.startswith("580,637.94 บาท ก่อน VAT ที่จำนวน 15,810 ชิ้น (≈ 36.73 บาท/ชิ้น)")
+    assert "เสนอลูกค้าเป็น USD: ≈ 18,628.10 USD (≈ 1.1782 USD/ชิ้น) ที่อัตรา 31.17 บาท/USD" in text
+    assert pj._fx(ROW) is None and pj._fx(dict(EXPORT, exchange_rate=None)) is None
+    assert pj._thb(EXPORT) == pytest.approx(580637.94)                   # counts for "แพงสุด" too
 
 
 def test_list_table_is_built_in_code():
@@ -363,7 +386,7 @@ def test_full_list_and_priciest_in_the_context():
     assert "ผู้ใช้ขอดูรายการทั้งหมด" in text and "ห้ามบอกว่าแสดงได้ไม่ครบ" in text
     assert text.count("[E26110464]") == pj.MAX_ROWS            # the model still sees only MAX_ROWS rows
     # "อันไหนแพงสุด" is answered over the whole range, not over the newest rows
-    assert "5 งานที่ราคาสูงสุดในเงื่อนไขนี้ (เทียบจากทั้งหมด 661 งาน" in text and "[E26119999]" in text
+    assert "5 งานที่ราคาสูงสุดในเงื่อนไขนี้ (เทียบเป็นเงินบาทจากทั้งหมด 661 งาน" in text and "[E26119999]" in text
 
 
 def test_empty_and_single_document_contexts():
@@ -376,7 +399,7 @@ def test_empty_and_single_document_contexts():
         "history": [{"from_status_id": 0, "to_status_id": 1, "created": dt.datetime(2026, 11, 17, 16, 19)},
                     {"from_status_id": 1, "to_status_id": 3, "created": dt.datetime(2026, 11, 18, 11, 25)}],
         "detail": [], "quotes": [], "doc_id": "E26110464"})
-    assert "3,000 ชิ้น: 26,305.78 THB ก่อน VAT (≈ 8.77 ต่อชิ้น)" in one and "5,000 ชิ้น: 40,500.00 THB ก่อน VAT" in one
+    assert "3,000 ชิ้น: 26,305.78 บาท ก่อน VAT (≈ 8.77 บาท/ชิ้น)" in one and "5,000 ชิ้น: 40,500.00 บาท ก่อน VAT" in one
     assert "มีราคาทั้งหมด 2 ระดับจำนวน" in one and "เครดิต 30 วัน" in one
     assert "2026-11-18 11:25: อนุมัติแล้ว (เคาะราคาแล้ว)" in one
     quote = {"quotation_id": "QE2600190", "revision": 0, "status_label": "Approved", "currency": "THB",
