@@ -85,12 +85,29 @@ def test_search_sql_reads_the_live_server_and_leaves_out_test_rows():
         assert "FROM MI2_ESTIMATE.dbo.tb_rfq WITH (NOLOCK)" in sql
         assert "estimate_status = 'approve'" in sql
         assert "approved_at >= '2026-11-16'" in sql and "approved_at < '2026-11-18'" in sql   # date_to inclusive
-        assert "customer_id NOT IN ('C9999998')" in sql
-        assert "N'%test%'" in sql and "N'%เทส%'" in sql
+        # C9999998 = "ลูกค้าใหม่", not a test customer: every approved estimate on the
+        # live system used it, and excluding it answered "0 งาน" (2026-11-18)
+        assert "C9999998" not in sql and "customer_id NOT IN" not in sql
+        assert "N'%test%'" in sql and "N'%เทส%'" in sql and "N'%ทดสอบ%'" in sql
         # OPENQUERY takes no parameters: the keyword is reduced to safe characters
         assert "N'%AROMA DROP TABLE x--%'" in sql and "';" not in sql
     assert rows_sql.startswith(f"SELECT TOP {pj.MAX_ROWS} ")
     assert "contact" not in rows_sql and "ae_emp_name" not in rows_sql   # no personal columns
+
+
+def test_live_approvals_of_new_customers_count_and_the_it_test_does_not():
+    # the three approved rows on .19 (est19_peek, 2026-11-18), against the name filter
+    import re as _re
+
+    rows_sql, _ = pj.build_search({"status": "approve", "date_from": dt.date(2026, 11, 1),
+                                   "date_to": dt.date(2026, 11, 18), "keyword": None})
+    patterns = _re.findall(r"estimate_name NOT LIKE N'%(.+?)%'", rows_sql)
+
+    def kept(name):
+        return not any(p.lower() in name.lower() for p in patterns)
+
+    assert kept("WAGEN-Box_FORPRESS") and kept("กล่อง Jaelek")
+    assert not kept("Test - IT ทดสอบระบบ สร้าง Estimate Packaging")
 
 
 def test_any_status_list_excludes_drafts():

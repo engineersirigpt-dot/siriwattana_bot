@@ -8,7 +8,7 @@ Quotations (QE…) hang off it by doc_id.
 Only fixed SELECTs on a few non-personal columns, through factory.session()
 (OPENQUERY via the MI login server's linked server, or a direct .19 account);
 nothing is ever written. Owner decision 2026-11-17: every signed-in user may
-ask, prices included. Test rows (test customer, "test"/"เทส" in the name) are
+ask, prices included. Test rows ("test"/"เทส"/"ทดสอบ" in the name) are
 left out. PRICED_JOBS_MODE=off disables it.
 """
 from __future__ import annotations
@@ -22,7 +22,7 @@ from functools import lru_cache
 PRICED_JOBS_MODE = os.getenv("PRICED_JOBS_MODE", "on").strip().lower()
 PRICED_JOBS_DB = os.getenv("PRICED_JOBS_DB", "MI2_ESTIMATE").strip()
 TEST_CUSTOMERS = tuple(
-    c.strip() for c in os.getenv("PRICED_JOBS_TEST_CUSTOMERS", "C9999998").split(",") if c.strip()
+    c.strip() for c in os.getenv("PRICED_JOBS_TEST_CUSTOMERS", "").split(",") if c.strip()
 )
 MAX_ROWS = 40
 _DB_TIMEOUT = 20
@@ -203,7 +203,11 @@ _DATE_COL = {"approve": "approved_at", "pending": "request_for_approve_at", "rej
 def _not_test_sql() -> str:
     ids = [c for c in TEST_CUSTOMERS if re.fullmatch(r"[A-Za-z0-9_\-]{1,20}", c)]
     parts = [f"customer_id NOT IN ({', '.join(repr(c) for c in ids)})"] if ids else []
-    parts += ["estimate_name NOT LIKE N'%test%'", "estimate_name NOT LIKE N'%เทส%'"]
+    # C9999998 is NOT a test customer: it is "ลูกค้าใหม่" (a customer not registered
+    # yet). Every approved estimate on the live system used it, so excluding it
+    # gave "0 งาน" (2026-11-18). Test rows are recognised by their name only.
+    parts += ["estimate_name NOT LIKE N'%test%'", "estimate_name NOT LIKE N'%เทส%'",
+              "estimate_name NOT LIKE N'%ทดสอบ%'"]
     return " AND ".join(parts)
 
 
