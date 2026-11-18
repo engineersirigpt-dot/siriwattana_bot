@@ -22,7 +22,7 @@ function Markdown({ text, live = false }: { text: string; live?: boolean }) {
     <div
       data-testid="md"
       style={{ fontSize: "15px", overflowWrap: "anywhere" }}
-      className={`${live ? "md-live " : ""}
+      className={`${live ? "md-live " : ""}md-lists
         prose prose-sm max-w-none min-w-0
         text-content leading-relaxed
         prose-headings:font-semibold prose-headings:text-content
@@ -35,7 +35,7 @@ function Markdown({ text, live = false }: { text: string; live?: boolean }) {
         prose-em:text-content
         prose-a:text-purple-600 prose-a:underline-offset-2 hover:prose-a:underline
         prose-ul:my-2 prose-ol:my-2
-        prose-li:my-0.5 prose-li:marker:text-purple-500
+        prose-li:my-0.5
         prose-blockquote:border-l-4 prose-blockquote:border-purple-300
         prose-blockquote:bg-purple-50/50 dark:prose-blockquote:bg-purple-900/20 prose-blockquote:py-1 prose-blockquote:px-3
         prose-blockquote:rounded-r prose-blockquote:not-italic
