@@ -95,6 +95,10 @@ def test_job_queries_use_indexes_bounds_and_no_personal_columns():
     qs = fx.job_queries("J52600854")
     assert "WHERE m.jobid = 'J52600854'" in qs["master"]
     assert "header_jobid = 'J52600854'" in qs["production"] and "plan_id IN" in qs["production"]
+    # hand work and packing time sheets hang off their own plans (H15 3,700 on J82601825 was missed, 2026-11-18)
+    assert "handwork_plan_id IN (SELECT id FROM mi.dbo.Si_jobopen_man WITH (NOLOCK) WHERE JobID = 'J52600854')"         in qs["production"]
+    assert "packing_plan_id IN (SELECT id FROM mi.dbo.Si_jobopen_packing WITH (NOLOCK) WHERE jobID = 'J52600854')"         in qs["production"]
+    assert "issued_pieces" in qs["pallets"]
     assert "MAX(qc_head_id) - 20000" in qs["qc"]                  # tb_qc_head has no job index
     assert "ISNULL(k.canceled, 0) = 0" in qs["delivered"]
     every = " ".join(qs.values()).lower()
@@ -112,7 +116,11 @@ def test_due_overdue_repair_and_qc_queries():
     rows, _ = fx.due_queries({"kind": "overdue"}, TODAY)
     # only due dates in the last 30 days: years-old due dates on recent jobs are data-entry noise
     assert "m.due1 >= '2026-10-19'" in rows and "m.due1 <= '2026-11-17'" in rows
-    assert "ISNULL(x.delivered, 0) < m.qty1" in rows
+    # shipped = the larger of the dockets (cancelled out) and the FG pallets issued: three closed jobs
+    # checked on 2026-11-18 had no docket at all, their pallets issued for exactly the ordered qty
+    assert ("CASE WHEN ISNULL(x.delivered, 0) > ISNULL(f.issued, 0) THEN ISNULL(x.delivered, 0) "
+            "ELSE ISNULL(f.issued, 0) END < m.qty1") in rows
+    assert "ISNULL(k.canceled, 0) = 0" in rows and "fp.issue_status = 1" in rows
     rows, counts = fx.repair_queries({"kind": "repairs", "status": "open"}, TODAY)
     assert "r.ma_status = 0" in rows and "r.notify_datetime >= '2026-08-20'" in rows   # open: last 90 days
     assert "COLLATE DATABASE_DEFAULT" in rows and "emp" not in rows and "GROUP BY r.ma_status" in counts
@@ -149,13 +157,19 @@ def test_ordinary_questions_do_not():
 def test_job_context_tells_the_whole_story():
     text = fx.job_context(overview())
     for part in ("J52600854", "ธนาคารเพื่อการเกษตร", "229,430", "วันกำหนดส่งลูกค้า: 2026-10-26", "ยังไม่ปิดงาน",
-                 "L444APC: 2026-11-05 ถึง 2026-11-12 (2 รอบ)", "CTP 1", "ส่งของแล้ว (ตามใบส่งของ): 20 ใบ รวม 2,350",
+                 "L444APC: 2026-11-05 ถึง 2026-11-12 (2 รอบ)", "CTP 1", "- ตามใบส่งของ: 20 ใบ รวม 2,350",
                  "คงเหลือตามจำนวนสั่ง 227,080", "นัดส่งที่ยังไม่ถึง: 2026-11-30 จำนวน 500", "52 พาเลท",
                  "QC: ตรวจ 10 ครั้ง", "ปกยับ", "checklist QC หน้าเครื่อง: 10 ใบ"):
         assert part in text, part
     closed = fx.job_context(overview(closed=[{"created": dt.datetime(2026, 11, 16, 20, 7), "job_qty": 6000}],
                                      master=dict(MASTER, cancelJob=1)))
     assert "ปิดงานแล้ว: ใช่ เมื่อ 2026-11-16 20:07" in closed and "ยกเลิกงานแล้ว" in closed
+    # shipped on pallets with no docket: not "ยังไม่ได้ส่ง"
+    fg = fx.job_context(overview(delivered=[{"dockets": 0, "qty": None}],
+                                 pallets=[{"pallets": 2, "pieces": 7000, "issued": 2, "issued_pieces": 6000}]))
+    assert "ส่งของแล้ว (ใช้ยอดที่มากกว่าระหว่างใบส่งของกับพาเลทที่เบิกออกจากคลัง): 6,000" in fg
+    assert "พาเลทสินค้าสำเร็จรูปที่เบิกออกจากคลัง: 2 พาเลท รวม 6,000 ชิ้น" in fg
+    assert "ห้ามตอบว่ายังไม่ได้ส่งของ" in fg and "คงเหลือตามจำนวนสั่ง 223,430" in fg
     bare = fx.job_context(overview(plan=[], production=[], qc=[{}], pallets=[{}], checklists=[{}]))
     assert "แผนเครื่องจักร: ยังไม่มี" in bare and "บันทึกการผลิตจริง: ยังไม่มี" in bare and "QC: ยังไม่มีผลตรวจ" in bare
     assert "ไม่พบเลขงาน J99999999" in fx.job_context({"found": False, "job": "J99999999"})
@@ -169,6 +183,11 @@ def test_ops_contexts():
                           "by_day": [("2026-11-20", 120), ("2026-11-21", 131)]})
     assert "พบทั้งหมด: 251 งาน (รายการด้านล่างคือ 1 งานแรก" in due and "กำหนดส่ง 2026-11-20" in due
     assert "ส่งแล้ว 0" in due and "2026-11-20 = 120 งาน, 2026-11-21 = 131 งาน" in due
+    late = fx.ops_context({"kind": "overdue", "keyword": None},
+                          {"rows": [{"jobid": "26090335", "qty1": 3300, "due1": "2026-10-19", "delivered": 0}],
+                           "count": 746, "by_day": [("2026-10-19", 746)], "no_record": 600}, today=TODAY)
+    assert "ในจำนวนนี้ 600 งานไม่มีบันทึกการส่งในระบบเลย" in late and "ยังไม่ครบ มี 146 งาน" in late
+    assert "ยอดส่งแล้ว = ยอดที่มากกว่าระหว่างใบส่งของกับพาเลทที่เบิกออกจากคลัง" in late
     open_ = fx.ops_context({"kind": "repairs", "status": "open"},
                            {"counts": {0: 140, 1: 168, 2: 31}, "rows": [{"ma_id": "MR1", "ma_status": 0}]}, today=TODAY)
     assert "ทั้งหมด 339 ใบ · ยังไม่เสร็จ 140 · ซ่อมเสร็จ 168" in open_

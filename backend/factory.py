@@ -206,7 +206,11 @@ def job_queries(job: str) -> dict[str, str]:
             WHERE h.header_id IN (
                 SELECT header_id FROM mi.dbo.timesheet_header WITH (NOLOCK) WHERE header_jobid = {j}
                 UNION SELECT header_id FROM mi.dbo.timesheet_header WITH (NOLOCK)
-                      WHERE plan_id IN (SELECT id FROM mi.dbo.machine_planning WITH (NOLOCK) WHERE jobid = {j}))
+                      WHERE plan_id IN (SELECT id FROM mi.dbo.machine_planning WITH (NOLOCK) WHERE jobid = {j})
+                UNION SELECT header_id FROM mi.dbo.timesheet_header WITH (NOLOCK)
+                      WHERE handwork_plan_id IN (SELECT id FROM mi.dbo.Si_jobopen_man WITH (NOLOCK) WHERE JobID = {j})
+                UNION SELECT header_id FROM mi.dbo.timesheet_header WITH (NOLOCK)
+                      WHERE packing_plan_id IN (SELECT id FROM mi.dbo.Si_jobopen_packing WITH (NOLOCK) WHERE jobID = {j}))
             GROUP BY h.machine_id, mc.machine_name ORDER BY MIN(i.startTime)""",
         "requests": f"""SELECT COUNT(*) AS n, SUM(qty) AS qty, MIN(delivery_date) AS first_date,
                 MAX(delivery_date) AS last_date
@@ -220,7 +224,8 @@ def job_queries(job: str) -> dict[str, str]:
             WHERE d.jobid = {j} AND ISNULL(k.canceled, 0) = 0""",
         "pallets": f"""SELECT COUNT(*) AS pallets, SUM(qty_pieces) AS pieces, MAX(product_date) AS last_product_date,
                 SUM(CASE WHEN receive_status = 1 THEN 1 ELSE 0 END) AS received,
-                SUM(CASE WHEN issue_status = 1 THEN 1 ELSE 0 END) AS issued
+                SUM(CASE WHEN issue_status = 1 THEN 1 ELSE 0 END) AS issued,
+                SUM(CASE WHEN issue_status = 1 THEN qty_pieces ELSE 0 END) AS issued_pieces
             FROM mi.dbo.FG_Product_Pallet WITH (NOLOCK) WHERE job_id = {j}""",
         # tb_qc_head has no job index: look only at the newest 20,000 inspections (~2 years)
         "qc": f"""SELECT COUNT(*) AS inspections, SUM(problem_all) AS checked, SUM(problem_fail) AS failed,
@@ -276,6 +281,13 @@ def effective_range(p: dict, today: dt.date) -> tuple[dt.date, dt.date]:
     return p.get("date_from") or today, p.get("date_to") or today + dt.timedelta(days=7)
 
 
+# What has left the factory: the larger of the delivery dockets (cancelled ones
+# out) and the FG pallets issued from the store — many jobs ship on pallets alone
+# with no docket, and counted as overdue with "ส่งแล้ว 0" (2026-11-18).
+_SHIPPED = ("CASE WHEN ISNULL(x.delivered, 0) > ISNULL(f.issued, 0) "
+            "THEN ISNULL(x.delivered, 0) ELSE ISNULL(f.issued, 0) END")
+
+
 def due_queries(p: dict, today: dt.date) -> tuple[str, str]:
     """(rows, count) for jobs due in a range ('due') or past due and not fully delivered ('overdue')."""
     kw = safe_keyword(p.get("keyword"))
@@ -286,7 +298,7 @@ def due_queries(p: dict, today: dt.date) -> tuple[str, str]:
              "NOT EXISTS (SELECT 1 FROM mi.dbo.mi_close_job c WITH (NOLOCK) WHERE c.job_id = m.jobid)",
              f"m.due1 >= '{_day(d_from)}'", f"m.due1 <= '{_day(d_to)}'"]
     if p.get("kind") == "overdue":
-        where.append("ISNULL(x.delivered, 0) < m.qty1")
+        where.append(f"{_SHIPPED} < m.qty1")
     order = "m.due1, m.jobid"
     if kw:
         where.append(f"(m.job_name LIKE N'%{kw}%' OR c.custName LIKE N'%{kw}%' OR m.jobid = '{kw}')")
@@ -294,11 +306,18 @@ def due_queries(p: dict, today: dt.date) -> tuple[str, str]:
     base = f"""FROM mi.dbo.mi m WITH (NOLOCK)
         LEFT JOIN mi.dbo.customer c WITH (NOLOCK) ON c.custID = m.custid
         OUTER APPLY (SELECT SUM(d.qty) AS delivered FROM mi.dbo.mi_delivery_docket_detail d WITH (NOLOCK)
-                     WHERE d.jobid = m.jobid) x
+                     LEFT JOIN mi.dbo.mi_delivery_docket k WITH (NOLOCK) ON k.ddid = d.ddid
+                     WHERE d.jobid = m.jobid AND ISNULL(k.canceled, 0) = 0) x
+        OUTER APPLY (SELECT SUM(fp.qty_pieces) AS issued FROM mi.dbo.FG_Product_Pallet fp WITH (NOLOCK)
+                     WHERE fp.job_id = m.jobid AND fp.issue_status = 1) f
         WHERE {w}"""
     top = FULL_MAX if p.get("full_list") else MAX_ROWS
-    rows = f"SELECT TOP {top} m.jobid, m.job_name, c.custName, m.qty1, m.due1, m.printDate, x.delivered {base} ORDER BY {order}"
-    by_day = f"SELECT m.due1, COUNT(*) AS n {base} GROUP BY m.due1 ORDER BY m.due1"
+    rows = (f"SELECT TOP {top} m.jobid, m.job_name, c.custName, m.qty1, m.due1, m.printDate, "
+            f"{_SHIPPED} AS delivered {base} ORDER BY {order}")
+    # no_record: neither a docket nor an issued pallet — the system can't tell whether those
+    # are still to ship or went out some way it doesn't record (most overdue samples, 2026-11-18)
+    by_day = (f"SELECT m.due1, COUNT(*) AS n, SUM(CASE WHEN {_SHIPPED} = 0 THEN 1 ELSE 0 END) AS no_record "
+              f"{base} GROUP BY m.due1 ORDER BY m.due1")
     return rows, by_day
 
 
@@ -307,8 +326,10 @@ def due_jobs(p: dict, today: dt.date | None = None) -> dict:
     rows_sql, by_day_sql = due_queries(p, today)
     with session() as s:
         rows = s.run(rows_sql)
-        by_day = [(str(r.get("due1")), int(r.get("n") or 0)) for r in s.run(by_day_sql)]
-    return {"rows": rows, "count": sum(n for _, n in by_day), "by_day": by_day}
+        days = s.run(by_day_sql)
+    by_day = [(str(r.get("due1")), int(r.get("n") or 0)) for r in days]
+    return {"rows": rows, "count": sum(n for _, n in by_day), "by_day": by_day,
+            "no_record": sum(int(r.get("no_record") or 0) for r in days)}
 
 
 # ── 5: machine repairs ──────────────────────────────────────────────────────
@@ -552,11 +573,23 @@ def job_context(o: dict) -> str:
     if upcoming:
         out.append("นัดส่งที่ยังไม่ถึง: " + ", ".join(f"{_when(u.get('delivery_date'), False)} จำนวน {_n(u.get('qty'))}"
                                                    for u in upcoming))
-    delivered = float(dlv.get("qty") or 0)
-    left = f" · คงเหลือตามจำนวนสั่ง {_n(max(qty - delivered, 0))}" if qty else ""
-    out.append(f"ส่งของแล้ว (ตามใบส่งของ): {dlv.get('dockets') or 0} ใบ รวม {_n(delivered)}{left} "
-               f"(ครั้งแรก {_when(dlv.get('first_date'))}, ล่าสุด {_when(dlv.get('last_date'))})")
+    # Two records of goods leaving: delivery dockets, and finished-goods pallets
+    # issued from the FG store. Many jobs ship on the pallets alone — the three
+    # closed jobs checked on 2026-11-18 had no docket but pallets issued for exactly
+    # the ordered qty — so the bot said "ส่งแล้ว 0" for jobs already shipped.
     pal = (o.get("pallets") or [{}])[0]
+    docket_qty = float(dlv.get("qty") or 0)
+    issued_qty = float(pal.get("issued_pieces") or 0)
+    shipped = max(docket_qty, issued_qty)
+    left = f" · คงเหลือตามจำนวนสั่ง {_n(max(qty - shipped, 0))}" if qty else ""
+    out.append(f"ส่งของแล้ว (ใช้ยอดที่มากกว่าระหว่างใบส่งของกับพาเลทที่เบิกออกจากคลัง): {_n(shipped)}{left}")
+    out.append(f"- ตามใบส่งของ: {dlv.get('dockets') or 0} ใบ รวม {_n(docket_qty)}"
+               + (f" (ครั้งแรก {_when(dlv.get('first_date'))}, ล่าสุด {_when(dlv.get('last_date'))})"
+                  if dlv.get("dockets") else ""))
+    out.append(f"- พาเลทสินค้าสำเร็จรูปที่เบิกออกจากคลัง: {pal.get('issued') or 0} พาเลท รวม {_n(issued_qty)} ชิ้น")
+    if not dlv.get("dockets") and issued_qty > 0:
+        out.append("(งานนี้ไม่มีใบส่งของในระบบ แต่เบิกพาเลทออกจากคลังแล้ว — ส่งของด้วยการเบิกพาเลท "
+                   "ห้ามตอบว่ายังไม่ได้ส่งของ)")
     if pal.get("pallets"):
         out.append(f"สินค้าสำเร็จรูป (พาเลท): {pal['pallets']} พาเลท รวม {_n(pal.get('pieces'))} ชิ้น · "
                    f"เข้าคลังแล้ว {pal.get('received') or 0} · เบิกออกแล้ว {pal.get('issued') or 0} · "
@@ -643,14 +676,18 @@ def ops_context(p: dict, data: dict, today: dt.date | None = None) -> str:
             lines.append("(ผู้ใช้ไม่ได้ขอดูรายการ — ตอบเฉพาะสิ่งที่ถามจากคำตอบก่อนหน้าตรง ๆ ห้ามทวนคำตอบเดิมทั้งหมด "
                          "และไม่ต้องแสดงรายการหรือตาราง)")
     if p["kind"] in {"due", "overdue"}:
-        what = ("งานที่เลยกำหนดส่งแล้วแต่ยอดในใบส่งของยังไม่ครบตามจำนวนสั่ง (ยังไม่ปิดงาน, ไม่รวมงานยกเลิก, "
-                "ดูเฉพาะกำหนดส่งในช่วงนี้ — งานบางงานอาจส่งด้วยวิธีอื่นที่ไม่ได้ออกใบส่งของ)"
+        what = ("งานที่เลยกำหนดส่งแล้วแต่ยอดที่ส่งแล้วยังไม่ครบตามจำนวนสั่ง (ยอดส่งแล้ว = ยอดที่มากกว่าระหว่างใบส่งของ"
+                "กับพาเลทที่เบิกออกจากคลัง · ยังไม่ปิดงาน, ไม่รวมงานยกเลิก, ดูเฉพาะกำหนดส่งในช่วงนี้)"
                 if p["kind"] == "overdue" else "งานที่ถึงกำหนดส่งลูกค้าในช่วงที่ถาม (ยังไม่ปิดงาน, ไม่รวมงานยกเลิก)")
         lines += [f"เรื่อง: {what}", f"ช่วงวันกำหนดส่ง: {rng}{kw}",
                   f"พบทั้งหมด: {data['count']} งาน" + (f" (รายการด้านล่างคือ {len(rows)} งานแรกเรียงตามวันกำหนดส่ง)"
                                                     if data["count"] > len(rows) else "")]
         if data.get("by_day"):
             lines.append("จำนวนงานแยกตามวันกำหนดส่ง: " + ", ".join(f"{d} = {n} งาน" for d, n in data["by_day"]))
+        if p["kind"] == "overdue" and data.get("no_record"):
+            lines.append(f"ในจำนวนนี้ {data['no_record']} งานไม่มีบันทึกการส่งในระบบเลย (ไม่มีทั้งใบส่งของและพาเลทที่เบิกออก) — "
+                         "ยืนยันไม่ได้ว่าค้างส่งจริง หรือส่งด้วยวิธีที่ระบบไม่ได้บันทึก: ต้องบอกผู้ใช้ข้อนี้ด้วย "
+                         f"ส่วนที่มีบันทึกการส่งแล้วแต่ยังไม่ครบ มี {data['count'] - data['no_record']} งาน")
         for r in rows:
             lines.append(f"- {r.get('jobid')} | {r.get('job_name') or '-'} | ลูกค้า: {r.get('custName') or '-'} | "
                          f"สั่ง {_n(r.get('qty1'))} | ส่งแล้ว {_n(r.get('delivered') or 0)} | "
