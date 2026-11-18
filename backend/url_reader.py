@@ -112,6 +112,38 @@ _JQ_RE = re.compile(
 )
 
 
+# The page's server writes its flags into the script as literals — the WI page has
+#   if (0 == 1) { $('body').append('<div id="cancelJobLogo" >Job Canceled</div>'); }
+# on every job, so reading every setter told the bot each job was cancelled
+# (J52600860, prod 2026-11-18). A branch whose condition compares two literals is
+# decided here: the dead branch is dropped before the values are read.
+_LIT = r"""(?:-?\d+(?:\.\d+)?|'[^'\\\n]*'|"[^"\\\n]*")"""
+_STATIC_IF_RE = re.compile(
+    r"if\s*\(\s*(" + _LIT + r")\s*(===?|!==?)\s*(" + _LIT + r")\s*\)\s*\{([^{}]*)\}"
+    r"(\s*else\s*\{([^{}]*)\})?",
+    re.DOTALL,
+)
+
+
+def _js_literal(v: str):
+    v = v.strip()
+    if v[:1] in "'\"":
+        v = v[1:-1]
+    try:
+        return float(v)
+    except ValueError:
+        return v
+
+
+def _drop_dead_branches(js: str) -> str:
+    def decide(m: re.Match) -> str:
+        same = _js_literal(m.group(1)) == _js_literal(m.group(3))
+        taken = same if m.group(2) in ("==", "===") else not same
+        return m.group(4) if taken else (m.group(6) or "")
+
+    return _STATIC_IF_RE.sub(decide, js)
+
+
 def _clean_js_value(s: str) -> str:
     """Unescape a JS string literal and strip any HTML tags inside it."""
     s = (
@@ -130,6 +162,7 @@ def _extract_jquery_values(doc) -> list[str]:
         js = sc.text_content() or ""
         if "$(" not in js:
             continue
+        js = _drop_dead_branches(js)
         for m in _JQ_RE.finditer(js):
             label = m.group(1).lstrip("#.").strip()
             val = _clean_js_value(m.group(3))
