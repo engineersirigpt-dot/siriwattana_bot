@@ -109,6 +109,9 @@ def test_list_context_has_count_total_and_prices():
     assert "≈ 15.97 บาท/ชิ้น" in text and "ยังไม่มีราคา" in text
     assert "แสดงรายละเอียด 2 งานล่าสุด" in text
     assert "ไม่รวมรายการทดสอบ" in text and "อนุมัติแล้ว (เคาะราคาแล้ว)" in text
+    # one labelled field per line — a one-line "a | b | c" record got copied into an answer
+    assert "[ใบประเมิน E26110001] กล่อง AROMA OIL แบบปลอกสวม\n  ลูกค้า: บริษัท อโรมา จำกัด (C20330637)" in text
+    assert " | " not in text
 
 
 def test_empty_and_single_document_contexts():

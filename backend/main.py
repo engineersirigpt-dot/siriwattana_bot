@@ -2103,13 +2103,32 @@ _OFFER = re.compile(
     r"บอกได้(?:เลย)?\s*(?:ครับ|ค่ะ)|ยินดีช่วย|จะ(?:ตรวจเช็ค|ตรวจสอบ|ติดตาม|อัปเดต)ให้(?:ต่อเนื่อง|ภายหลัง|ทันที)?"
 )
 _DANGLING_NOTE = re.compile(r"(?:\n|^)[ \t>*_#-]*หมายเหตุ[^\n]{0,15}[:：]?[*_ \t]*$")
+_PIPED_BULLET = re.compile(r"^(\s*)[-*•]\s+(.+)$")
+_TRAILING_SOURCE = re.compile(r"(?:\n|^)[ \t>*_-]*(?:ข้อมูลอ้างอิง|อ้างอิงจาก|ที่มา\s*[:：]|แหล่งข้อมูล\s*[:：])[^\n]*$")
+
+
+def _unpipe(line: str) -> str:
+    """'- E26110001 | กล่อง… | ลูกค้า: … | ราคา: …' (a data record copied as a
+    bullet) → a bold title bullet with one sub-bullet per field. Table rows
+    ('| a | b |') and ordinary bullets are left alone."""
+    m = _PIPED_BULLET.match(line)
+    if not m or line.lstrip().startswith("|") or m.group(2).count(" | ") < 2:
+        return line
+    indent, parts = m.group(1), [p.strip() for p in m.group(2).split(" | ") if p.strip()]
+    title = []
+    while parts and ":" not in parts[0] and len(title) < 2:
+        title.append(parts.pop(0).strip("* "))
+    head = f"{indent}- **{' '.join(title)}**" if title else f"{indent}- {parts.pop(0)}"
+    return "\n".join([head] + [f"{indent}  - {p}" for p in parts])
 
 
 def _tidy_data_answer(answer: str) -> str:
     """Answers built from MI data must not end with offers ('หากต้องการ… แจ้งได้')
     or promises to follow up — the bot can't — and 'ครับ/ค่ะ' reads oddly. Only
-    the last 6 lines are touched; facts before an offer on the same line stay."""
-    lines = (answer or "").rstrip().split("\n")
+    the last 6 lines are touched; facts before an offer on the same line stay.
+    A data record copied as one '… | … | …' bullet is split into sub-bullets,
+    and a closing 'ข้อมูลอ้างอิงจาก…' line (the source is in the first sentence) goes."""
+    lines = "\n".join(_unpipe(ln) for ln in (answer or "").rstrip().split("\n")).split("\n")
     for i in range(len(lines) - 1, max(-1, len(lines) - 7), -1):
         if not _OFFER.search(lines[i]):
             continue
@@ -2118,7 +2137,7 @@ def _tidy_data_answer(answer: str) -> str:
         lines[i] = head if len(re.sub(r"[\W_]", "", head)) > 8 else ""
     text = "\n".join(lines).rstrip()
     while True:
-        cut = _DANGLING_NOTE.sub("", text).rstrip()
+        cut = _TRAILING_SOURCE.sub("", _DANGLING_NOTE.sub("", text).rstrip()).rstrip()
         if cut == text:
             break
         text = cut
