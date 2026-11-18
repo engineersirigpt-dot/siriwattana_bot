@@ -173,7 +173,9 @@ def test_list_context_has_count_total_and_prices():
                                                 "total": 25832.50}]})
     # a long list is summarised: by type, by currency, the biggest customers — and it is not revenue
     assert "แยกตามประเภทงาน: packaging 4 งาน (มูลค่า 52,927.45 บาท) · book 1 งาน" in text
-    assert "แยกตามสกุลเงิน: THB 4 งาน รวม 52,927.45 THB · USD 1 งาน รวม 1,200.00 USD" in text
+    # counts only: other-currency amounts looked like baht with a foreign label (USD 41M for 52 jobs)
+    assert "แยกตามสกุลเงิน (จำนวนงาน): THB 4 งาน · USD 1 งาน — ยังไม่แสดงมูลค่าของสกุลเงินอื่น" in text
+    assert "1,200.00" not in text
     assert "1) ลูกค้าใหม่ (รวมลูกค้าที่ยังไม่ลงทะเบียนหลายราย) 2 งาน 25,832.50 บาท" in text
     assert "ไม่ใช่ยอดขายจริง" in text
     # the team's definition (confirmed 2026-11-18) travels with every approved-list answer
@@ -184,13 +186,32 @@ def test_list_context_has_count_total_and_prices():
     # old system: its tax line taken off — 27,094.95 incl. 789.17 tax = the new system's 26,305.78 ex VAT
     assert "26,305.78 THB ก่อน VAT ที่จำนวน 3,000 ชิ้น (≈ 8.77 THB/ชิ้น)" in text and "27,094.95" not in text
     assert "25,832.50 บาท ก่อน VAT ที่จำนวน 500 ชิ้น" in text                       # new system: ex VAT
-    assert "ยังไม่มีราคา" in text and "รายการด้านล่าง: 3 งานล่าสุด จากทั้งหมด 5 งาน" in text
+    assert "ยังไม่มีราคา" in text and "3 งานล่าสุด จากทั้งหมด 5 งาน" in text
+    assert "ระบบจะแนบตารางรายการงานต่อท้ายคำตอบให้เอง" in text      # the model must not write its own table
     assert "ระบบประเมินราคาเดิม" in text and "ระบบประเมินราคาใหม่ (MI2)" in text
     assert "อนุมัติแล้ว (เคาะราคาแล้ว) · อนุมัติเมื่อ 2026-11-18 11:25" in text
     # one labelled field per line — a one-line "a | b | c" record got copied into an answer
     assert ("[E26110464] Rep.SRP (Tray) - Can Pack 24 x 7\n"
             "  ลูกค้า: โชติวัฒน์อุตสาหกรรมการผลิต (C2014056)") in text
     assert " | " not in text
+
+
+def test_list_table_is_built_in_code():
+    # prod 2026-11-18: the model's table lost its |---| line and showed as a paragraph of bars
+    named = dict(ROW, job_name="Box A | B")
+    table = pj.list_table({"status": "approve"}, [named, ROW_V2], 661)
+    lines = table.split("\n")
+    assert lines[0] == "**รายการล่าสุด 2 จากทั้งหมด 661 งาน**" and lines[1] == ""
+    assert lines[2] == "| เลขที่ | ชื่องาน | ลูกค้า | จำนวน | ราคา (ก่อน VAT) | อนุมัติเมื่อ |"
+    assert lines[3] == "|---|---|---|---:|---:|---|"
+    assert lines[4] == ("| E26110464 | Box A / B | โชติวัฒน์อุตสาหกรรมการผลิต | 3,000 | 26,305.78 THB | "
+                        "2026-11-18 11:25 |")
+    assert lines[5] == "| E26110334 | กล่อง Jaelek | ลูกค้าใหม่ | 500 | 25,832.50 THB | 2026-11-13 11:18 |"
+    many = pj.list_table({"status": "approve"}, [ROW] * 40, 661)
+    assert many.count("| E26110464 |") == 10                    # more than 15 → the newest 10
+    assert pj.list_table({"status": "approve"}, [ROW] * 12, 12).count("| E26110464 |") == 12
+    assert "**" not in pj.list_table({"status": "approve"}, [ROW], 1)   # all shown → no "x จากทั้งหมด"
+    assert pj.list_table({"status": "approve"}, [], 0) == ""
 
 
 def test_empty_and_single_document_contexts():
@@ -260,7 +281,10 @@ def test_priced_jobs_question_is_answered_from_the_estimate_system(live):
     events = stream("สัปดาห์นี้มีงานใหม่ที่เคาะราคาแล้วกี่งาน อะไรบ้าง")
     done = events[-1]
     assert done["type"] == "done" and done["source"] == "priced_jobs"
-    assert "1 งาน" in "".join(e.get("v", "") for e in events if e["type"] == "delta")
+    shown = "".join(e.get("v", "") for e in events if e["type"] == "delta")
+    assert "1 งาน" in shown
+    # the list table is appended in code after the model's summary
+    assert "\n\n| เลขที่ | ชื่องาน |" in shown and "| E26110464 |" in shown and "|---|" in shown
     assert live.safety == []                                   # the AI classifier was skipped
     assert live.queries and live.queries[0]["status"] == "approve"
     docs, prompt = live.contexts[0]
