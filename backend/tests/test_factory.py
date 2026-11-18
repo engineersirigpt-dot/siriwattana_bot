@@ -102,11 +102,11 @@ def test_job_queries_use_indexes_bounds_and_no_personal_columns():
 
 
 def test_due_overdue_repair_and_qc_queries():
-    rows, count = fx.due_queries({"kind": "due", "date_from": dt.date(2026, 11, 16), "date_to": dt.date(2026, 11, 22),
-                                  "keyword": "ธกส'; --"}, TODAY)
+    rows, by_day = fx.due_queries({"kind": "due", "date_from": dt.date(2026, 11, 16), "date_to": dt.date(2026, 11, 22),
+                                   "keyword": "ธกส'; --"}, TODAY)
     assert "m.due1 >= '2026-11-16'" in rows and "m.due1 <= '2026-11-22'" in rows
     assert "N'%ธกส --%'" in rows and "';" not in rows.split("N'%")[1]
-    assert "NOT EXISTS (SELECT 1 FROM mi.dbo.mi_close_job" in rows and count.startswith("SELECT COUNT(*)")
+    assert "NOT EXISTS (SELECT 1 FROM mi.dbo.mi_close_job" in rows and "GROUP BY m.due1" in by_day
     assert "m.job_name NOT LIKE N'%ยกเลิก%'" in rows      # renamed "ยกเลิก …" jobs are cancelled in practice
     rows, _ = fx.due_queries({"kind": "overdue"}, TODAY)
     # only due dates in the last 30 days: years-old due dates on recent jobs are data-entry noise
@@ -115,6 +115,7 @@ def test_due_overdue_repair_and_qc_queries():
     rows, counts = fx.repair_queries({"kind": "repairs", "status": "open"}, TODAY)
     assert "r.ma_status = 0" in rows and "r.notify_datetime >= '2026-08-20'" in rows   # open: last 90 days
     assert "COLLATE DATABASE_DEFAULT" in rows and "emp" not in rows and "GROUP BY r.ma_status" in counts
+    assert "r.ma_status = 0" not in counts       # counts cover every status in the period
     summary, problems, jobs = fx.qc_queries({"kind": "qc", "date_from": dt.date(2026, 11, 1)}, TODAY)
     assert "h.qc_datetime >= '2026-11-01'" in summary and "MAX(qc_head_id) - 20000" in problems
 
@@ -163,8 +164,14 @@ def test_ops_contexts():
     due = fx.ops_context({"kind": "due", "date_from": dt.date(2026, 11, 16), "date_to": dt.date(2026, 11, 22),
                           "keyword": None},
                          {"rows": [{"jobid": "J82602753", "job_name": "กล่อง", "custName": "ลูกค้า ก", "qty1": 5000,
-                                    "due1": "2026-11-20", "printDate": "2026-11-19", "delivered": None}], "count": 251})
-    assert "พบทั้งหมด: 251 งาน (แสดง 1 งานแรก)" in due and "กำหนดส่ง 2026-11-20" in due and "ส่งแล้ว 0" in due
+                                    "due1": "2026-11-20", "printDate": "2026-11-19", "delivered": None}], "count": 251,
+                          "by_day": [("2026-11-20", 120), ("2026-11-21", 131)]})
+    assert "พบทั้งหมด: 251 งาน (รายการด้านล่างคือ 1 งานแรก" in due and "กำหนดส่ง 2026-11-20" in due
+    assert "ส่งแล้ว 0" in due and "2026-11-20 = 120 งาน, 2026-11-21 = 131 งาน" in due
+    open_ = fx.ops_context({"kind": "repairs", "status": "open"},
+                           {"counts": {0: 140, 1: 168, 2: 31}, "rows": [{"ma_id": "MR1", "ma_status": 0}]}, today=TODAY)
+    assert "ทั้งหมด 339 ใบ · ยังไม่เสร็จ 140 · ซ่อมเสร็จ 168" in open_
+    assert "ผู้ใช้ถามเฉพาะใบที่ยังไม่เสร็จ: 140 ใบ (รายการด้านล่างคือ 1 ใบล่าสุด)" in open_
     rep = fx.ops_context({"kind": "repairs", "date_from": None, "date_to": None, "keyword": "L444"},
                          {"counts": {0: 2, 1: 5}, "rows": [{"ma_id": "MR26110178", "notify_datetime": dt.datetime(2026, 11, 17, 15, 36),
                                                             "machine_name": "L444SP", "ma_status": 0, "approve_status": 1,
@@ -192,6 +199,23 @@ def test_names_in_repair_notes_are_dropped():
 def test_cancelled_by_name_is_pointed_out():
     text = fx.job_context(overview(master=dict(MASTER, job_name="ยกเลิก - MIMS Thailand 4/2026")))
     assert "น่าจะเป็นงานที่ยกเลิกแล้ว" in text
+
+
+def test_offers_and_promises_are_trimmed_from_data_answers():
+    tidy = main._tidy_data_answer
+    # 26110209 on prod (2026-11-18): the fact stays, the offer/promise goes
+    got = tidy("งาน 26110209 ตอนนี้ยังไม่เริ่มผลิต และยังไม่ปิดงานครับ/ค่ะ\n\nหมายเหตุเพิ่มเติม\n"
+               "- ในชื่องานมีคำว่า “ยกเลิก” ระบบระบุว่าอาจเป็นงานที่ยกเลิกแล้ว แม้ยังไม่ได้ติ๊กยกเลิกในระบบ "
+               "หากต้องการให้ยืนยันสถานะการยกเลิกอย่างเป็นทางการ แจ้งได้ครับ/ค่ะ จะตรวจเช็คให้ต่อเนื่อง")
+    assert got.startswith("งาน 26110209 ตอนนี้ยังไม่เริ่มผลิต และยังไม่ปิดงานค่ะ")
+    assert "อาจเป็นงานที่ยกเลิกแล้ว แม้ยังไม่ได้ติ๊กยกเลิกในระบบ" in got
+    assert "หากต้องการ" not in got and "ตรวจเช็คให้" not in got and "ครับ/ค่ะ" not in got
+    # a whole offer line goes; a heading left empty goes with it
+    got = tidy("มีใบแจ้งซ่อมค้าง 140 ใบ\n- MR1 ...\n\nหมายเหตุ\n"
+               "- หากต้องการรายชื่อครบทุกเครื่อง แจ้งได้เลยครับ จะสรุปให้เป็นชุดถัดไป")
+    assert got == "มีใบแจ้งซ่อมค้าง 140 ใบ\n- MR1 ..."
+    plain = "สัปดาห์นี้มีงานต้องส่ง 229 งาน\n| เลขงาน | ชื่องาน |"
+    assert tidy(plain) == plain
 
 
 def test_off_switch(monkeypatch):

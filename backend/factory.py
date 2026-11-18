@@ -259,17 +259,17 @@ def due_queries(p: dict, today: dt.date) -> tuple[str, str]:
                      WHERE d.jobid = m.jobid) x
         WHERE {w}"""
     rows = f"SELECT TOP {MAX_ROWS} m.jobid, m.job_name, c.custName, m.qty1, m.due1, m.printDate, x.delivered {base} ORDER BY {order}"
-    count = f"SELECT COUNT(*) AS n {base}"
-    return rows, count
+    by_day = f"SELECT m.due1, COUNT(*) AS n {base} GROUP BY m.due1 ORDER BY m.due1"
+    return rows, by_day
 
 
 def due_jobs(p: dict, today: dt.date | None = None) -> dict:
     today = today or _bangkok_today()
-    rows_sql, count_sql = due_queries(p, today)
+    rows_sql, by_day_sql = due_queries(p, today)
     with session() as s:
         rows = s.run(rows_sql)
-        n = (s.run(count_sql) or [{}])[0].get("n") or 0
-    return {"rows": rows, "count": int(n)}
+        by_day = [(str(r.get("due1")), int(r.get("n") or 0)) for r in s.run(by_day_sql)]
+    return {"rows": rows, "count": sum(n for _, n in by_day), "by_day": by_day}
 
 
 # ── 5: machine repairs ──────────────────────────────────────────────────────
@@ -279,21 +279,21 @@ def repair_queries(p: dict, today: dt.date) -> tuple[str, str]:
     status = p.get("status") or "any"
     d_from, d_to = effective_range(dict(p, kind="repairs"), today)
     where = [f"r.notify_datetime >= '{_day(d_from)}'", f"r.notify_datetime < '{_day(d_to + dt.timedelta(days=1))}'"]
-    if status in {"open", "done", "cancelled"}:
-        where.append(f"r.ma_status = {({'open': 0, 'done': 1, 'cancelled': 2})[status]}")
     if kw:
         where.append(f"(m.machine_name LIKE N'%{kw}%' OR r.machine_id = '{kw}' "
                      f"OR CAST(r.ma_remark AS nvarchar(max)) LIKE N'%{kw}%')")
-    w = " AND ".join(where)
-    base = f"""FROM MAINTENANCE_MACHINE.dbo.ma_request r WITH (NOLOCK)
+    joins = """FROM MAINTENANCE_MACHINE.dbo.ma_request r WITH (NOLOCK)
         LEFT JOIN MAINTENANCE_MACHINE.dbo.v_machine m WITH (NOLOCK)
-          ON m.machine_id COLLATE DATABASE_DEFAULT = r.machine_id COLLATE DATABASE_DEFAULT
-        WHERE {w}"""
+          ON m.machine_id COLLATE DATABASE_DEFAULT = r.machine_id COLLATE DATABASE_DEFAULT"""
+    # the counts cover the whole period (so "ค้างซ่อม 140" sits next to how many were done)
+    counts = f"SELECT r.ma_status, COUNT(*) AS n {joins} WHERE {' AND '.join(where)} GROUP BY r.ma_status"
+    if status in {"open", "done", "cancelled"}:
+        where.append(f"r.ma_status = {({'open': 0, 'done': 1, 'cancelled': 2})[status]}")
     rows = (f"SELECT TOP {MAX_ROWS} r.ma_id, r.notify_datetime, r.need_datetime, r.machine_id, m.machine_name, "
             f"r.ma_status, r.approve_status, r.ma_complete_date, "
             f"LEFT(CAST(r.ma_remark AS nvarchar(max)), 200) AS problem, "
-            f"LEFT(CAST(r.ma_solution_ma AS nvarchar(max)), 200) AS solution {base} ORDER BY r.notify_datetime DESC")
-    counts = f"SELECT r.ma_status, COUNT(*) AS n {base} GROUP BY r.ma_status"
+            f"LEFT(CAST(r.ma_solution_ma AS nvarchar(max)), 200) AS solution {joins} WHERE {' AND '.join(where)} "
+            f"ORDER BY r.notify_datetime DESC")
     return rows, counts
 
 
@@ -557,7 +557,10 @@ def ops_context(p: dict, data: dict, today: dt.date | None = None) -> str:
                 "ดูเฉพาะกำหนดส่งในช่วงนี้ — งานบางงานอาจส่งด้วยวิธีอื่นที่ไม่ได้ออกใบส่งของ)"
                 if p["kind"] == "overdue" else "งานที่ถึงกำหนดส่งลูกค้าในช่วงที่ถาม (ยังไม่ปิดงาน, ไม่รวมงานยกเลิก)")
         lines += [f"เรื่อง: {what}", f"ช่วงวันกำหนดส่ง: {rng}{kw}",
-                  f"พบทั้งหมด: {data['count']} งาน" + (f" (แสดง {len(data['rows'])} งานแรก)" if data["count"] > len(data["rows"]) else "")]
+                  f"พบทั้งหมด: {data['count']} งาน" + (f" (รายการด้านล่างคือ {len(data['rows'])} งานแรกเรียงตามวันกำหนดส่ง)"
+                                                    if data["count"] > len(data["rows"]) else "")]
+        if data.get("by_day"):
+            lines.append("จำนวนงานแยกตามวันกำหนดส่ง: " + ", ".join(f"{d} = {n} งาน" for d, n in data["by_day"]))
         for r in data["rows"]:
             lines.append(f"- {r.get('jobid')} | {r.get('job_name') or '-'} | ลูกค้า: {r.get('custName') or '-'} | "
                          f"สั่ง {_n(r.get('qty1'))} | ส่งแล้ว {_n(r.get('delivered') or 0)} | "
@@ -565,7 +568,13 @@ def ops_context(p: dict, data: dict, today: dt.date | None = None) -> str:
     elif p["kind"] == "repairs":
         c = data["counts"]
         lines += [f"เรื่อง: ใบแจ้งซ่อมเครื่องจักร · ช่วงวันที่แจ้ง: {rng}{kw}",
-                  f"สรุป: ทั้งหมด {sum(c.values())} ใบ · ยังไม่เสร็จ {c.get(0, 0)} · ซ่อมเสร็จ {c.get(1, 0)} · ยกเลิก {c.get(2, 0)}"]
+                  f"สรุปใบที่แจ้งในช่วงนี้: ทั้งหมด {sum(c.values())} ใบ · ยังไม่เสร็จ {c.get(0, 0)} · "
+                  f"ซ่อมเสร็จ {c.get(1, 0)} · ยกเลิก {c.get(2, 0)}"]
+        if p.get("status") in {"open", "done", "cancelled"}:
+            label = {"open": "ยังไม่เสร็จ", "done": "ซ่อมเสร็จแล้ว", "cancelled": "ยกเลิก"}[p["status"]]
+            shown = {"open": c.get(0, 0), "done": c.get(1, 0), "cancelled": c.get(2, 0)}[p["status"]]
+            lines.append(f"ผู้ใช้ถามเฉพาะใบที่{label}: {shown} ใบ"
+                         + (f" (รายการด้านล่างคือ {len(data['rows'])} ใบล่าสุด)" if shown > len(data["rows"]) else ""))
         for r in data["rows"]:
             lines.append(
                 f"- {r.get('ma_id')} | แจ้ง {_when(r.get('notify_datetime'))} | เครื่อง: {r.get('machine_name') or r.get('machine_id') or '-'}"
