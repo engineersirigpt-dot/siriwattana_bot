@@ -273,6 +273,10 @@ def test_notes_meant_for_the_model_are_not_shown():
     assert tidy("พบ 746 งาน (ระบบจะแนบตารางให้เอง) ค่ะ") == "พบ 746 งาน ค่ะ"
     assert tidy("พบ 746 งานค่ะ\nระบบจะแนบตารางรายการให้ด้านล่างค่ะ") == "พบ 746 งานค่ะ"
     assert tidy("ข้อมูลประกอบด้านล่างมี 40 งาน\nพบ 3 งานค่ะ") == "พบ 3 งานค่ะ"
+    # reworded without the parenthesis, after the first fix (prod 2026-11-18)
+    assert tidy("พบ 745 งานค่ะ\nตารางรายละเอียดรายงานฉบับเต็ม ระบบจะแนบต่อท้ายให้อัตโนมัติค่ะ") == "พบ 745 งานค่ะ"
+    assert tidy("พบ 745 งานค่ะ\nดูรายละเอียดในตารางด้านล่างได้เลยค่ะ") == \
+        "พบ 745 งานค่ะ\nดูรายละเอียดในตารางด้านล่างได้เลยค่ะ"          # pointing at the table is fine
 
 
 def test_ops_tables_are_built_in_code():
