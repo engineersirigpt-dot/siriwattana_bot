@@ -2151,7 +2151,9 @@ def _fix_tables(text: str) -> str:
 # Notes written for the model, copied into the answer — "(ระบบจะแนบตารางรายละเอียด
 # รายการต่อท้ายคำตอบให้เอง)" above the table (prod, 2026-11-18). A parenthesis with
 # one goes, and so does a short line that is only that note.
-_INTERNAL_WORDS = r"ระบบจะแนบตาราง|ข้อมูลประกอบด้านล่าง|เป็นข้อมูลภายใน|ห้ามเขียนตาราง"
+# … and reworded: "ตารางรายละเอียดฉบับเต็ม ระบบจะแนบต่อท้ายให้อัตโนมัติค่ะ" over a 15-of-745 table
+_INTERNAL_WORDS = (r"ระบบ(?:จะ)?แนบ|แนบ\S{0,12}ต่อท้าย|จะแนบตาราง|ข้อมูลประกอบด้านล่าง|เป็นข้อมูลภายใน|"
+                   r"ห้ามเขียนตาราง")
 _INTERNAL_PAREN = re.compile(r"[ \t]*[(（][^()（）\n]*(?:" + _INTERNAL_WORDS + r")[^()（）\n]*[)）]")
 _INTERNAL_RE = re.compile(_INTERNAL_WORDS)
 
