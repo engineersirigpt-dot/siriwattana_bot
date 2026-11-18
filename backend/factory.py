@@ -224,23 +224,32 @@ def job_overview(job: str) -> dict:
 
 # ── 4: due soon / overdue ───────────────────────────────────────────────────
 
+def effective_range(p: dict, today: dt.date) -> tuple[dt.date, dt.date]:
+    """The date range a question really covers once the defaults are filled in."""
+    kind = p.get("kind")
+    if kind == "overdue":   # due dates years ago on recent jobs are data-entry noise: the last 30 days only
+        yesterday = today - dt.timedelta(days=1)
+        return p.get("date_from") or today - dt.timedelta(days=30), min(p.get("date_to") or yesterday, yesterday)
+    if kind == "repairs":
+        back = 90 if p.get("status") == "open" else 7
+        return p.get("date_from") or today - dt.timedelta(days=back), p.get("date_to") or today
+    if kind == "qc":
+        return p.get("date_from") or today - dt.timedelta(days=7), p.get("date_to") or today
+    return p.get("date_from") or today, p.get("date_to") or today + dt.timedelta(days=7)
+
+
 def due_queries(p: dict, today: dt.date) -> tuple[str, str]:
     """(rows, count) for jobs due in a range ('due') or past due and not fully delivered ('overdue')."""
     kw = safe_keyword(p.get("keyword"))
+    d_from, d_to = effective_range(p, today)
+    # Jobs renamed "ยกเลิก …" are cancelled in practice even when the cancel flag isn't set.
     where = ["m.createDate >= DATEADD(day, -240, GETDATE())", "ISNULL(m.cancelJob, 0) = 0",
-             "ISNULL(m.deleteJob, 0) = 0", "LEN(m.due1) = 10",
-             "NOT EXISTS (SELECT 1 FROM mi.dbo.mi_close_job c WITH (NOLOCK) WHERE c.job_id = m.jobid)"]
+             "ISNULL(m.deleteJob, 0) = 0", "LEN(m.due1) = 10", "m.job_name NOT LIKE N'%ยกเลิก%'",
+             "NOT EXISTS (SELECT 1 FROM mi.dbo.mi_close_job c WITH (NOLOCK) WHERE c.job_id = m.jobid)",
+             f"m.due1 >= '{_day(d_from)}'", f"m.due1 <= '{_day(d_to)}'"]
     if p.get("kind") == "overdue":
-        where.append(f"m.due1 < '{today.isoformat()}'")
-        if p.get("date_from"):
-            where.append(f"m.due1 >= '{_day(p['date_from'])}'")
         where.append("ISNULL(x.delivered, 0) < m.qty1")
-        order = "m.due1, m.jobid"
-    else:
-        d_from = p.get("date_from") or today
-        d_to = p.get("date_to") or (today + dt.timedelta(days=7))
-        where += [f"m.due1 >= '{_day(d_from)}'", f"m.due1 <= '{_day(d_to)}'"]
-        order = "m.due1, m.jobid"
+    order = "m.due1, m.jobid"
     if kw:
         where.append(f"(m.job_name LIKE N'%{kw}%' OR c.custName LIKE N'%{kw}%' OR m.jobid = '{kw}')")
     w = " AND ".join(where)
@@ -268,8 +277,7 @@ def due_jobs(p: dict, today: dt.date | None = None) -> dict:
 def repair_queries(p: dict, today: dt.date) -> tuple[str, str]:
     kw = safe_keyword(p.get("keyword"))
     status = p.get("status") or "any"
-    d_from = p.get("date_from") or (today - dt.timedelta(days=90 if status == "open" else 7))
-    d_to = p.get("date_to") or today
+    d_from, d_to = effective_range(dict(p, kind="repairs"), today)
     where = [f"r.notify_datetime >= '{_day(d_from)}'", f"r.notify_datetime < '{_day(d_to + dt.timedelta(days=1))}'"]
     if status in {"open", "done", "cancelled"}:
         where.append(f"r.ma_status = {({'open': 0, 'done': 1, 'cancelled': 2})[status]}")
@@ -302,8 +310,7 @@ def repairs(p: dict, today: dt.date | None = None) -> dict:
 
 def qc_queries(p: dict, today: dt.date) -> tuple[str, str, str]:
     kw = safe_keyword(p.get("keyword"))
-    d_from = p.get("date_from") or (today - dt.timedelta(days=7))
-    d_to = p.get("date_to") or today
+    d_from, d_to = effective_range(dict(p, kind="qc"), today)
     where = [f"h.qc_datetime >= '{_day(d_from)}'", f"h.qc_datetime < '{_day(d_to + dt.timedelta(days=1))}'",
              "h.qc_head_id > (SELECT MAX(qc_head_id) - 20000 FROM QC_MASTER.dbo.tb_qc_head)"]
     if kw:
@@ -462,6 +469,8 @@ def job_context(o: dict) -> str:
            f"วันกำหนดส่งลูกค้า: {m.get('due1') or '-'}"]
     if m.get("rfq_mi2"):
         out.append(f"เปิดจากใบประเมินราคา: {m['rfq_mi2']}")
+    if "ยกเลิก" in str(m.get("job_name") or "") and not m.get("cancelJob"):
+        out.append("หมายเหตุจากชื่องาน: ชื่องานมีคำว่า 'ยกเลิก' — น่าจะเป็นงานที่ยกเลิกแล้ว แม้ระบบยังไม่ได้ติ๊กยกเลิก")
     if m.get("cancelJob"):
         out.append("สถานะ: ยกเลิกงานแล้ว")
     closed = o.get("closed") or []
@@ -525,14 +534,29 @@ def job_context(o: dict) -> str:
     return "\n".join(out)
 
 
-def ops_context(p: dict, data: dict) -> str:
-    rng = f"{_day(p.get('date_from')) or '-'} ถึง {_day(p.get('date_to')) or '-'}"
+_NAME_IN_PARENS = re.compile(r"\(\s*(?:คุณ|ช่าง|นาย|นาง|น\.ส\.)?\s*[฀-๿.\s]{2,30}\)")
+_KHUN_NAME = re.compile(r"(คุณ|นาย|นางสาว|นาง|น\.ส\.)\s?[฀-๿]{2,20}")
+
+
+def scrub_names(text: str | None) -> str:
+    """Repair notes are typed freely and sometimes end with who did it, e.g.
+    '…สั่งซื้อ Sensor 2 ตัว(ณรงค์ศักดิ์)'. Drop such Thai names in brackets and
+    'คุณ/นาย/นาง…' names before the text reaches the answer."""
+    t = _NAME_IN_PARENS.sub("", text or "")
+    t = _KHUN_NAME.sub("", t)
+    return re.sub(r"\s{2,}", " ", t).strip(" -,") or "-"
+
+
+def ops_context(p: dict, data: dict, today: dt.date | None = None) -> str:
+    d_from, d_to = effective_range(p, today or _bangkok_today())
+    rng = f"{_day(d_from)} ถึง {_day(d_to)}"
     kw = f" · คำค้น: {p['keyword']}" if p.get("keyword") else ""
     lines = [_head()]
     if p["kind"] in {"due", "overdue"}:
-        what = ("งานที่เลยกำหนดส่งแล้วแต่ยังส่งไม่ครบตามจำนวนสั่ง (ยังไม่ปิดงาน, ไม่รวมงานยกเลิก)"
+        what = ("งานที่เลยกำหนดส่งแล้วแต่ยอดในใบส่งของยังไม่ครบตามจำนวนสั่ง (ยังไม่ปิดงาน, ไม่รวมงานยกเลิก, "
+                "ดูเฉพาะกำหนดส่งในช่วงนี้ — งานบางงานอาจส่งด้วยวิธีอื่นที่ไม่ได้ออกใบส่งของ)"
                 if p["kind"] == "overdue" else "งานที่ถึงกำหนดส่งลูกค้าในช่วงที่ถาม (ยังไม่ปิดงาน, ไม่รวมงานยกเลิก)")
-        lines += [f"เรื่อง: {what}", f"ช่วงวันกำหนดส่ง: {rng if p['kind'] == 'due' else 'ก่อนวันนี้'}{kw}",
+        lines += [f"เรื่อง: {what}", f"ช่วงวันกำหนดส่ง: {rng}{kw}",
                   f"พบทั้งหมด: {data['count']} งาน" + (f" (แสดง {len(data['rows'])} งานแรก)" if data["count"] > len(data["rows"]) else "")]
         for r in data["rows"]:
             lines.append(f"- {r.get('jobid')} | {r.get('job_name') or '-'} | ลูกค้า: {r.get('custName') or '-'} | "
@@ -547,7 +571,7 @@ def ops_context(p: dict, data: dict) -> str:
                 f"- {r.get('ma_id')} | แจ้ง {_when(r.get('notify_datetime'))} | เครื่อง: {r.get('machine_name') or r.get('machine_id') or '-'}"
                 f" | สถานะ: {MA_STATUS.get(r.get('ma_status'), '-')} ({MA_APPROVE.get(r.get('approve_status'), '-')})"
                 f" | เสร็จ: {_when(r.get('ma_complete_date'))} | ต้องการให้เสร็จ: {_when(r.get('need_datetime'))}"
-                f" | อาการ: {(r.get('problem') or '-').strip()} | การแก้ไข: {(r.get('solution') or '-').strip()}")
+                f" | อาการ: {scrub_names(r.get('problem'))} | การแก้ไข: {scrub_names(r.get('solution'))}")
     else:
         s = data["summary"]
         lines += [f"เรื่อง: ผลตรวจ QC · ช่วงวันที่: {rng}{kw}",
@@ -559,6 +583,6 @@ def ops_context(p: dict, data: dict) -> str:
                       f"minor {r.get('minor') or 0})" for r in data["problems"]]
         if data["jobs"]:
             lines.append("งานที่ไม่ผ่าน QC มากที่สุด:")
-            lines += [f"- {r.get('job_id')} | {r.get('job_name') or '-'} | ตรวจ {r.get('inspections')} ครั้ง | "
+            lines += [f"- {r.get('job_id')} | ประเภทงาน: {r.get('job_name') or '-'} | ตรวจ {r.get('inspections')} ครั้ง | "
                       f"ไม่ผ่าน {_n(r.get('failed'))}" for r in data["jobs"]]
     return "\n".join(lines)

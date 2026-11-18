@@ -107,8 +107,11 @@ def test_due_overdue_repair_and_qc_queries():
     assert "m.due1 >= '2026-11-16'" in rows and "m.due1 <= '2026-11-22'" in rows
     assert "N'%ธกส --%'" in rows and "';" not in rows.split("N'%")[1]
     assert "NOT EXISTS (SELECT 1 FROM mi.dbo.mi_close_job" in rows and count.startswith("SELECT COUNT(*)")
+    assert "m.job_name NOT LIKE N'%ยกเลิก%'" in rows      # renamed "ยกเลิก …" jobs are cancelled in practice
     rows, _ = fx.due_queries({"kind": "overdue"}, TODAY)
-    assert "m.due1 < '2026-11-18'" in rows and "ISNULL(x.delivered, 0) < m.qty1" in rows
+    # only due dates in the last 30 days: years-old due dates on recent jobs are data-entry noise
+    assert "m.due1 >= '2026-10-19'" in rows and "m.due1 <= '2026-11-17'" in rows
+    assert "ISNULL(x.delivered, 0) < m.qty1" in rows
     rows, counts = fx.repair_queries({"kind": "repairs", "status": "open"}, TODAY)
     assert "r.ma_status = 0" in rows and "r.notify_datetime >= '2026-08-20'" in rows   # open: last 90 days
     assert "COLLATE DATABASE_DEFAULT" in rows and "emp" not in rows and "GROUP BY r.ma_status" in counts
@@ -172,6 +175,23 @@ def test_ops_contexts():
                          "problems": [{"problem_name": "ปกยับ", "times": 78, "major": 16, "minor": 302}],
                          "jobs": [{"job_id": "J52600854", "job_name": "สมุด", "inspections": 10, "failed": 14}]})
     assert "ตรวจ 663 ครั้ง · 101 งาน" in qc and "ปกยับ: 78 ครั้ง" in qc and "J52600854" in qc
+
+
+def test_names_in_repair_notes_are_dropped():
+    assert fx.scrub_names("-สั่งซื้อ Proximity Sensor PE-B7D จำนวน 2 ตัว(ณรงค์ศักดิ์)") == \
+        "สั่งซื้อ Proximity Sensor PE-B7D จำนวน 2 ตัว"
+    assert "สมชาย" not in fx.scrub_names("แจ้งคุณสมชายให้เปลี่ยนลูกปืนแล้ว")
+    assert fx.scrub_names("ชุดลูกกลิ้งส่งงานเข้าฉากไม่ทำงาน") == "ชุดลูกกลิ้งส่งงานเข้าฉากไม่ทำงาน"
+    assert fx.scrub_names(None) == "-"
+    rep = fx.ops_context({"kind": "repairs", "status": "any"}, {"counts": {1: 1}, "rows": [
+        {"ma_id": "MR1", "machine_name": "L444SP", "ma_status": 1, "approve_status": 1,
+         "problem": "กดลิฟไม่ได้", "solution": "เปลี่ยน sensor (ณรงค์ศักดิ์)"}]}, today=TODAY)
+    assert "ณรงค์ศักดิ์" not in rep and "ช่วงวันที่แจ้ง: 2026-11-11 ถึง 2026-11-18" in rep
+
+
+def test_cancelled_by_name_is_pointed_out():
+    text = fx.job_context(overview(master=dict(MASTER, job_name="ยกเลิก - MIMS Thailand 4/2026")))
+    assert "น่าจะเป็นงานที่ยกเลิกแล้ว" in text
 
 
 def test_off_switch(monkeypatch):
