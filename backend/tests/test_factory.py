@@ -264,6 +264,17 @@ def test_a_record_copied_as_one_piped_bullet_is_split():
     assert main._tidy_data_answer("- ส่งแล้ว 2,350 | เหลือ 0") == "- ส่งแล้ว 2,350 | เหลือ 0"   # one bar: left alone
 
 
+def test_notes_meant_for_the_model_are_not_shown():
+    # prod 2026-11-18: "(ระบบจะแนบตารางรายละเอียดรายการต่อท้ายคำตอบให้เอง)" sat above the table
+    tidy = main._tidy_data_answer
+    got = tidy("พบงานที่เลยกำหนดส่ง 746 งาน โดยในจำนวนนี้ 681 งานไม่มีบันทึกการส่งค่ะ\n\n"
+               "(ระบบจะแนบตารางรายละเอียดรายการต่อท้ายคำตอบให้เอง)")
+    assert got == "พบงานที่เลยกำหนดส่ง 746 งาน โดยในจำนวนนี้ 681 งานไม่มีบันทึกการส่งค่ะ"
+    assert tidy("พบ 746 งาน (ระบบจะแนบตารางให้เอง) ค่ะ") == "พบ 746 งาน ค่ะ"
+    assert tidy("พบ 746 งานค่ะ\nระบบจะแนบตารางรายการให้ด้านล่างค่ะ") == "พบ 746 งานค่ะ"
+    assert tidy("ข้อมูลประกอบด้านล่างมี 40 งาน\nพบ 3 งานค่ะ") == "พบ 3 งานค่ะ"
+
+
 def test_ops_tables_are_built_in_code():
     due = fx.ops_table({"kind": "due"}, {"count": 229, "rows": [
         {"jobid": "J82602753", "job_name": "กล่อง | A", "custName": "ลูกค้า ก", "qty1": 5000, "delivered": None,
