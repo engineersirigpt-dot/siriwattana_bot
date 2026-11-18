@@ -109,6 +109,21 @@ def wants_list(question: str) -> bool:
     return bool(_WANTS_TABLE_RE.search(q)) or not _CHECK_RE.search(q)
 
 
+# "ถ้าให้แสดงมาทั้ง 661 งานเลยได้มั้ย" got the same 10-row table again (prod,
+# 2026-11-18). Asking for everything / Excel gets every row (up to FULL_MAX) in
+# the code-built table; the model still sees only MAX_ROWS of them, so the
+# answer costs the same. A bare "ทั้งหมดกี่งาน" (a count) is not a list request.
+FULL_MAX = 1000
+_ALL_RE = re.compile(
+    r"excel|เอ็กเซล|เอ็กซ์เซล|export|ดาวน์โหลด|ทั้ง\s*[\d,]+\s*(?:งาน|ใบ|รายการ|อัน)"
+    r"|(?:แสดง|ขอ|ดู|เอา|อยากได้|ลิสต์|list|รายการ|รายชื่อ|ตาราง).{0,25}(?:ทั้งหมด|ครบ|ทุกงาน|ทุกใบ|ทุกรายการ)",
+    re.IGNORECASE)
+
+
+def wants_all(question: str) -> bool:
+    return bool(_ALL_RE.search((question or "").strip()))
+
+
 # ── safe values for OPENQUERY (it takes no parameters) ──────────────────────
 
 def safe_job(job: str | None) -> str | None:
@@ -281,7 +296,8 @@ def due_queries(p: dict, today: dt.date) -> tuple[str, str]:
         OUTER APPLY (SELECT SUM(d.qty) AS delivered FROM mi.dbo.mi_delivery_docket_detail d WITH (NOLOCK)
                      WHERE d.jobid = m.jobid) x
         WHERE {w}"""
-    rows = f"SELECT TOP {MAX_ROWS} m.jobid, m.job_name, c.custName, m.qty1, m.due1, m.printDate, x.delivered {base} ORDER BY {order}"
+    top = FULL_MAX if p.get("full_list") else MAX_ROWS
+    rows = f"SELECT TOP {top} m.jobid, m.job_name, c.custName, m.qty1, m.due1, m.printDate, x.delivered {base} ORDER BY {order}"
     by_day = f"SELECT m.due1, COUNT(*) AS n {base} GROUP BY m.due1 ORDER BY m.due1"
     return rows, by_day
 
@@ -312,7 +328,7 @@ def repair_queries(p: dict, today: dt.date) -> tuple[str, str]:
     counts = f"SELECT r.ma_status, COUNT(*) AS n {joins} WHERE {' AND '.join(where)} GROUP BY r.ma_status"
     if status in {"open", "done", "cancelled"}:
         where.append(f"r.ma_status = {({'open': 0, 'done': 1, 'cancelled': 2})[status]}")
-    rows = (f"SELECT TOP {MAX_ROWS} r.ma_id, r.notify_datetime, r.need_datetime, r.machine_id, m.machine_name, "
+    rows = (f"SELECT TOP {FULL_MAX if p.get('full_list') else MAX_ROWS} r.ma_id, r.notify_datetime, r.need_datetime, r.machine_id, m.machine_name, "
             f"r.ma_status, r.approve_status, r.ma_complete_date, "
             f"LEFT(CAST(r.ma_remark AS nvarchar(max)), 200) AS problem, "
             f"LEFT(CAST(r.ma_solution_ma AS nvarchar(max)), 200) AS solution {joins} WHERE {' AND '.join(where)} "
@@ -452,7 +468,8 @@ def plan(question: str, previous: str = "") -> tuple[dict | None, dict]:
     except Exception:
         return None, {}
     if p is not None:
-        p["show_list"] = wants_list(question)
+        p["full_list"] = wants_all(question)
+        p["show_list"] = p["full_list"] or wants_list(question)
     return p, usage
 
 
@@ -582,12 +599,13 @@ def _cell(v, width: int = 60) -> str:
 def ops_table(p: dict, data: dict) -> str:
     """The list part of a due-date / repair answer as a Markdown table, built in
     code — a model-written table lost its |---| line on prod (2026-11-18).
-    Up to 15 rows, in the order the query gave them."""
+    Up to 15 rows, in the order the query gave them — every row fetched when
+    the user asked for everything (full_list)."""
     kind = p.get("kind")
     rows = (data or {}).get("rows") or []
     if kind not in {"due", "overdue", "repairs"} or not rows or p.get("show_list") is False:
         return ""
-    shown = rows[:15]
+    shown = rows if p.get("full_list") else rows[:15]
     if kind == "repairs":
         total = sum(((data or {}).get("counts") or {}).values())
         head = "| เลขที่ใบ | เครื่อง | อาการ | สถานะ | แจ้งเมื่อ |\n|---|---|---|---|---|"
@@ -600,7 +618,10 @@ def ops_table(p: dict, data: dict) -> str:
         body = [f"| {_cell(r.get('jobid'), 14)} | {_cell(r.get('job_name'))} | {_cell(r.get('custName'), 40)} | "
                 f"{_n(r.get('qty1'))} | {_n(r.get('delivered') or 0)} | {_cell(r.get('printDate'), 10)} | "
                 f"{_cell(r.get('due1'), 10)} |" for r in shown]
-    title = f"**รายการ {len(shown)} จากทั้งหมด {total:,}**\n\n" if total > len(shown) else ""
+    if total > len(shown):
+        title = f"**รายการ {len(shown):,} จากทั้งหมด {total:,}**\n\n"
+    else:
+        title = f"**รายการทั้งหมด {total:,}**\n\n" if p.get("full_list") else ""
     return title + head + "\n" + "\n".join(body)
 
 
@@ -609,8 +630,13 @@ def ops_context(p: dict, data: dict, today: dt.date | None = None) -> str:
     rng = f"{_day(d_from)} ถึง {_day(d_to)}"
     kw = f" · คำค้น: {p['keyword']}" if p.get("keyword") else ""
     lines = [_head()]
+    rows = (data.get("rows") or [])[:MAX_ROWS]   # a full list goes to the table, not to the model
     if p.get("kind") in {"due", "overdue", "repairs"} and data.get("rows"):
-        if p.get("show_list", True):
+        if p.get("full_list"):
+            lines.append("(ผู้ใช้ขอดูรายการทั้งหมด — ระบบจะแนบตารางครบทุกรายการต่อท้ายคำตอบให้เอง และผู้ใช้กดปุ่ม Excel "
+                         "ใต้คำตอบเพื่อโหลดเป็นไฟล์ได้: ตอบสั้น ๆ ไม่เกิน 2 ประโยคว่ามีกี่รายการ ห้ามเขียนตาราง "
+                         "ห้ามบอกว่าแสดงได้ไม่ครบ)")
+        elif p.get("show_list", True):
             lines.append("(ระบบจะแนบตารางรายการต่อท้ายคำตอบให้เอง — ห้ามเขียนตารางหรือไล่รายการทีละรายการเอง "
                          "ให้เขียนแค่สรุป)")
         else:
@@ -621,11 +647,11 @@ def ops_context(p: dict, data: dict, today: dt.date | None = None) -> str:
                 "ดูเฉพาะกำหนดส่งในช่วงนี้ — งานบางงานอาจส่งด้วยวิธีอื่นที่ไม่ได้ออกใบส่งของ)"
                 if p["kind"] == "overdue" else "งานที่ถึงกำหนดส่งลูกค้าในช่วงที่ถาม (ยังไม่ปิดงาน, ไม่รวมงานยกเลิก)")
         lines += [f"เรื่อง: {what}", f"ช่วงวันกำหนดส่ง: {rng}{kw}",
-                  f"พบทั้งหมด: {data['count']} งาน" + (f" (รายการด้านล่างคือ {len(data['rows'])} งานแรกเรียงตามวันกำหนดส่ง)"
-                                                    if data["count"] > len(data["rows"]) else "")]
+                  f"พบทั้งหมด: {data['count']} งาน" + (f" (รายการด้านล่างคือ {len(rows)} งานแรกเรียงตามวันกำหนดส่ง)"
+                                                    if data["count"] > len(rows) else "")]
         if data.get("by_day"):
             lines.append("จำนวนงานแยกตามวันกำหนดส่ง: " + ", ".join(f"{d} = {n} งาน" for d, n in data["by_day"]))
-        for r in data["rows"]:
+        for r in rows:
             lines.append(f"- {r.get('jobid')} | {r.get('job_name') or '-'} | ลูกค้า: {r.get('custName') or '-'} | "
                          f"สั่ง {_n(r.get('qty1'))} | ส่งแล้ว {_n(r.get('delivered') or 0)} | "
                          f"กำหนดพิมพ์ {r.get('printDate') or '-'} | กำหนดส่ง {r.get('due1') or '-'}")
@@ -638,8 +664,8 @@ def ops_context(p: dict, data: dict, today: dt.date | None = None) -> str:
             label = {"open": "ยังไม่เสร็จ", "done": "ซ่อมเสร็จแล้ว", "cancelled": "ยกเลิก"}[p["status"]]
             shown = {"open": c.get(0, 0), "done": c.get(1, 0), "cancelled": c.get(2, 0)}[p["status"]]
             lines.append(f"ผู้ใช้ถามเฉพาะใบที่{label}: {shown} ใบ"
-                         + (f" (รายการด้านล่างคือ {len(data['rows'])} ใบล่าสุด)" if shown > len(data["rows"]) else ""))
-        for r in data["rows"]:
+                         + (f" (รายการด้านล่างคือ {len(rows)} ใบล่าสุด)" if shown > len(rows) else ""))
+        for r in rows:
             lines.append(
                 f"- {r.get('ma_id')} | แจ้ง {_when(r.get('notify_datetime'))} | เครื่อง: {r.get('machine_name') or r.get('machine_id') or '-'}"
                 f" | สถานะ: {MA_STATUS.get(r.get('ma_status'), '-')} ({MA_APPROVE.get(r.get('approve_status'), '-')})"

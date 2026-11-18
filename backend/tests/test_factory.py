@@ -288,6 +288,35 @@ def test_plan_sets_show_list_from_the_question(monkeypatch):
     monkeypatch.setattr(fx, "_plan_cached", lambda q, prev, today: (raw, "{}"))
     assert fx.plan("สัปดาห์หน้าล่ะ")[0]["show_list"] is True
     assert fx.plan("มีเยอะขนาดนั้นเลยหรอ")[0]["show_list"] is False
+    assert fx.plan("ขอดูใบแจ้งซ่อมที่ค้างทั้งหมด")[0]["full_list"] is True
+
+
+@pytest.mark.parametrize("question, everything", [
+    ("ถ้าให้แสดงมาทั้ง 661 งานเลยได้มั้ยครับ", True),
+    ("ขอดูรายการทั้งหมด", True),
+    ("ขอเป็นตาราง excel", True),
+    ("อยากได้ทั้งหมดเลย", True),
+    ("แสดงทุกงานของเดือนนี้", True),
+    ("ขอดูใบแจ้งซ่อมที่ค้างทั้งหมด", True),
+    ("เดือนนี้มีงานเคาะราคาทั้งหมดกี่งาน", False),    # a count, not a list
+    ("งานค้างซ่อมทั้งหมดมีกี่ใบ", False),
+    ("ของเดือนตุลาคมหล่ะ", False),
+])
+def test_the_everything_rule(question, everything):
+    assert fx.wants_all(question) is everything
+
+
+def test_a_full_list_fetches_and_shows_every_row():
+    p = {"kind": "due", "date_from": dt.date(2026, 11, 16), "date_to": dt.date(2026, 11, 22), "keyword": None,
+         "status": "any", "full_list": True}
+    assert fx.due_queries(p, dt.date(2026, 11, 18))[0].startswith("SELECT TOP 1000 ")
+    assert fx.repair_queries(dict(p, kind="repairs"), dt.date(2026, 11, 18))[0].startswith("SELECT TOP 1000 ")
+    assert fx.due_queries(dict(p, full_list=False), dt.date(2026, 11, 18))[0].startswith(f"SELECT TOP {fx.MAX_ROWS} ")
+    rows = [{"jobid": f"J{i}", "job_name": "x", "qty1": 1, "due1": "2026-11-19"} for i in range(229)]
+    table = fx.ops_table(p, {"count": 229, "rows": rows})
+    assert table.startswith("**รายการทั้งหมด 229**") and table.count("| J") == 229
+    text = fx.ops_context(p, {"count": 229, "rows": rows, "by_day": []}, dt.date(2026, 11, 18))
+    assert "ผู้ใช้ขอดูรายการทั้งหมด" in text and text.count("- J") == fx.MAX_ROWS   # the model sees MAX_ROWS
 
 
 def test_a_model_table_without_its_separator_is_repaired():
