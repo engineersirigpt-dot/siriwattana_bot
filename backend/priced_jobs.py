@@ -91,7 +91,7 @@ _PLAN_PROMPT = (
     "หรือรายละเอียดใบใดใบหนึ่ง) แล้วตอบ JSON เท่านั้น:\n"
     '{"lookup": true|false, "doc_id": "E…/EB…/EP…"|null, "quotation_id": "QE…"|null, '
     '"status": "approve"|"pending"|"reject"|"draft"|"any", "date_from": "YYYY-MM-DD"|null, '
-    '"date_to": "YYYY-MM-DD"|null, "keyword": string|null, "show_list": true|false}\n'
+    '"date_to": "YYYY-MM-DD"|null, "keyword": string|null}\n'
     "กติกา:\n"
     "- lookup=false ถ้าผู้ใช้ขอให้คำนวณ/ประเมินราคาเอง, ร่างหรือเขียนใบเสนอราคา, ถามความหมาย/วิธีทำ, "
     "หรือถามความรู้ทั่วไป\n"
@@ -102,9 +102,9 @@ _PLAN_PROMPT = (
     "ถ้าไม่ได้ระบุช่วงเวลา ให้ date_from และ date_to เป็น null (= ล่าสุด)\n"
     "- keyword: ชื่อลูกค้า แบรนด์ สินค้า ชื่องาน หรือทีม/AE ที่ผู้ใช้ต้องการกรอง (เช่น 'AROMA', 'ศรีวรรณ') "
     "ไม่ใส่คำบอกสถานะหรือเวลาใน keyword ถ้าไม่มีให้ null\n"
-    "- ถ้ามี 'คำถามก่อนหน้า' และคำถามนี้เป็นคำถามต่อเนื่อง (เช่น 'แล้วเดือนที่แล้วล่ะ', 'อันไหนแพงสุด', "
-    "'มีของลูกค้า X ไหม') ให้ lookup=true และใช้เงื่อนไขเดิมเว้นแต่ผู้ใช้เปลี่ยน"
-    "\n- show_list: true เมื่อผู้ใช้ต้องการดูรายการงาน (ถามใหม่ หรือเปลี่ยนเงื่อนไข เช่น ช่วงเวลา/สถานะ/ลูกค้า); false เมื่อถามยืนยันหรือสงสัยคำตอบก่อนหน้า (เช่น 'มี 661 ใบเลยหรอ', 'จริงเหรอ', 'ทำไมเยอะจัง') หรือถามเจาะจงข้อเดียว (เช่น 'อันไหนแพงสุด', 'ลูกค้าไหนเยอะสุด', 'รวมเท่าไหร่') — ยังต้อง lookup=true"
+    "- ถ้ามี 'คำถามก่อนหน้า' (อาจหลายข้อเรียงตามเวลา คั่นด้วย →) และคำถามนี้เป็นคำถามต่อเนื่อง "
+    "(เช่น 'แล้วเดือนที่แล้วล่ะ', 'ของเดือนตุลาคมล่ะ', 'อันไหนแพงสุด', 'มีของลูกค้า X ไหม', 'มีเยอะขนาดนั้นเลยหรอ', "
+    "'ขอเป็นตาราง') ให้ lookup=true และใช้เงื่อนไขล่าสุดในสายคำถามนั้น เว้นแต่คำถามนี้เปลี่ยน"
 )
 
 
@@ -131,9 +131,7 @@ def _clean_plan(data: dict) -> dict | None:
         "doc_id": doc.upper() if isinstance(doc, str) and DOC_RE.fullmatch(doc.strip()) else None,
         "quotation_id": quote.upper() if isinstance(quote, str) and QUOTE_RE.fullmatch(quote.strip()) else None,
         "status": status, "date_from": d_from, "date_to": d_to, "keyword": kw,
-        # false: a check or a pointed question about the last answer ("มี 661 ใบเลยหรอ") —
-        # answer it, don't repeat the whole list and its table (prod, 2026-11-18)
-        "show_list": data.get("show_list") is not False,
+        "show_list": True,  # plan() sets it from the question (factory.wants_list)
     }
 
 
@@ -171,6 +169,10 @@ def plan(question: str, previous: str = "") -> tuple[dict | None, dict]:
             p["doc_id"] = doc.group(0).upper()
         if quote:
             p["quotation_id"] = quote.group(0).upper()
+        # a check on the last answer ("…เลยหรอ") gets no table; anything else does
+        from factory import wants_list
+
+        p["show_list"] = wants_list(question)
     return p, usage
 
 

@@ -310,9 +310,15 @@ def test_a_check_on_the_last_answer_is_answered_not_repeated(live, monkeypatch):
     assert "ผู้ใช้ไม่ได้ขอดูรายการ" in docs[0][1] and "ระบบจะแนบตาราง" not in docs[0][1]
 
 
-def test_show_list_defaults_on_and_a_check_turns_it_off():
-    assert pj._clean_plan({"lookup": True})["show_list"] is True
-    assert pj._clean_plan({"lookup": True, "show_list": False})["show_list"] is False
+def test_show_list_is_decided_by_rule_not_by_the_planner(monkeypatch):
+    # prod 2026-11-18: the planner said show_list=false for "ของเดือนตุลาคมหล่ะ" (a new month)
+    raw = json.dumps({"lookup": True, "status": "approve", "date_from": "2026-10-01", "date_to": "2026-10-31",
+                      "show_list": False})
+    monkeypatch.setattr(pj, "_plan_cached", lambda q, prev, today: (raw, json.dumps(PLAN_USAGE)))
+    assert pj.plan("ของเดือนตุลาคมหล่ะ")[0]["show_list"] is True
+    assert pj.plan("ของเดือนนี้มี 661 ใบเลยหรอ")[0]["show_list"] is False
+    assert pj.plan("ทำไมตาราง excel ไม่ออกมาด้วยครับ")[0]["show_list"] is True
+    assert pj.plan("E26110334 ราคาเท่าไหร่")[0]["show_list"] is True
     text = pj.to_context({"status": "approve", "date_from": dt.date(2026, 11, 1), "date_to": dt.date(2026, 11, 18),
                           "keyword": None},
                          {"rows": [ROW], "count": 661, "total": 1.0, "priced": 598, "customers": 214})
@@ -325,6 +331,20 @@ def test_a_follow_up_keeps_the_previous_question(live):
     events = stream("แล้วเดือนที่แล้วล่ะ")
     assert events[-1]["source"] == "priced_jobs"
     assert live.plans[-1] == ("แล้วเดือนที่แล้วล่ะ", "งานที่เคาะราคาแล้วเดือนนี้มีอะไรบ้าง")
+
+
+def test_a_follow_up_gets_the_whole_question_chain(live):
+    # prod 2026-11-18: after "ของเดือนตุลาคมหล่ะ" the next follow-up was planned from the
+    # first question only and answered November again
+    live.history = [{"role": "user", "content": "เดือนนี้มีงานเคาะราคาแล้วกี่งาน"},
+                    {"role": "assistant", "content": "661 ใบค่ะ"},
+                    {"role": "user", "content": "ของเดือนนี้มี 661 ใบเลยหรอ"},
+                    {"role": "assistant", "content": "ใช่ค่ะ"},
+                    {"role": "user", "content": "ของเดือนตุลาคมหล่ะ"},
+                    {"role": "assistant", "content": "เดือนตุลาคม…"}]
+    stream("ทำไมตาราง excel ไม่ออกมาด้วยครับ")
+    assert live.plans[-1] == ("ทำไมตาราง excel ไม่ออกมาด้วยครับ",
+                              "เดือนนี้มีงานเคาะราคาแล้วกี่งาน → ของเดือนนี้มี 661 ใบเลยหรอ → ของเดือนตุลาคมหล่ะ")
 
 
 def test_not_a_lookup_goes_the_normal_way(live, monkeypatch):
