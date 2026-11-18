@@ -424,6 +424,26 @@ def test_job_follow_up_reuses_the_number(live):
     assert events[-1]["source"] == "factory_job" and live.jobs == ["26110209"]
 
 
+def test_a_question_about_many_jobs_is_not_a_follow_up(live):
+    # prod 2026-11-18: right after "J82601825 ส่งของไปกี่ชิ้นแล้ว" this was answered about J82601825 only
+    live.history = [{"role": "user", "content": "J82601825 ส่งของไปกี่ชิ้นแล้ว"}, {"role": "assistant", "content": "…"}]
+    events = stream("งานที่เลยกำหนดส่งมีกี่งาน")
+    assert events[-1]["source"] == "factory" and live.jobs == []
+
+
+@pytest.mark.parametrize("q, follow", [
+    ("แล้วส่งของไปหรือยัง", True),
+    ("ส่งไปกี่ชิ้นแล้ว", True),
+    ("งานนี้เลยกำหนดส่งหรือยัง", True),
+    ("ใช้เครื่องไหนผลิต", True),
+    ("งานที่เลยกำหนดส่งมีกี่งาน", False),
+    ("มีงานที่ต้องส่งพรุ่งนี้กี่งาน", False),
+    ("สัปดาห์นี้งานไหนต้องส่งบ้าง", False),
+])
+def test_follow_up_rule(q, follow):
+    assert fx.looks_like_job_followup(q) is follow
+
+
 def test_due_question_goes_through_the_planner(live):
     events = stream("สัปดาห์นี้มีงานต้องส่งกี่งาน")
     # asked by the classifier gate and by the answer step — one AI call in real life (_plan_cached)

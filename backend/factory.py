@@ -78,8 +78,17 @@ def extract_job(text: str) -> str | None:
     return m.group(1) if m else None
 
 
+# "งานที่เลยกำหนดส่งมีกี่งาน" asked right after a question on J82601825 was answered
+# about that one job ("มีงานที่เลยกำหนดส่งอยู่ 1 งาน", prod 2026-11-18). A question about
+# many jobs is not a follow-up on the last one — unless it says "งานนี้".
+_THIS_JOB_RE = re.compile(r"งานนี้|งานนั้น|จ๊อบนี้|job\s*นี้", re.IGNORECASE)
+_MANY_JOBS_RE = re.compile(r"กี่งาน|กี่จ๊อบ|กี่\s*job|งานไหน|มีงาน|งานที่|ทุกงาน|งานทั้งหมด", re.IGNORECASE)
+
+
 def looks_like_job_followup(text: str) -> bool:
-    return bool(text) and JOB_FOLLOWUP_RE.search(text) is not None
+    if not text or JOB_FOLLOWUP_RE.search(text) is None:
+        return False
+    return bool(_THIS_JOB_RE.search(text)) or not _MANY_JOBS_RE.search(text)
 
 
 def mentions_ops(text: str) -> bool:
