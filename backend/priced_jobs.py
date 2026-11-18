@@ -97,6 +97,8 @@ _PLAN_PROMPT = (
     "กติกา:\n"
     "- lookup=false ถ้าผู้ใช้ขอให้คำนวณ/ประเมินราคาเอง, ร่างหรือเขียนใบเสนอราคา, ถามความหมาย/วิธีทำ, "
     "หรือถามความรู้ทั่วไป\n"
+    "- คำถามที่ถามจำนวนหรือรายการของใบตามสถานะ (เช่น 'ตอนนี้มีใบประเมินราคารออนุมัติกี่ใบ', "
+    "'มีงานที่ไม่อนุมัติราคากี่งาน', 'เดือนนี้เคาะราคาไปกี่งาน') → lookup=true เสมอ\n"
     "- 'เคาะราคาแล้ว', 'อนุมัติราคาแล้ว', 'ราคาผ่านแล้ว', 'งานใหม่ที่ได้ราคาแล้ว' → approve; "
     "'รอเคาะ', 'รออนุมัติ' → pending; 'ไม่ผ่าน', 'ตีกลับ', 'reject' → reject; "
     "ถามถึงใบเดียว (เลข E/QE) โดยไม่ระบุสถานะ → any\n"
@@ -153,15 +155,77 @@ def _plan_cached(question: str, previous: str, today_iso: str) -> tuple[str, str
     return res.choices[0].message.content or "{}", json.dumps(_extract_usage(res, LLM_MODEL_CLASSIFIER))
 
 
+# ── when the small planner says "not a lookup" to a plain data question ──
+# gpt-4o-mini answered lookup=false to "ตอนนี้มีใบประเมินราคารออนุมัติกี่ใบ" and it
+# fell through to a generic chat answer (prod, 2026-11-18). A question that names
+# a status AND asks for a count or a list is a lookup, whatever the planner says.
+_STATUS_WORDS = [   # in this order: "ยังไม่อนุมัติ" is pending, "ไม่อนุมัติ" reject
+    ("pending", re.compile(r"รอ(?:การ)?อนุมัติ|รอเคาะ|ยังไม่(?:ได้)?(?:อนุมัติ|เคาะ)|pending", re.IGNORECASE)),
+    ("reject", re.compile(r"ไม่อนุมัติ|ตีกลับ|ไม่ผ่าน|reject", re.IGNORECASE)),
+    ("draft", re.compile(r"ร่าง|draft", re.IGNORECASE)),
+    ("approve", re.compile(r"เคาะ|อนุมัติ|ผ่านแล้ว|approve", re.IGNORECASE)),
+]
+_ASKS_DATA_RE = re.compile(r"กี่|เท่าไหร่|เท่าไร|อะไรบ้าง|รายการ|ขอดู|แสดง|ล่าสุด|ทั้งหมด|ตาราง|excel|ยอด|มูลค่า|"
+                           r"มี(?:ไหม|มั้ย|บ้าง)|\blist\b", re.IGNORECASE)
+_NOT_DATA_RE = re.compile(r"วิธี|ยังไง|อย่างไร|ทำไง|คืออะไร|หมายถึง|หมายความ|ขั้นตอน|ตัวอย่าง|สูตร|แบบฟอร์ม|template|"
+                          r"ช่วย(?:เขียน|ร่าง|คิด|คำนวณ|ประเมิน|ทำ)|ร่างให้|กี่แบบ|กี่ประเภท|กี่ขั้นตอน|กี่วัน",
+                          re.IGNORECASE)
+_TH_MONTHS = [("มกรา", "ม.ค."), ("กุมภา", "ก.พ."), ("มีนา", "มี.ค."), ("เมษา", "เม.ย."), ("พฤษภา", "พ.ค."),
+              ("มิถุนา", "มิ.ย."), ("กรกฎา", "ก.ค."), ("สิงหา", "ส.ค."), ("กันยา", "ก.ย."), ("ตุลา", "ต.ค."),
+              ("พฤศจิกา", "พ.ย."), ("ธันวา", "ธ.ค.")]
+
+
+def _simple_range(q: str, today: dt.date) -> tuple[dt.date | None, dt.date | None]:
+    """The plain date words the planner's anchors cover, read without it (no words → no range)."""
+    monday = today - dt.timedelta(days=today.weekday())
+    first = today.replace(day=1)
+    if "วันนี้" in q:
+        return today, today
+    if "เมื่อวาน" in q:
+        return today - dt.timedelta(days=1), today - dt.timedelta(days=1)
+    if re.search(r"(?:สัปดาห์|อาทิตย์)(?:ที่แล้ว|ก่อน)", q):
+        return monday - dt.timedelta(days=7), monday - dt.timedelta(days=1)
+    if re.search(r"(?:สัปดาห์|อาทิตย์)นี้", q):
+        return monday, today
+    if re.search(r"เดือน(?:ที่แล้ว|ก่อน)", q):
+        end = first - dt.timedelta(days=1)
+        return end.replace(day=1), end
+    if "เดือนนี้" in q:
+        return first, today
+    if "ปีนี้" in q:
+        return today.replace(month=1, day=1), today
+    for month, (stem, short) in enumerate(_TH_MONTHS, 1):
+        if stem in q or short in q:
+            start = dt.date(today.year if month <= today.month else today.year - 1, month, 1)
+            end = (start + dt.timedelta(days=32)).replace(day=1) - dt.timedelta(days=1)
+            return start, min(end, today)
+    return None, None
+
+
+def fallback_plan(question: str, today: dt.date | None = None) -> dict | None:
+    q = (question or "").strip()
+    if not mentions(q) or not _ASKS_DATA_RE.search(q) or _NOT_DATA_RE.search(q):
+        return None
+    status = next((s for s, rx in _STATUS_WORDS if rx.search(q)), None)
+    if status is None:
+        return None
+    d_from, d_to = _simple_range(q, today or _bangkok_today())
+    return {"doc_id": None, "quotation_id": None, "status": status, "date_from": d_from, "date_to": d_to,
+            "keyword": None, "show_list": True}
+
+
 def plan(question: str, previous: str = "") -> tuple[dict | None, dict]:
     """(filters or None when it isn't a lookup, usage of the planner call).
-    An E-/QE-number in the question is taken as-is even if the AI is unsure."""
+    An E-/QE-number in the question is taken as-is even if the AI is unsure, and
+    so is a status + count/list question (fallback_plan)."""
     try:
         raw, usage = _plan_cached(question.strip(), (previous or "").strip(), _bangkok_today().isoformat())
         p = _clean_plan(json.loads(raw))
         usage = json.loads(usage)
     except Exception:
         p, usage = None, {}
+    if p is None:
+        p = fallback_plan(question)
     doc, quote = DOC_RE.search(question or ""), QUOTE_RE.search(question or "")
     if (doc or quote) and p is None:
         p = {"doc_id": None, "quotation_id": None, "status": "any", "date_from": None, "date_to": None,

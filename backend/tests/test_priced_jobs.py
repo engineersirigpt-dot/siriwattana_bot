@@ -76,6 +76,40 @@ def test_an_e_number_is_looked_up_even_if_the_ai_is_unsure(monkeypatch):
     assert p["doc_id"] == "E26110001" and usage == PLAN_USAGE
 
 
+def test_a_status_count_question_is_a_lookup_even_if_the_planner_says_no(monkeypatch):
+    # prod 2026-11-18: gpt-4o-mini said lookup=false and the bot answered "ขอข้อมูลเพิ่มนิดนะครับ…"
+    monkeypatch.setattr(pj, "_plan_cached", lambda q, prev, today: ('{"lookup": false}', json.dumps(PLAN_USAGE)))
+    p, usage = pj.plan("ตอนนี้มีใบประเมินราคารออนุมัติกี่ใบ")
+    assert p["status"] == "pending" and p["date_from"] is None and usage == PLAN_USAGE
+    assert pj.plan("ใบเสนอราคาคืออะไร")[0] is None                        # a definition stays a chat answer
+
+    def down(q, prev, today):
+        raise RuntimeError("planner unavailable")
+
+    monkeypatch.setattr(pj, "_plan_cached", down)
+    assert pj.plan("มีงานที่ไม่อนุมัติราคากี่งาน")[0]["status"] == "reject"   # the planner down too
+
+
+@pytest.mark.parametrize("q, want", [
+    ("ตอนนี้มีใบประเมินราคารออนุมัติกี่ใบ", ("pending", None, None)),
+    ("ใบประเมินที่ยังไม่อนุมัติมีไหม", ("pending", None, None)),
+    ("มีงานที่ไม่อนุมัติราคากี่งาน", ("reject", None, None)),
+    ("เดือนนี้เคาะราคาไปกี่งาน", ("approve", "2026-11-01", "2026-11-18")),
+    ("งานเคาะราคาเดือนตุลาคมมีอะไรบ้าง", ("approve", "2026-10-01", "2026-10-31")),
+    ("งานเคาะราคา ม.ค. มีกี่งาน", ("approve", "2026-01-01", "2026-01-31")),
+    ("สัปดาห์ที่แล้วมีงานเคาะราคากี่งาน", ("approve", "2026-11-09", "2026-11-15")),
+    ("ใบเสนอราคาคืออะไร", None),
+    ("ใบเสนอราคามีกี่แบบ", None),
+    ("ราคาอนุมัติแล้วต้องทำอะไรต่อ", None),
+    ("ช่วยร่างใบเสนอราคาให้หน่อย", None),
+    ("วิธีขออนุมัติราคา ทำยังไง", None),
+])
+def test_the_fallback_rule(q, want):
+    p = pj.fallback_plan(q, dt.date(2026, 11, 18))
+    got = (p["status"], p["date_from"] and str(p["date_from"]), p["date_to"] and str(p["date_to"])) if p else None
+    assert got == want
+
+
 def test_date_anchors_for_the_planner():
     a = pj._date_anchors(dt.date(2026, 11, 17))   # a Tuesday
     assert "สัปดาห์นี้ = 2026-11-16 ถึง 2026-11-17" in a
