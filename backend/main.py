@@ -2124,6 +2124,24 @@ def _unpipe(line: str) -> str:
     return "\n".join([head] + [f"{indent}  - {p}" for p in parts])
 
 
+_DOTTED = re.compile(r"^(\s*)((?:[-*•]|\d+\.)\s+)?(.*)$")
+
+
+def _undot(line: str) -> str:
+    """'- สรุปตามวัน: · 19 ต.ค. = 12 งาน · 20 ต.ค. = 26 งาน · …' (a list written as one
+    line, prod 2026-11-18) → the heading, then one sub-bullet per item. Only when
+    there is a 'heading:' and three or more items; other '·' lines are left alone."""
+    if line.lstrip().startswith("|") or line.count(" · ") < 2 and ": · " not in line:
+        return line
+    indent, marker, text = _DOTTED.match(line).groups()
+    head, sep, rest = text.partition(": ")      # ": " — not the colon in a time like 11:25
+    items = [p.strip(" ·") for p in rest.split(" · ") if p.strip(" ·")] if sep else []
+    if not sep or len(items) < 2 or len(head) > 80:
+        return line
+    sub = indent + ("  " if marker else "")
+    return "\n".join([f"{indent}{marker or ''}{head}:"] + [f"{sub}- {it}" for it in items])
+
+
 _TABLE_ROW = re.compile(r"^\s*\|.*\|\s*$")
 _TABLE_SEP = re.compile(r"^\s*\|?\s*:?-{3,}")
 
@@ -2169,7 +2187,7 @@ def _tidy_data_answer(answer: str) -> str:
     the last 6 lines are touched; facts before an offer on the same line stay.
     A data record copied as one '… | … | …' bullet is split into sub-bullets,
     and a closing 'ข้อมูลอ้างอิงจาก…' line (the source is in the first sentence) goes."""
-    lines = "\n".join(_unpipe(ln) for ln in _drop_internal_notes(answer).rstrip().split("\n")).split("\n")
+    lines = "\n".join(_undot(_unpipe(ln)) for ln in _drop_internal_notes(answer).rstrip().split("\n")).split("\n")
     for i in range(len(lines) - 1, max(-1, len(lines) - 7), -1):
         if not _OFFER.search(lines[i]):
             continue
