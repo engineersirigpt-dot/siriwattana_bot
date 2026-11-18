@@ -110,6 +110,19 @@ def test_search_reads_the_master_list_of_both_systems():
     assert "ISNULL(p.currency_no, 'THB') = 'THB'" in totals_sql                              # only baht is summed
 
 
+def test_long_lists_get_breakdowns_in_the_same_session(monkeypatch):
+    sqls = pj.build_breakdowns({"status": "approve", "date_from": dt.date(2026, 11, 1),
+                                "date_to": dt.date(2026, 11, 18), "keyword": None})
+    assert "GROUP BY ISNULL(l.est_type, '-')" in sqls[0] and "GROUP BY ISNULL(p.currency_no, 'THB')" in sqls[1]
+    assert sqls[2].startswith("SELECT TOP 5 ") and "ORDER BY SUM(CASE WHEN ISNULL(p.currency_no, 'THB') = 'THB'" in sqls[2]
+    assert all("l.estimate_date >= '2026-11-01'" in q for q in sqls)
+    batches = []
+    monkeypatch.setattr(pj, "_run", lambda qs: batches.append(qs) or [[] for _ in qs])
+    pj.search({"status": "approve", "date_from": dt.date(2026, 11, 1), "date_to": dt.date(2026, 11, 18),
+               "keyword": None})
+    assert len(batches) == 1 and len(batches[0]) == 6      # rows, totals, 3 breakdowns, latest — one connection
+
+
 def test_live_approvals_of_new_customers_count_and_the_it_test_does_not():
     rows_sql, _ = pj.build_search({"status": "approve", "date_from": dt.date(2026, 11, 1),
                                    "date_to": dt.date(2026, 11, 18), "keyword": None})
@@ -151,12 +164,23 @@ def test_list_context_has_count_total_and_prices():
     p = {"status": "approve", "date_from": dt.date(2026, 11, 16), "date_to": dt.date(2026, 11, 17), "keyword": None}
     free = dict(ROW, job_id="E26110465", price_ex=None, total_price=None, tiers=0)
     text = pj.to_context(p, {"rows": [ROW, ROW_V2, free], "count": 5, "total": 52927.45, "priced": 2,
-                             "other_currency": 1})
+                             "other_currency": 1,
+                             "by_type": [{"est_type": "packaging", "n": 4, "total": 52927.45},
+                                         {"est_type": "book", "n": 1, "total": None}],
+                             "by_currency": [{"currency": "THB", "n": 4, "total": 52927.45},
+                                             {"currency": "USD", "n": 1, "total": 1200.0}],
+                             "top_customers": [{"customer": "ลูกค้าใหม่", "customer_id": "C9999998", "n": 2,
+                                                "total": 25832.50}]})
+    # a long list is summarised: by type, by currency, the biggest customers — and it is not revenue
+    assert "แยกตามประเภทงาน: packaging 4 งาน (มูลค่า 52,927.45 บาท) · book 1 งาน" in text
+    assert "แยกตามสกุลเงิน: THB 4 งาน รวม 52,927.45 THB · USD 1 งาน รวม 1,200.00 USD" in text
+    assert "1) ลูกค้าใหม่ (รวมลูกค้าที่ยังไม่ลงทะเบียนหลายราย) 2 งาน 25,832.50 บาท" in text
+    assert "ไม่ใช่ยอดขายจริง" in text
     assert "พบทั้งหมด: 5 งาน" in text and "52,927.45 บาท" in text and "1 งานที่ราคาเป็นสกุลเงินอื่น" in text
     # old system: its tax line taken off — 27,094.95 incl. 789.17 tax = the new system's 26,305.78 ex VAT
     assert "26,305.78 THB ก่อน VAT ที่จำนวน 3,000 ชิ้น (≈ 8.77 THB/ชิ้น)" in text and "27,094.95" not in text
     assert "25,832.50 บาท ก่อน VAT ที่จำนวน 500 ชิ้น" in text                       # new system: ex VAT
-    assert "ยังไม่มีราคา" in text and "แสดงรายละเอียด 3 งานล่าสุด" in text
+    assert "ยังไม่มีราคา" in text and "รายการด้านล่าง: 3 งานล่าสุด จากทั้งหมด 5 งาน" in text
     assert "ระบบประเมินราคาเดิม" in text and "ระบบประเมินราคาใหม่ (MI2)" in text
     assert "อนุมัติแล้ว (เคาะราคาแล้ว) · อนุมัติเมื่อ 2026-11-18 11:25" in text
     # one labelled field per line — a one-line "a | b | c" record got copied into an answer
