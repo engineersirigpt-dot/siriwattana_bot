@@ -259,19 +259,20 @@ def test_priced_jobs_empty_range_gives_the_latest(monkeypatch):
 
     def fake_query(sql, params=()):
         calls.append(sql)
-        if "COUNT(*)" in sql:
+        if sql.startswith("SELECT COUNT(*)"):        # the totals query (rows count price tiers inside)
             return [{"n": 0, "total": None, "priced": 0}]
-        return [] if "approved_at >=" in sql else [{"doc_id": "E26110001", "estimate_name": "กล่อง AROMA",
-                                                     "estimate_status": "approve", "mid_qty": 2000,
-                                                     "mid_total_ex_vat": Decimal("31947.09")}]
+        return [] if "l.estimate_date >=" in sql else [{"job_id": "E26110464", "job_name": "Rep.SRP (Tray)",
+                                                         "status_id": 3, "source_system": "V1", "price_qty": 3000,
+                                                         "unit_price": 9.03, "total_price": 27094.95,
+                                                         "currency_no": "THB", "tiers": 1}]
 
     monkeypatch.setattr(pj, "_run", lambda sqls: [fake_query(s) for s in sqls])   # one session, three queries
     p = {"status": "approve", "date_from": dt.date(2026, 11, 16), "date_to": dt.date(2026, 11, 18), "keyword": None}
     data = pj.search(p)
-    assert data["count"] == 0 and data["latest"][0]["doc_id"] == "E26110001"
-    assert calls[-1].startswith("SELECT TOP 3 ") and "approved_at >=" not in calls[-1]
+    assert data["count"] == 0 and data["latest"][0]["job_id"] == "E26110464"
+    assert calls[-1].startswith("SELECT TOP 3 ") and "l.estimate_date >=" not in calls[-1]
     text = pj.to_context(p, data)
-    assert "พบทั้งหมด: 0 งาน" in text and "งานล่าสุดที่ตรงสถานะ" in text and "E26110001" in text
+    assert "พบทั้งหมด: 0 งาน" in text and "งานล่าสุดที่ตรงสถานะ" in text and "E26110464" in text
 
 
 # ── in the chat pipeline ────────────────────────────────────────────────────

@@ -1,14 +1,16 @@
 """
-Priced jobs ("งานใหม่ที่เคาะราคาแล้ว") from the MI estimate system — offline.
+Priced jobs ("งานใหม่ที่เคาะราคาแล้ว") from the estimate systems — offline.
 
-The question → small AI planner (faked here) → fixed read-only SQL on
-MI2_ESTIMATE.dbo.tb_rfq (faked) → answer from that data. The lookup skips the
-AI sensitivity classifier (owner opened it to everyone, 2026-11-17); test rows
-are filtered out; a DB failure gives a Thai message, not a guess.
+The question → small AI planner (faked here) → fixed read-only SQL on the live
+master list ESTIMATE.dbo.tb_rfq_list (both the old V1 and the new V2 system;
+faked) → answer from that data. The lookup skips the AI sensitivity classifier
+(owner opened it to everyone, 2026-11-17); test rows are filtered out by name;
+a DB failure gives a Thai message, not a guess.
 """
 
 import datetime as dt
 import json
+import re
 from decimal import Decimal
 
 import pytest
@@ -21,13 +23,20 @@ from tests.test_v4_glue import ADMIN, pipe, stream  # noqa: F401  (pipe is a fix
 REAL_IS = main._is_priced_jobs_query
 REAL_TRY = main._try_priced_jobs_answer
 
-ROW = {
-    "doc_id": "E26110001", "estimate_name": "กล่อง AROMA OIL แบบปลอกสวม", "customer_id": "C20330637",
-    "customer_name": "บริษัท อโรมา จำกัด", "ae_team_name": "ทีม A", "estimate_status": "approve",
-    "estimate_date": dt.date(2026, 11, 3), "request_for_approve_at": dt.datetime(2026, 11, 3, 9, 49),
-    "approved_at": dt.datetime(2026, 11, 6, 14, 52, 16), "qty_list": "2000", "mid_qty": 2000,
-    "mid_total_ex_vat": Decimal("31947.09"), "print_type": "Offset", "box_type": "9. ปลอกกล่อง : Sleeve",
-    "component_type": "ไม่ประกบลูกฟูก", "credit_term": "30 วัน",
+# rows as the live list returns them (est_legacy_peek / est19_peek, 2026-11-18)
+ROW = {  # old system (V1), price from tb_rfq_price1
+    "job_id": "E26110464", "job_name": "Rep.SRP (Tray) - Can Pack 24 x 7", "customer_id": "C2014056",
+    "custName": "โชติวัฒน์อุตสาหกรรมการผลิต", "est_type": "packaging", "status_id": 3, "source_system": "V1",
+    "estimate_date": dt.datetime(2026, 11, 18, 11, 25, 28), "created": dt.datetime(2026, 11, 17, 15, 41, 25),
+    "updated": dt.datetime(2026, 11, 18, 11, 25, 28), "price_qty": 3000, "unit_price": 9.03,
+    "total_price": 27094.95, "currency_no": "THB", "tiers": 1, "mid_qty": None, "mid_total_ex_vat": None,
+}
+ROW_V2 = {  # new system (V2): no price lines in the old table → its ex-VAT middle-quantity price
+    "job_id": "E26110334", "job_name": "กล่อง Jaelek", "customer_id": "C9999998", "custName": "ลูกค้าใหม่",
+    "est_type": "packaging", "status_id": 3, "source_system": "V2",
+    "estimate_date": dt.datetime(2026, 11, 13, 11, 18, 45), "created": dt.datetime(2026, 11, 12, 14, 28, 23),
+    "updated": dt.datetime(2026, 11, 13, 11, 18, 45), "price_qty": None, "unit_price": None, "total_price": None,
+    "currency_no": None, "tiers": 0, "mid_qty": 500, "mid_total_ex_vat": Decimal("25832.50"),
 }
 PLAN_USAGE = {"model": "gpt-4o-mini", "prompt_tokens": 400, "completion_tokens": 40, "cost_usd": 0.0001}
 
@@ -76,78 +85,105 @@ def test_date_anchors_for_the_planner():
 
 # ── SQL ─────────────────────────────────────────────────────────────────────
 
-def test_search_sql_reads_the_live_server_and_leaves_out_test_rows():
+def test_search_reads_the_master_list_of_both_systems():
     p = {"status": "approve", "date_from": dt.date(2026, 11, 16), "date_to": dt.date(2026, 11, 17),
          "keyword": "AROMA'; DROP TABLE x--"}
     rows_sql, totals_sql = pj.build_search(p)
     for sql in (rows_sql, totals_sql):
-        # fully qualified: runs on .19 through OPENQUERY (the .10 copy is the test system)
-        assert "FROM MI2_ESTIMATE.dbo.tb_rfq WITH (NOLOCK)" in sql
-        assert "estimate_status = 'approve'" in sql
-        assert "approved_at >= '2026-11-16'" in sql and "approved_at < '2026-11-18'" in sql   # date_to inclusive
-        # C9999998 = "ลูกค้าใหม่", not a test customer: every approved estimate on the
-        # live system used it, and excluding it answered "0 งาน" (2026-11-18)
+        # the live master list on .19 — old (V1) and new (V2) estimates, no double counting
+        assert "FROM ESTIMATE.dbo.tb_rfq_list l WITH (NOLOCK)" in sql
+        assert "l.status_id = 3" in sql
+        # estimate_date = when it was approved; date_to is inclusive
+        assert "l.estimate_date >= '2026-11-16'" in sql and "l.estimate_date < '2026-11-18'" in sql
+        # C9999998 = "ลูกค้าใหม่", not a test customer (excluding it answered "0 งาน", 2026-11-18)
         assert "C9999998" not in sql and "customer_id NOT IN" not in sql
         assert "N'%test%'" in sql and "N'%เทส%'" in sql and "N'%ทดสอบ%'" in sql
         # OPENQUERY takes no parameters: the keyword is reduced to safe characters
         assert "N'%AROMA DROP TABLE x--%'" in sql and "';" not in sql
+        # selling price only: the price table's cost columns are never read
+        for col in ("total_material", "total_print", "total_process", "marking", "profit_sharing", "sale_id"):
+            assert col not in sql, col
     assert rows_sql.startswith(f"SELECT TOP {pj.MAX_ROWS} ")
-    assert "contact" not in rows_sql and "ae_emp_name" not in rows_sql   # no personal columns
+    assert "ORDER BY CASE WHEN x.qty = x.main_qty THEN 0 ELSE 1 END, x.qty" in rows_sql   # price at the main qty
+    assert "ISNULL(p.currency_no, 'THB') = 'THB'" in totals_sql                              # only baht is summed
 
 
 def test_live_approvals_of_new_customers_count_and_the_it_test_does_not():
-    # the three approved rows on .19 (est19_peek, 2026-11-18), against the name filter
-    import re as _re
-
     rows_sql, _ = pj.build_search({"status": "approve", "date_from": dt.date(2026, 11, 1),
                                    "date_to": dt.date(2026, 11, 18), "keyword": None})
-    patterns = _re.findall(r"estimate_name NOT LIKE N'%(.+?)%'", rows_sql)
+    patterns = re.findall(r"job_name NOT LIKE N'%(.+?)%'", rows_sql)
 
     def kept(name):
         return not any(p.lower() in name.lower() for p in patterns)
 
-    assert kept("WAGEN-Box_FORPRESS") and kept("กล่อง Jaelek")
+    assert kept("WAGEN-Box_FORPRESS") and kept("กล่อง Jaelek") and kept("Ashton Weapons Catalog - offset")
     assert not kept("Test - IT ทดสอบระบบ สร้าง Estimate Packaging")
 
 
-def test_any_status_list_excludes_drafts():
+def test_statuses_map_to_the_old_ids():
     rows_sql, _ = pj.build_search({"status": "any"})
-    assert "estimate_status IN ('approve', 'pending', 'reject', 'over_limit_approve')" in rows_sql
+    assert "l.status_id IN (1, 2, 3)" in rows_sql                       # any = everything but drafts
     assert pj.build_search({"status": "weird'; --"})[0] == rows_sql     # unknown status → any
+    assert "l.status_id = 1" in pj.build_search({"status": "pending"})[0]
+
+
+@pytest.mark.parametrize("q,doc", [("E26110464 ราคาเท่าไหร่", "E26110464"), ("EB26110174 อนุมัติยัง", "EB26110174"),
+                                   ("ep26110001", "EP26110001")])
+def test_book_and_popup_numbers_are_estimates_too(q, doc):
+    assert pj.mentions(q) and pj.DOC_RE.search(q).group(0).upper() == doc
 
 
 def test_doc_lookup_validates_numbers(monkeypatch):
     seen = []
     monkeypatch.setattr(pj, "_run", lambda sqls: seen.extend(sqls) or [[] for _ in sqls])
-    assert pj.lookup_doc("E2611'; DROP", None) == {"rows": [], "quotes": []} and seen == []
-    pj.lookup_doc("e26110334", None)
-    assert "WHERE doc_id = 'E26110334'" in seen[0] and "FROM MI2_ESTIMATE.dbo.tb_quotation" in seen[1]
+    assert pj.lookup_doc("E2611'; DROP", None)["rows"] == [] and seen == []
+    pj.lookup_doc("eb26110174", None)
+    assert "FROM ESTIMATE.dbo.tb_rfq_list l" in seen[0] and "l.job_id = 'EB26110174'" in seen[0]
+    assert "FROM ESTIMATE.dbo.tb_rfq_price1" in seen[1] and "FROM ESTIMATE.dbo.tb_rfq_status_log" in seen[2]
+    assert "FROM MI2_ESTIMATE.dbo.tb_quotation" in seen[4]
 
 
 # ── context for the answer model ────────────────────────────────────────────
 
 def test_list_context_has_count_total_and_prices():
     p = {"status": "approve", "date_from": dt.date(2026, 11, 16), "date_to": dt.date(2026, 11, 17), "keyword": None}
-    free = dict(ROW, doc_id="E26110002", mid_total_ex_vat=Decimal("0"))
-    text = pj.to_context(p, {"rows": [ROW, free], "count": 5, "total": Decimal("31947.09"), "priced": 1})
-    assert "พบทั้งหมด: 5 งาน" in text and "31,947.09 บาท" in text
-    assert "≈ 15.97 บาท/ชิ้น" in text and "ยังไม่มีราคา" in text
-    assert "แสดงรายละเอียด 2 งานล่าสุด" in text
-    assert "ไม่รวมรายการทดสอบ" in text and "อนุมัติแล้ว (เคาะราคาแล้ว)" in text
+    free = dict(ROW, job_id="E26110465", total_price=None, tiers=0)
+    text = pj.to_context(p, {"rows": [ROW, ROW_V2, free], "count": 5, "total": 52927.45, "priced": 2,
+                             "other_currency": 1})
+    assert "พบทั้งหมด: 5 งาน" in text and "52,927.45 บาท" in text and "1 งานที่ราคาเป็นสกุลเงินอื่น" in text
+    assert "27,094.95 THB ที่จำนวน 3,000 ชิ้น (≈ 9.03 THB/ชิ้น)" in text            # old system: no VAT claim
+    assert "25,832.50 บาท ก่อน VAT ที่จำนวน 500 ชิ้น" in text                       # new system: ex VAT
+    assert "ยังไม่มีราคา" in text and "แสดงรายละเอียด 3 งานล่าสุด" in text
+    assert "ระบบประเมินราคาเดิม" in text and "ระบบประเมินราคาใหม่ (MI2)" in text
+    assert "อนุมัติแล้ว (เคาะราคาแล้ว) · อนุมัติเมื่อ 2026-11-18 11:25" in text
     # one labelled field per line — a one-line "a | b | c" record got copied into an answer
-    assert "[ใบประเมิน E26110001] กล่อง AROMA OIL แบบปลอกสวม\n  ลูกค้า: บริษัท อโรมา จำกัด (C20330637)" in text
+    assert ("[ใบประเมิน E26110464] Rep.SRP (Tray) - Can Pack 24 x 7\n"
+            "  ลูกค้า: โชติวัฒน์อุตสาหกรรมการผลิต (C2014056)") in text
     assert " | " not in text
 
 
 def test_empty_and_single_document_contexts():
     p = {"status": "approve", "date_from": None, "date_to": None, "keyword": "XYZ"}
     assert "พบทั้งหมด: 0 งาน" in pj.to_context(p, {"rows": [], "count": 0, "total": None, "priced": 0})
+    one = pj.to_context({"doc_id": "E26110464"}, {
+        "rows": [dict(ROW, credit_term_name="เครดิต 30 วัน")],
+        "prices": [{"qty": 3000, "unit_price": 9.03, "total_price": 27094.95, "currency_no": "THB"},
+                   {"qty": 5000, "unit_price": 8.1, "total_price": 40500.0, "currency_no": "THB"}],
+        "history": [{"from_status_id": 0, "to_status_id": 1, "created": dt.datetime(2026, 11, 17, 16, 19)},
+                    {"from_status_id": 1, "to_status_id": 3, "created": dt.datetime(2026, 11, 18, 11, 25)}],
+        "detail": [], "quotes": [], "doc_id": "E26110464"})
+    assert "3,000 ชิ้น: 27,094.95 THB" in one and "5,000 ชิ้น: 40,500.00 THB" in one
+    assert "มีราคาทั้งหมด 2 ระดับจำนวน" in one and "เครดิต 30 วัน" in one
+    assert "2026-11-18 11:25: อนุมัติแล้ว (เคาะราคาแล้ว)" in one
     quote = {"quotation_id": "QE2600190", "revision": 0, "status_label": "Approved", "currency": "THB",
-             "qty_list": "2000", "grand_total": Decimal("34183.39"), "issue_date": dt.date(2026, 11, 6),
-             "expiry_date": dt.date(2026, 12, 6), "approved_at": None}
-    one = pj.to_context({"doc_id": "E26110001"}, {"rows": [ROW], "quotes": [quote], "doc_id": "E26110001"})
-    assert "QE2600190" in one and "34,183.39 THB" in one
-    assert "ไม่พบใบประเมินราคา E26119999" in pj.to_context({"doc_id": "E26119999"}, {"rows": [], "quotes": []})
+             "qty_list": "500", "grand_total": Decimal("27640.78"), "issue_date": dt.date(2026, 11, 13),
+             "expiry_date": dt.date(2026, 12, 13), "approved_at": None}
+    v2 = pj.to_context({"doc_id": "E26110334"}, {
+        "rows": [ROW_V2], "prices": [], "history": [], "quotes": [quote], "doc_id": "E26110334",
+        "detail": [{"qty_list": "500", "mid_qty": 500, "mid_total_ex_vat": Decimal("25832.50"), "print_type": "Offset",
+                    "box_type": "กล่องหูช้าง", "component_type": "ไม่ประกบลูกฟูก"}]})
+    assert "25,832.50 บาท ก่อน VAT ที่จำนวน 500 ชิ้น" in v2 and "QE2600190" in v2 and "Offset" in v2
+    assert "ไม่พบใบประเมินราคา E26119999" in pj.to_context({"doc_id": "E26119999"}, {"rows": [], "prices": []})
 
 
 def test_off_switch_and_missing_mi(monkeypatch):
@@ -178,7 +214,7 @@ def live(pipe, monkeypatch):  # noqa: F811
 
     monkeypatch.setattr(pj, "plan", plan)
     monkeypatch.setattr(pj, "search", lambda p: pipe.queries.append(p) or
-                        {"rows": [ROW], "count": 1, "total": ROW["mid_total_ex_vat"], "priced": 1})
+                        {"rows": [ROW], "count": 1, "total": ROW["total_price"], "priced": 1})
 
     def answer(question, images, docs, history=None, system_prompt=None):
         pipe.contexts.append((docs, system_prompt))
@@ -197,7 +233,7 @@ def test_priced_jobs_question_is_answered_from_the_estimate_system(live):
     assert live.safety == []                                   # the AI classifier was skipped
     assert live.queries and live.queries[0]["status"] == "approve"
     docs, prompt = live.contexts[0]
-    assert docs[0][0] == "ระบบประเมินราคา" and "E26110001" in docs[0][1]
+    assert docs[0][0] == "ระบบประเมินราคา" and "E26110464" in docs[0][1]
     assert "ระบบประเมินราคา" in prompt
     saved = live.saved[-1]
     assert saved["source"] == "priced_jobs"
