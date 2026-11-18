@@ -85,13 +85,16 @@ def test_date_anchors_for_the_planner():
 
 # ── SQL ─────────────────────────────────────────────────────────────────────
 
-def test_search_reads_the_master_list_of_both_systems():
+def test_search_reads_the_old_system_minus_what_mi2_owns():
     p = {"status": "approve", "date_from": dt.date(2026, 11, 16), "date_to": dt.date(2026, 11, 17),
          "keyword": "AROMA'; DROP TABLE x--"}
     rows_sql, totals_sql = pj.build_search(p)
     for sql in (rows_sql, totals_sql):
-        # the live master list on .19 — old (V1) and new (V2) estimates, no double counting
+        # the live master list on .19, without MI2's rows: those are read from MI2 itself
         assert "FROM ESTIMATE.dbo.tb_rfq_list l WITH (NOLOCK)" in sql
+        assert "ISNULL(l.source_system, 'V1') <> 'V2'" in sql
+        assert ("NOT EXISTS (SELECT 1 FROM MI2_ESTIMATE.dbo.tb_rfq m2 WITH (NOLOCK) WHERE ISNULL(m2.is_deleted, 0) = 0 "
+                "AND m2.doc_id COLLATE DATABASE_DEFAULT = l.job_id COLLATE DATABASE_DEFAULT)") in sql
         assert "l.status_id = 3" in sql
         # estimate_date = when it was approved; date_to is inclusive
         assert "l.estimate_date >= '2026-11-16'" in sql and "l.estimate_date < '2026-11-18'" in sql
@@ -106,34 +109,161 @@ def test_search_reads_the_master_list_of_both_systems():
     assert rows_sql.startswith(f"SELECT TOP {pj.MAX_ROWS} ")
     assert "ORDER BY CASE WHEN x.qty = x.main_qty THEN 0 ELSE 1 END, x.qty" in rows_sql   # price at the main qty
     assert "x.total_price - ISNULL(x.tax, 0) AS price_ex" in rows_sql                     # before tax, like MI2
-    assert "COALESCE(p.price_ex, v.mid_total_ex_vat)" in totals_sql
-    assert "ISNULL(p.currency_no, 'THB') = 'THB'" in totals_sql                              # only baht is summed
+    assert "ISNULL(p.currency_no, 'THB') = 'THB' AND p.price_ex > 0" in totals_sql        # only baht is summed
+
+
+def test_mi2_is_read_directly_in_the_same_shape():
+    # prod 2026-11-18 worry: once the old app is retired, a stopped sync into the
+    # master list must not turn into "เดือนนี้ไม่มีงาน"
+    p = {"status": "approve", "date_from": dt.date(2026, 11, 1), "date_to": dt.date(2026, 11, 18),
+         "keyword": "AROMA'; DROP TABLE x--"}
+    sqls = pj.build_mi2(p)
+    assert len(sqls) == 6 and all("FROM MI2_ESTIMATE.dbo.tb_rfq r WITH (NOLOCK)" in q for q in sqls)
+    for q in sqls:
+        assert "ISNULL(r.is_deleted, 0) = 0" in q and "r.estimate_status = 'approve'" in q
+        assert "r.approved_at >= '2026-11-01'" in q and "r.approved_at < '2026-11-19'" in q
+        assert "r.estimate_name NOT LIKE N'%ทดสอบ%'" in q
+        assert "N'%AROMA DROP TABLE x--%'" in q and "';" not in q
+    rows = sqls[0]
+    assert rows.startswith(f"SELECT TOP {pj.MAX_ROWS} r.doc_id AS job_id, r.estimate_name AS job_name")
+    assert "CAST(r.approved_at AS datetime) AS estimate_date" in rows and "'V2' AS source_system" in rows
+    assert "WHEN 'approve' THEN 3" in rows and "WHEN r.doc_id LIKE 'EB%' THEN 'book'" in rows
+    assert "r.estimate_status IN ('pending', 'reject', 'approve')" in pj.build_mi2({"status": "any"})[0]
+    assert pj.build_mi2(dict(p, full_list=True))[0].startswith("SELECT TOP 1000 ")
 
 
 def test_long_lists_get_breakdowns_in_the_same_session(monkeypatch):
     sqls = pj.build_breakdowns({"status": "approve", "date_from": dt.date(2026, 11, 1),
                                 "date_to": dt.date(2026, 11, 18), "keyword": None})
-    assert "GROUP BY ISNULL(l.est_type, '-')" in sqls[0] and "GROUP BY ISNULL(p.currency_no, 'THB')" in sqls[1]
-    assert sqls[2].startswith("SELECT TOP 5 ") and "ORDER BY SUM(CASE WHEN ISNULL(p.currency_no, 'THB') = 'THB'" in sqls[2]
+    assert sqls[0].startswith("SELECT DISTINCT l.customer_id ")
+    assert "GROUP BY ISNULL(l.est_type, '-')" in sqls[1] and "GROUP BY ISNULL(p.currency_no, 'THB')" in sqls[2]
+    assert sqls[3].startswith("SELECT TOP 10 l.customer_id") and "GROUP BY l.customer_id" in sqls[3]
+    assert sqls[4].startswith("SELECT TOP 5 l.job_id") and "ORDER BY CASE WHEN ISNULL(p.currency_no, 'THB')" in sqls[4]
     assert all("l.estimate_date >= '2026-11-01'" in q for q in sqls)
-    batches = []
-    monkeypatch.setattr(pj, "_run", lambda qs: batches.append(qs) or [[] for _ in qs])
+    calls = []
+    monkeypatch.setattr(pj, "_run_both", lambda a, b: calls.append((a, b)) or ([[] for _ in a], [[] for _ in b]))
     pj.search({"status": "approve", "date_from": dt.date(2026, 11, 1), "date_to": dt.date(2026, 11, 18),
                "keyword": None})
-    # rows, totals, 3 breakdowns, the 5 priciest, latest — one connection
-    assert len(batches) == 1 and len(batches[0]) == 7
-    assert sqls[3].startswith("SELECT TOP 5 l.job_id") and "ORDER BY CASE WHEN ISNULL(p.currency_no, 'THB')" in sqls[3]
+    # old: rows, totals, 5 breakdowns, latest · MI2: rows, totals, ids, by type, per customer, priciest, latest
+    assert len(calls) == 1 and len(calls[0][0]) == 8 and len(calls[0][1]) == 7      # one connection
 
 
 def test_a_full_list_fetches_every_row_but_the_fallback_stays_small(monkeypatch):
     # prod 2026-11-18: "ถ้าให้แสดงมาทั้ง 661 งานเลยได้มั้ย" got the same newest-10 table again
     p = {"status": "approve", "date_from": dt.date(2026, 11, 1), "date_to": dt.date(2026, 11, 18), "keyword": None,
          "full_list": True}
-    batches = []
-    monkeypatch.setattr(pj, "_run", lambda qs: batches.append(qs) or [[] for _ in qs])
+    calls = []
+    monkeypatch.setattr(pj, "_run_both", lambda a, b: calls.append((a, b)) or ([[] for _ in a], [[] for _ in b]))
     pj.search(p)
-    assert batches[0][0].startswith("SELECT TOP 1000 ") and batches[0][-1].startswith("SELECT TOP 3 ")
+    (legacy, mi2), = calls
+    assert legacy[0].startswith("SELECT TOP 1000 ") and legacy[-1].startswith("SELECT TOP 3 ")
+    assert mi2[0].startswith("SELECT TOP 1000 ") and mi2[-1].startswith("SELECT TOP 3 ")
     assert pj.build_search(dict(p, full_list=False))[0].startswith(f"SELECT TOP {pj.MAX_ROWS} ")
+
+
+MI2_ROW = {"job_id": "E26110600", "job_name": "กล่อง MI2", "customer_id": "C2014056", "custName": "โชติวัฒน์ (MI2)",
+           "est_type": "packaging", "status_id": 3, "source_system": "V2",
+           "estimate_date": dt.datetime(2026, 11, 18, 14, 0), "created": dt.datetime(2026, 11, 18, 9, 0),
+           "updated": dt.datetime(2026, 11, 18, 14, 0), "mid_qty": 1000, "mid_total_ex_vat": Decimal("90000.00")}
+
+
+def _results(legacy_rows, mi2_rows):
+    legacy = [legacy_rows,
+              [{"n": 655, "total": 73_000_000.0, "priced": 592, "other_currency": 63}],
+              [{"customer_id": "C2014056"}, {"customer_id": "C9999998"}],
+              [{"est_type": "packaging", "n": 453, "total": 41_000_000.0}, {"est_type": "book", "n": 195, "total": 30.0}],
+              [{"currency": "THB", "n": 592, "total": 73_000_000.0}, {"currency": "USD", "n": 52, "total": 5.0}],
+              [{"customer_id": "C2014056", "customer": "โชติวัฒน์อุตสาหกรรมการผลิต", "n": 9, "total": 500_000.0},
+               {"customer_id": "C9999998", "customer": "ลูกค้าใหม่", "n": 4, "total": 100_000.0}],
+              [ROW]]
+    mi2 = [mi2_rows,
+           [{"n": 6, "total": Decimal("1027473.89"), "priced": 6}],
+           [{"customer_id": "c2014056 "}, {"customer_id": "C2000001"}],
+           [{"est_type": "packaging", "n": 6, "total": Decimal("1027473.89")}],
+           [{"customer_id": "C2014056", "customer": "โชติวัฒน์ (MI2)", "n": 2, "total": Decimal("90000.00")},
+            {"customer_id": "C9999998", "customer": "บริษัท ใหม่ จำกัด", "n": 4, "total": Decimal("937473.89")}],
+           [MI2_ROW]]
+    return legacy, mi2
+
+
+def test_both_systems_are_merged_into_one_answer(monkeypatch):
+    monkeypatch.setattr(pj, "_run_both", lambda a, b: _results([ROW], [MI2_ROW]))
+    out = pj.search({"status": "approve", "date_from": dt.date(2026, 11, 1), "date_to": dt.date(2026, 11, 18)})
+    assert out["count"] == 661 and out["priced"] == 598 and out["other_currency"] == 63
+    assert out["total"] == pytest.approx(74_027_473.89)                # float + Decimal, no TypeError
+    assert out["customers"] == 3                                        # C2014056 in both counts once
+    assert [r["job_id"] for r in out["rows"]] == ["E26110600", "E26110464"]   # newest first across systems
+    assert {b["est_type"]: b["n"] for b in out["by_type"]} == {"packaging": 459, "book": 195}
+    assert {b["currency"]: b["n"] for b in out["by_currency"]} == {"THB": 598, "USD": 52}
+    top = {b["customer_id"]: b for b in out["top_customers"]}
+    assert top["C9999998"]["customer"] == "ลูกค้าใหม่" and top["C9999998"]["n"] == 8          # not one prospect's name
+    assert top["C2014056"]["total"] == pytest.approx(590_000.0)
+    assert out["top_customers"][0]["customer_id"] == "C9999998"         # 1,037,473.89 > 590,000
+    assert [r["job_id"] for r in out["priciest"]] == ["E26110600", "E26110464"]
+    assert out["legacy_missing"] is False
+
+
+def test_the_old_system_gone_still_answers_from_mi2(monkeypatch):
+    class Session:
+        def __init__(self, error):
+            self.error = error
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def run(self, sql):
+            if "ESTIMATE.dbo.tb_rfq_list" in sql:
+                raise self.error
+            return [{"n": 6, "total": 1.0, "priced": 6}] if "COUNT(*) AS n" in sql else []
+
+    gone = Exception("[42S02] [SQL Server]Invalid object name 'ESTIMATE.dbo.tb_rfq_list'. (208)")
+    monkeypatch.setattr(pj.factory, "session", lambda: Session(gone))
+    out = pj.search({"status": "approve", "date_from": dt.date(2026, 11, 1), "date_to": dt.date(2026, 11, 18)})
+    assert out["legacy_missing"] is True and out["count"] == 6
+    assert "ข้อมูลจากระบบประเมินราคาใหม่ MI2 เท่านั้น" in pj.to_context({"status": "approve"}, out)
+    closed = Exception("The SELECT permission was denied on the object 'tb_rfq_price1', database 'ESTIMATE'")
+    monkeypatch.setattr(pj.factory, "session", lambda: Session(closed))
+    assert pj.search({"status": "approve"})["legacy_missing"] is True
+    # anything else is an error, never a quietly smaller number
+    for other in (Exception("Query timeout expired"),
+                  Exception("Database 'MI2_ESTIMATE' does not exist"),
+                  Exception("Invalid column name 'source_system'")):
+        monkeypatch.setattr(pj.factory, "session", lambda e=other: Session(e))
+        with pytest.raises(Exception):
+            pj.search({"status": "approve"})
+
+
+def test_doc_lookup_validates_numbers(monkeypatch):
+    seen = []
+
+    def run_both(legacy, mi2):
+        seen.extend(legacy + mi2)
+        return [[] for _ in legacy], [[] for _ in mi2]
+
+    monkeypatch.setattr(pj, "_run_both", run_both)
+    monkeypatch.setattr(pj, "_run", lambda sqls: seen.extend(sqls) or [[] for _ in sqls])
+    assert pj.lookup_doc("E2611'; DROP", None)["rows"] == [] and seen == []
+    pj.lookup_doc("eb26110174", None)
+    assert "FROM ESTIMATE.dbo.tb_rfq_list l" in seen[0] and "l.job_id = 'EB26110174'" in seen[0]
+    assert "FROM ESTIMATE.dbo.tb_rfq_price1" in seen[1] and "FROM ESTIMATE.dbo.tb_rfq_status_log" in seen[2]
+    assert "FROM MI2_ESTIMATE.dbo.tb_rfq r" in seen[3] and "r.doc_id = 'EB26110174'" in seen[3]
+    assert "FROM MI2_ESTIMATE.dbo.tb_quotation" in seen[4]
+
+
+def test_doc_lookup_takes_the_live_status_from_mi2(monkeypatch):
+    # the master list still says "รออนุมัติ" (sync late); MI2 has it approved
+    stale = dict(ROW_V2, status_id=1, estimate_date=None, credit_term_name="เครดิต 30 วัน")
+    live = dict(ROW_V2, qty_list="500", print_type="Offset", box_type="กล่องหูช้าง", component_type="-")
+    monkeypatch.setattr(pj, "_run_both", lambda a, b: ([[stale], [], []], [[live], []]))
+    got = pj.lookup_doc("E26110334", None)
+    assert got["rows"][0]["status_id"] == 3 and got["rows"][0]["credit_term_name"] == "เครดิต 30 วัน"
+    assert got["legacy_missing"] is False
+    monkeypatch.setattr(pj, "_run_both", lambda a, b: (None, [[live], []]))       # old system gone
+    got = pj.lookup_doc("E26110334", None)
+    assert got["rows"][0]["job_id"] == "E26110334" and got["legacy_missing"] is True
 
 
 def test_live_approvals_of_new_customers_count_and_the_it_test_does_not():
@@ -159,16 +289,6 @@ def test_statuses_map_to_the_old_ids():
                                    ("ep26110001", "EP26110001")])
 def test_book_and_popup_numbers_are_estimates_too(q, doc):
     assert pj.mentions(q) and pj.DOC_RE.search(q).group(0).upper() == doc
-
-
-def test_doc_lookup_validates_numbers(monkeypatch):
-    seen = []
-    monkeypatch.setattr(pj, "_run", lambda sqls: seen.extend(sqls) or [[] for _ in sqls])
-    assert pj.lookup_doc("E2611'; DROP", None)["rows"] == [] and seen == []
-    pj.lookup_doc("eb26110174", None)
-    assert "FROM ESTIMATE.dbo.tb_rfq_list l" in seen[0] and "l.job_id = 'EB26110174'" in seen[0]
-    assert "FROM ESTIMATE.dbo.tb_rfq_price1" in seen[1] and "FROM ESTIMATE.dbo.tb_rfq_status_log" in seen[2]
-    assert "FROM MI2_ESTIMATE.dbo.tb_quotation" in seen[4]
 
 
 # ── context for the answer model ────────────────────────────────────────────

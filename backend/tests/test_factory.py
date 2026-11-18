@@ -341,18 +341,19 @@ def test_priced_jobs_empty_range_gives_the_latest(monkeypatch):
 
     def fake_query(sql, params=()):
         calls.append(sql)
-        if sql.startswith("SELECT COUNT(*)"):        # the totals query (rows count price tiers inside)
+        if sql.startswith("SELECT COUNT(*)"):        # the totals queries (rows count price tiers inside)
             return [{"n": 0, "total": None, "priced": 0}]
-        return [] if "l.estimate_date >=" in sql else [{"job_id": "E26110464", "job_name": "Rep.SRP (Tray)",
-                                                         "status_id": 3, "source_system": "V1", "price_qty": 3000,
-                                                         "price_ex": 26305.78, "total_price": 27094.95,
-                                                         "currency_no": "THB", "tiers": 1}]
+        if "l.estimate_date >=" in sql or "FROM MI2_ESTIMATE.dbo.tb_rfq r " in sql:
+            return []
+        return [{"job_id": "E26110464", "job_name": "Rep.SRP (Tray)", "status_id": 3, "source_system": "V1",
+                 "price_qty": 3000, "price_ex": 26305.78, "total_price": 27094.95, "currency_no": "THB", "tiers": 1}]
 
-    monkeypatch.setattr(pj, "_run", lambda sqls: [fake_query(s) for s in sqls])   # one session, three queries
+    monkeypatch.setattr(pj, "_run_both", lambda a, b: ([fake_query(s) for s in a], [fake_query(s) for s in b]))
     p = {"status": "approve", "date_from": dt.date(2026, 11, 16), "date_to": dt.date(2026, 11, 18), "keyword": None}
     data = pj.search(p)
     assert data["count"] == 0 and data["latest"][0]["job_id"] == "E26110464"
-    assert calls[-1].startswith("SELECT TOP 3 ") and "l.estimate_date >=" not in calls[-1]
+    latest = [c for c in calls if c.startswith("SELECT TOP 3 ")]
+    assert len(latest) == 2 and not any("l.estimate_date >=" in c or "r.approved_at >=" in c for c in latest)
     text = pj.to_context(p, data)
     assert "พบทั้งหมด: 0 งาน" in text and "งานล่าสุดที่ตรงสถานะ" in text and "E26110464" in text
 
