@@ -2289,6 +2289,7 @@ def _try_priced_jobs_answer(
     audit_log("priced_jobs_lookup", user=user, request=request, detail={
         "session_id": sid, "message_id": mid, "status": p.get("status"), "doc_id": p.get("doc_id"),
         "found": len(data.get("rows") or []), "db_ms": db_ms,
+        "legacy_missing": bool(data.get("legacy_missing")),   # the old estimate DB could not be read
     })
     return {"answer": answer, "source": "priced_jobs", "session_id": sid,
             "session_title": stitle, "message_id": mid}

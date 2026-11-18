@@ -180,9 +180,17 @@ def plan(question: str, previous: str = "") -> tuple[dict | None, dict]:
 # ── database (fixed SELECTs only) ──────────────────────────────────────────
 # Everything is read on the LIVE server 192.168.5.19. (The MI2_ESTIMATE on the
 # MI login server .10 is a test copy — the first version read it by mistake.)
-# One master list covers both estimate systems: ESTIMATE.dbo.tb_rfq_list,
-# source_system V1 (old app) / V2 (new MI2 app, synced in). OPENQUERY takes no
-# parameters, so every value below is validated or reduced to safe characters.
+# Two sources, so the bot keeps working when the old estimate app is retired:
+#   - the new MI2 app: MI2_ESTIMATE.dbo.tb_rfq, read directly — it is the owner
+#     of every MI2 estimate, so the bot does not depend on its sync into the
+#     master list (a stopped or late sync would read as "0 งาน", 2026-11-18);
+#   - the old app: the master list ESTIMATE.dbo.tb_rfq_list, minus every row the
+#     MI2 table holds (its synced V2 rows, and old estimates if they are ever
+#     moved into MI2), so nothing is counted twice.
+# If the old system's database is gone or closed to us, the MI2 part is still
+# answered and the answer says so. Any other database error stays an error.
+# OPENQUERY takes no parameters, so every value below is validated or reduced
+# to safe characters.
 
 _LIST = "ESTIMATE.dbo.tb_rfq_list"
 _PRICE = "ESTIMATE.dbo.tb_rfq_price1"
@@ -193,55 +201,87 @@ _MI2_QUOTE = "MI2_ESTIMATE.dbo.tb_quotation"
 STATUS_ID = {"draft": 0, "pending": 1, "reject": 2, "approve": 3}
 STATUS_NAME = {0: "ร่าง (ยังไม่ส่งอนุมัติ)", 1: "ส่งขออนุมัติแล้ว รออนุมัติ", 2: "ไม่อนุมัติ",
                3: "อนุมัติแล้ว (เคาะราคาแล้ว)", 4: "เกินวงเงิน รออนุมัติพิเศษ"}
-# the date that matters for each status (estimate_date = when it was approved)
+# the date that matters for each status (estimate_date / approved_at = when it was approved)
 _DATE_COL = {"approve": "l.estimate_date", "pending": "l.updated", "reject": "l.updated", "draft": "l.created",
              "any": "COALESCE(l.estimate_date, l.updated, l.created)"}
+_MI2_DATE_COL = {"approve": "r.approved_at", "pending": "r.updated_at", "reject": "r.updated_at",
+                 "draft": "r.created_at", "any": "COALESCE(r.approved_at, r.updated_at, r.created_at)"}
 
 
 def _run(sqls: list[str]) -> list[list[dict]]:
-    import factory
-
     with factory.session() as s:
         return [s.run(q) for q in sqls]
 
 
-# the price shown for a job: the line at its main quantity, else its smallest quantity
-# price_ex: the old system stores the price WITH its tax line (E26110464: 27,094.95 = 26,305.78 + 789.17
-# tax), the new one before it (mid_total_ex_vat 26,305.78) — both are shown before tax.
-_PRICE_APPLY = f"""OUTER APPLY (SELECT TOP 1 x.qty AS price_qty, x.total_price - ISNULL(x.tax, 0) AS price_ex,
-            x.total_price, x.currency_no
-        FROM {_PRICE} x WITH (NOLOCK) WHERE x.job_id = l.job_id
-        ORDER BY CASE WHEN x.qty = x.main_qty THEN 0 ELSE 1 END, x.qty) p
-    OUTER APPLY (SELECT COUNT(*) AS tiers FROM {_PRICE} y WITH (NOLOCK) WHERE y.job_id = l.job_id) t
-    OUTER APPLY (SELECT TOP 1 r.mid_qty, r.mid_total_ex_vat FROM {_MI2_RFQ} r WITH (NOLOCK)
-        WHERE l.source_system = 'V2' AND r.doc_id COLLATE DATABASE_DEFAULT = l.job_id COLLATE DATABASE_DEFAULT) v"""
-
-_LIST_COLS = ("l.job_id, l.job_name, l.customer_id, c.custName, l.est_type, l.status_id, l.source_system, "
-              "l.estimate_date, l.created, l.updated")
+# the old system's tables are missing or closed to this account — not a timeout or a typo
+_GONE_RE = re.compile(r"invalid object name|does not exist|cannot open database|not able to access|denied",
+                      re.IGNORECASE)
+_LEGACY_RE = re.compile(r"\bESTIMATE\b|tb_rfq_list|tb_rfq_price1|tb_rfq_status_log", re.IGNORECASE)
 
 
-def _not_test_sql() -> str:
+def _legacy_gone(e: Exception) -> bool:
+    text = str(e)
+    return bool(_GONE_RE.search(text) and _LEGACY_RE.search(text))
+
+
+def _run_both(legacy_sqls: list[str], mi2_sqls: list[str]) -> tuple[list[list[dict]] | None, list[list[dict]]]:
+    """(old-system results — None when its database is gone —, MI2 results), in
+    one connection. MI2 runs first: its error is always raised."""
+    with factory.session() as s:
+        mi2 = [s.run(q) for q in mi2_sqls]
+        try:
+            legacy = [s.run(q) for q in legacy_sqls]
+        except Exception as e:
+            if not _legacy_gone(e):
+                raise
+            legacy = None
+    return legacy, mi2
+
+
+def _not_test_sql(name_col: str = "l.job_name", customer_col: str = "l.customer_id") -> str:
     ids = [c for c in TEST_CUSTOMERS if re.fullmatch(r"[A-Za-z0-9_\-]{1,20}", c)]
-    parts = [f"l.customer_id NOT IN ({', '.join(repr(c) for c in ids)})"] if ids else []
+    parts = [f"{customer_col} NOT IN ({', '.join(repr(c) for c in ids)})"] if ids else []
     # C9999998 is NOT a test customer: it is "ลูกค้าใหม่" (a customer not registered
     # yet). Every approved estimate on the new system used it, so excluding it
     # gave "0 งาน" (2026-11-18). Test rows are recognised by their name only.
-    parts += ["l.job_name NOT LIKE N'%test%'", "l.job_name NOT LIKE N'%เทส%'", "l.job_name NOT LIKE N'%ทดสอบ%'"]
+    parts += [f"{name_col} NOT LIKE N'%{w}%'" for w in ("test", "เทส", "ทดสอบ")]
     return " AND ".join(parts)
 
 
-_ROW_COLS = f"{_LIST_COLS}, p.price_qty, p.price_ex, p.total_price, p.currency_no, t.tiers, v.mid_qty, v.mid_total_ex_vat"
-_AMOUNT = "COALESCE(p.price_ex, v.mid_total_ex_vat)"
-_AMOUNT_THB = f"CASE WHEN ISNULL(p.currency_no, 'THB') = 'THB' AND {_AMOUNT} > 0 THEN {_AMOUNT} END"
+# ── the old system: master list rows that MI2 does not own ──
+
+# the price shown for a job: the line at its main quantity, else its smallest quantity.
+# price_ex: the old system stores the price WITH its tax line (E26110464: 27,094.95 = 26,305.78 + 789.17
+# tax), MI2 before it (mid_total_ex_vat 26,305.78) — both are shown before tax.
+_PRICE_APPLY = f"""OUTER APPLY (SELECT TOP 1 x.qty AS price_qty, x.total_price - ISNULL(x.tax, 0) AS price_ex,
+            x.total_price, x.currency_no, x.exchange_rate
+        FROM {_PRICE} x WITH (NOLOCK) WHERE x.job_id = l.job_id
+        ORDER BY CASE WHEN x.qty = x.main_qty THEN 0 ELSE 1 END, x.qty) p
+    OUTER APPLY (SELECT COUNT(*) AS tiers FROM {_PRICE} y WITH (NOLOCK) WHERE y.job_id = l.job_id) t"""
+
+# synced MI2 rows (V2), and any row MI2 holds a live copy of, are read from MI2 instead
+_NOT_MI2 = (f"ISNULL(l.source_system, 'V1') <> 'V2' AND NOT EXISTS (SELECT 1 FROM {_MI2_RFQ} m2 WITH (NOLOCK) "
+            "WHERE ISNULL(m2.is_deleted, 0) = 0 "
+            "AND m2.doc_id COLLATE DATABASE_DEFAULT = l.job_id COLLATE DATABASE_DEFAULT)")
+
+_LIST_COLS = ("l.job_id, l.job_name, l.customer_id, c.custName, l.est_type, l.status_id, l.source_system, "
+              "l.estimate_date, l.created, l.updated")
+_ROW_COLS = f"{_LIST_COLS}, p.price_qty, p.price_ex, p.total_price, p.currency_no, p.exchange_rate, t.tiers"
+_AMOUNT = "p.price_ex"
+# total_price is in BAHT for every currency: a USD / EUR estimate keeps baht there and
+# its rate in exchange_rate (EB26110201: 580,637.94 ÷ 15,810 ÷ 31.17 = 1.1782 =
+# unit_price_exchange, the USD price a copy; checked on 30 export jobs, 2026-11-18).
+# So export jobs are summed in baht too; their foreign amount is price ÷ rate.
+_AMOUNT_THB = f"CASE WHEN {_AMOUNT} > 0 THEN {_AMOUNT} END"
+_AMOUNT_FX = f"CASE WHEN {_AMOUNT} > 0 AND p.exchange_rate > 0 THEN {_AMOUNT} / p.exchange_rate END"
 
 
 def _base(p: dict) -> tuple[str, str]:
-    """(FROM … WHERE … for a list question, its date column) — values inlined, all validated."""
-    import factory
-
+    """(FROM … WHERE … on the old system for a list question, its date column) — values inlined, all validated."""
     status = p.get("status") if p.get("status") in _DATE_COL else "any"
     date_col = _DATE_COL[status]
-    where = ["l.status_id IN (1, 2, 3)" if status == "any" else f"l.status_id = {STATUS_ID[status]}", _not_test_sql()]
+    where = ["l.status_id IN (1, 2, 3)" if status == "any" else f"l.status_id = {STATUS_ID[status]}",
+             _not_test_sql(), _NOT_MI2]
     if isinstance(p.get("date_from"), dt.date):
         where.append(f"{date_col} >= '{p['date_from'].isoformat()}'")
     if isinstance(p.get("date_to"), dt.date):
@@ -256,58 +296,193 @@ def _base(p: dict) -> tuple[str, str]:
 
 
 def build_search(p: dict) -> tuple[str, str]:
-    """(rows SQL, totals SQL) for a list question."""
+    """(rows SQL, totals SQL) on the old system for a list question."""
     base, date_col = _base(p)
     top = factory.FULL_MAX if p.get("full_list") else MAX_ROWS   # "ขอดูทั้งหมด" → every row for the table
-    rows_sql = (f"SELECT TOP {top} {_ROW_COLS} {base} ORDER BY {date_col} DESC")
-    totals_sql = (f"SELECT COUNT(*) AS n, COUNT(DISTINCT l.customer_id) AS customers, SUM({_AMOUNT_THB}) AS total, "
-                  f"SUM(CASE WHEN ISNULL(p.currency_no, 'THB') = 'THB' AND {_AMOUNT} > 0 THEN 1 ELSE 0 END) AS priced, "
+    rows_sql = f"SELECT TOP {top} {_ROW_COLS} {base} ORDER BY {date_col} DESC"
+    totals_sql = (f"SELECT COUNT(*) AS n, SUM({_AMOUNT_THB}) AS total, "
+                  f"SUM(CASE WHEN {_AMOUNT} > 0 THEN 1 ELSE 0 END) AS priced, "
                   f"SUM(CASE WHEN ISNULL(p.currency_no, 'THB') <> 'THB' THEN 1 ELSE 0 END) AS other_currency "
                   f"{base}")
     return rows_sql, totals_sql
 
 
 def build_breakdowns(p: dict) -> list[str]:
-    """For a long list (660 approvals in half a month): counts and values by job
-    type, by currency, and the five customers with the highest value."""
+    """For a long list (660 approvals in half a month): the customer ids (for a
+    distinct count across both systems), counts and values by job type and by
+    currency, the customers with the highest value, and the five priciest."""
     base, _ = _base(p)
     return [
+        f"SELECT DISTINCT l.customer_id {base}",
         f"SELECT ISNULL(l.est_type, '-') AS est_type, COUNT(*) AS n, SUM({_AMOUNT_THB}) AS total {base} "
         f"GROUP BY ISNULL(l.est_type, '-') ORDER BY COUNT(*) DESC",
         f"SELECT ISNULL(p.currency_no, 'THB') AS currency, COUNT(*) AS n, "
-        f"SUM(CASE WHEN {_AMOUNT} > 0 THEN {_AMOUNT} END) AS total {base} "
+        f"SUM({_AMOUNT_THB}) AS total, SUM({_AMOUNT_FX}) AS total_fx {base} "
         f"GROUP BY ISNULL(p.currency_no, 'THB') ORDER BY COUNT(*) DESC",
-        f"SELECT TOP 5 ISNULL(c.custName, l.customer_id) AS customer, MAX(l.customer_id) AS customer_id, "
-        f"COUNT(*) AS n, SUM({_AMOUNT_THB}) AS total {base} "
-        f"GROUP BY ISNULL(c.custName, l.customer_id) ORDER BY SUM({_AMOUNT_THB}) DESC",
+        # top 10 here: MI2's own totals per customer are added before the top 5 is picked
+        f"SELECT TOP 10 l.customer_id, MAX(c.custName) AS customer, COUNT(*) AS n, SUM({_AMOUNT_THB}) AS total {base} "
+        f"GROUP BY l.customer_id ORDER BY SUM({_AMOUNT_THB}) DESC",
         # "อันไหนแพงสุด" over the whole range — the model only sees the newest MAX_ROWS rows
         f"SELECT TOP 5 {_ROW_COLS} {base} ORDER BY {_AMOUNT_THB} DESC",
     ]
 
 
+# ── the new system: MI2_ESTIMATE.dbo.tb_rfq, shaped like the old rows ──
+
+_MI2_STATUS_ID = ("CASE r.estimate_status WHEN 'draft' THEN 0 WHEN 'pending' THEN 1 WHEN 'reject' THEN 2 "
+                  "WHEN 'approve' THEN 3 ELSE 4 END")
+# E… packaging, EB… book, EP… popup — the numbering both systems share
+_MI2_TYPE = "CASE WHEN r.doc_id LIKE 'EB%' THEN 'book' WHEN r.doc_id LIKE 'EP%' THEN 'popup' ELSE 'packaging' END"
+_MI2_ROW_COLS = (f"r.doc_id AS job_id, r.estimate_name AS job_name, r.customer_id, r.customer_name AS custName, "
+                 f"{_MI2_TYPE} AS est_type, {_MI2_STATUS_ID} AS status_id, 'V2' AS source_system, "
+                 "CAST(r.approved_at AS datetime) AS estimate_date, CAST(r.created_at AS datetime) AS created, "
+                 "CAST(r.updated_at AS datetime) AS updated, r.mid_qty, r.mid_total_ex_vat")
+_MI2_AMOUNT = "CASE WHEN r.mid_total_ex_vat > 0 THEN r.mid_total_ex_vat END"
+
+
+def _mi2_base(p: dict) -> tuple[str, str]:
+    status = p.get("status") if p.get("status") in _MI2_DATE_COL else "any"
+    date_col = _MI2_DATE_COL[status]
+    where = ["ISNULL(r.is_deleted, 0) = 0",
+             "r.estimate_status IN ('pending', 'reject', 'approve')" if status == "any"
+             else f"r.estimate_status = '{status}'",
+             _not_test_sql("r.estimate_name", "r.customer_id")]
+    if isinstance(p.get("date_from"), dt.date):
+        where.append(f"{date_col} >= '{p['date_from'].isoformat()}'")
+    if isinstance(p.get("date_to"), dt.date):
+        where.append(f"{date_col} < '{(p['date_to'] + dt.timedelta(days=1)).isoformat()}'")
+    kw = factory.safe_keyword(p.get("keyword"))
+    if kw:
+        where.append(f"(r.estimate_name LIKE N'%{kw}%' OR r.customer_name LIKE N'%{kw}%' "
+                     f"OR r.customer_id = '{kw}' OR r.doc_id = '{kw}')")
+    return f"FROM {_MI2_RFQ} r WITH (NOLOCK) WHERE {' AND '.join(where)}", date_col
+
+
+def build_mi2(p: dict) -> list[str]:
+    """MI2's part of a list question: rows, totals, customer ids, by type, per customer, the five priciest."""
+    base, date_col = _mi2_base(p)
+    top = factory.FULL_MAX if p.get("full_list") else MAX_ROWS
+    return [
+        f"SELECT TOP {top} {_MI2_ROW_COLS} {base} ORDER BY {date_col} DESC",
+        f"SELECT COUNT(*) AS n, SUM({_MI2_AMOUNT}) AS total, "
+        f"SUM(CASE WHEN r.mid_total_ex_vat > 0 THEN 1 ELSE 0 END) AS priced {base}",
+        f"SELECT DISTINCT r.customer_id {base}",
+        f"SELECT {_MI2_TYPE} AS est_type, COUNT(*) AS n, SUM({_MI2_AMOUNT}) AS total {base} GROUP BY {_MI2_TYPE}",
+        f"SELECT r.customer_id, MAX(r.customer_name) AS customer, COUNT(*) AS n, SUM({_MI2_AMOUNT}) AS total "
+        f"{base} GROUP BY r.customer_id",
+        f"SELECT TOP 5 {_MI2_ROW_COLS} {base} ORDER BY {_MI2_AMOUNT} DESC",
+    ]
+
+
+# ── both together ──
+
+def _f(v) -> float | None:
+    try:
+        return None if v is None else float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _add(*values) -> float | None:
+    got = [x for x in (_f(v) for v in values) if x is not None]
+    return sum(got) if got else None
+
+
+def _thb(r: dict) -> float:
+    """A row's before-tax amount in baht (export jobs too: stored in baht), 0 when it has none."""
+    ex = _f(r.get("price_ex"))
+    if ex and ex > 0:
+        return ex
+    return _f(r.get("mid_total_ex_vat")) or 0.0
+
+
+def _newest(p: dict, rows: list[dict], n: int) -> list[dict]:
+    status = p.get("status")
+    if status == "approve":
+        key = lambda r: r.get("estimate_date")  # noqa: E731
+    elif status in ("pending", "reject"):
+        key = lambda r: r.get("updated")  # noqa: E731
+    elif status == "draft":
+        key = lambda r: r.get("created")  # noqa: E731
+    else:
+        key = lambda r: r.get("estimate_date") or r.get("updated") or r.get("created")  # noqa: E731
+    return sorted(rows, key=lambda r: str(key(r) or ""), reverse=True)[:n]
+
+
+def _ids(rows: list[dict]) -> set[str]:
+    return {str(r.get("customer_id") or "").strip().upper() for r in rows if r.get("customer_id")}
+
+
+def _merge(p: dict, legacy: list[list[dict]] | None, mi2: list[list[dict]]) -> dict:
+    """One answer from both systems' results (legacy None = the old system is gone)."""
+    l_rows, l_tot, l_ids, l_type, l_cur, l_cust, l_dear = (legacy or [[]] * 7)[:7]
+    m_rows, m_tot, m_ids, m_type, m_cust, m_dear = mi2[:6]
+    lt, mt = (l_tot or [{}])[0], (m_tot or [{}])[0]
+    m_n = int(mt.get("n") or 0)
+
+    by_type: dict[str, dict] = {}
+    for b in list(l_type) + list(m_type):
+        k = b.get("est_type") or "-"
+        cur = by_type.setdefault(k, {"est_type": k, "n": 0, "total": None})
+        cur["n"] += int(b.get("n") or 0)
+        cur["total"] = _add(cur["total"], b.get("total"))
+    by_currency: dict[str, dict] = {}
+    mi2_thb = [{"currency": "THB", "n": m_n, "total": mt.get("total")}] if m_n else []
+    for b in list(l_cur) + mi2_thb:
+        k = b.get("currency") or "THB"
+        cur = by_currency.setdefault(k, {"currency": k, "n": 0, "total": None, "total_fx": None})
+        cur["n"] += int(b.get("n") or 0)
+        cur["total"] = _add(cur["total"], b.get("total"))
+        cur["total_fx"] = _add(cur["total_fx"], b.get("total_fx"))
+    customers: dict[str, dict] = {}
+    for b in list(l_cust) + list(m_cust):
+        k = str(b.get("customer_id") or "-").strip().upper()
+        cur = customers.setdefault(k, {"customer_id": b.get("customer_id"), "customer": None, "n": 0, "total": None})
+        cur["customer"] = cur["customer"] or ("ลูกค้าใหม่" if k == "C9999998"
+                                              else (b.get("customer") or b.get("customer_id")))
+        cur["n"] += int(b.get("n") or 0)
+        cur["total"] = _add(cur["total"], b.get("total"))
+
+    top = factory.FULL_MAX if p.get("full_list") else MAX_ROWS
+    return {
+        "rows": _newest(p, list(l_rows) + list(m_rows), top),
+        "count": int(lt.get("n") or 0) + m_n,
+        "total": _add(lt.get("total"), mt.get("total")),
+        "priced": int(lt.get("priced") or 0) + int(mt.get("priced") or 0),
+        "other_currency": int(lt.get("other_currency") or 0),
+        "customers": len(_ids(l_ids) | _ids(m_ids)),
+        "by_type": sorted(by_type.values(), key=lambda b: -b["n"]),
+        "by_currency": sorted(by_currency.values(), key=lambda b: -b["n"]),
+        "top_customers": sorted(customers.values(), key=lambda b: -(b["total"] or 0))[:5],
+        "priciest": sorted(list(l_dear) + list(m_dear), key=_thb, reverse=True)[:5],
+        "legacy_missing": legacy is None,
+    }
+
+
 def search(p: dict) -> dict:
     rows_sql, totals_sql = build_search(p)
-    sqls = [rows_sql, totals_sql] + build_breakdowns(p)
-    if p.get("date_from") or p.get("date_to"):
+    legacy_sqls = [rows_sql, totals_sql] + build_breakdowns(p)
+    mi2_sqls = build_mi2(p)
+    dated = bool(p.get("date_from") or p.get("date_to"))
+    if dated:
         # in case nothing is in that range: the newest matching ones instead of a bare "0"
-        latest_sql, _ = build_search(dict(p, date_from=None, date_to=None, full_list=False))
-        sqls.append(latest_sql.replace(f"TOP {MAX_ROWS} ", "TOP 3 ", 1))
-    got = _run(sqls)
-    got += [[]] * (7 - len(got))
-    rows, tot = got[0], (got[1] or [{}])[0]
-    out = {"rows": rows, "count": int(tot.get("n") or 0), "total": tot.get("total"),
-           "priced": int(tot.get("priced") or 0), "other_currency": int(tot.get("other_currency") or 0),
-           "customers": int(tot.get("customers") or 0),
-           "by_type": got[2], "by_currency": got[3], "top_customers": got[4], "priciest": got[5]}
-    if not out["count"] and got[6]:
-        out["latest"] = got[6]
+        wide = dict(p, date_from=None, date_to=None, full_list=False)
+        legacy_sqls.append(build_search(wide)[0].replace(f"TOP {MAX_ROWS} ", "TOP 3 ", 1))
+        mi2_sqls.append(build_mi2(wide)[0].replace(f"TOP {MAX_ROWS} ", "TOP 3 ", 1))
+    legacy, mi2 = _run_both(legacy_sqls, mi2_sqls)
+    out = _merge(p, legacy, mi2)
+    if not out["count"] and dated:
+        latest = (legacy[7] if legacy and len(legacy) > 7 else []) + (mi2[6] if len(mi2) > 6 else [])
+        if latest:
+            out["latest"] = _newest(p, latest, 3)
     return out
 
 
 def lookup_doc(doc_id: str | None, quotation_id: str | None) -> dict:
-    """One estimate (any status, test rows included — the user named it): its
-    list entry, price per quantity, status history, and — for new-system (V2)
-    estimates — print details and quotations."""
+    """One estimate (any status, test rows included — the user named it): from
+    MI2 when MI2 holds it (its status there is the live one), else the old
+    system's list entry; the old system's price per quantity and status history;
+    MI2's print details and quotations."""
     doc_id = doc_id.upper() if doc_id and DOC_RE.fullmatch(doc_id) else None
     quotation_id = quotation_id.upper() if quotation_id and QUOTE_RE.fullmatch(quotation_id) else None
     if not doc_id and quotation_id:
@@ -316,21 +491,27 @@ def lookup_doc(doc_id: str | None, quotation_id: str | None) -> dict:
         doc_id = found.upper() if DOC_RE.fullmatch(found) else None
     if not doc_id:
         return {"rows": [], "prices": [], "history": [], "detail": [], "quotes": []}
-    rows, prices, history, detail, quotes = _run([
+    legacy, (detail, quotes) = _run_both([
         f"SELECT TOP 1 {_LIST_COLS}, l.credit_term_name FROM {_LIST} l WITH (NOLOCK) "
         f"LEFT JOIN mi.dbo.customer c WITH (NOLOCK) ON c.custID = l.customer_id WHERE l.job_id = '{doc_id}'",
-        f"SELECT TOP 12 qty, total_price - ISNULL(tax, 0) AS price_ex, total_price, currency_no FROM {_PRICE} WITH (NOLOCK) "
+        f"SELECT TOP 12 qty, total_price - ISNULL(tax, 0) AS price_ex, total_price, currency_no, exchange_rate "
+        f"FROM {_PRICE} WITH (NOLOCK) "
         f"WHERE job_id = '{doc_id}' ORDER BY qty",
         f"SELECT TOP 20 from_status_id, to_status_id, created FROM {_LOG} WITH (NOLOCK) "
         f"WHERE job_id = '{doc_id}' ORDER BY created",
-        f"SELECT TOP 1 qty_list, mid_qty, mid_total_ex_vat, print_type, box_type, component_type "
-        f"FROM {_MI2_RFQ} WITH (NOLOCK) WHERE doc_id = '{doc_id}' AND ISNULL(is_deleted, 0) = 0",
+    ], [
+        f"SELECT TOP 1 {_MI2_ROW_COLS}, r.qty_list, r.print_type, r.box_type, r.component_type "
+        f"FROM {_MI2_RFQ} r WITH (NOLOCK) WHERE r.doc_id = '{doc_id}' AND ISNULL(r.is_deleted, 0) = 0",
         f"SELECT quotation_id, revision, status_label, currency, qty_list, grand_total, issue_date, expiry_date, "
         f"approved_at FROM {_MI2_QUOTE} WITH (NOLOCK) WHERE doc_id = '{doc_id}' AND ISNULL(is_deleted, 0) = 0 "
         f"ORDER BY created_at DESC",
     ])
+    rows, prices, history = legacy or ([], [], [])
+    if detail:
+        old = rows[0] if rows else {}
+        rows = [dict(detail[0], credit_term_name=old.get("credit_term_name"))]
     return {"rows": rows, "prices": prices, "history": history, "detail": detail, "quotes": quotes,
-            "doc_id": doc_id}
+            "doc_id": doc_id, "legacy_missing": legacy is None}
 
 
 # ── data → text for the answer model ───────────────────────────────────────
@@ -374,10 +555,14 @@ def list_table(p: dict, rows: list[dict], count: int, title: str | None = None) 
             "|---|---|---|---:|---:|---|")
     body = []
     for r in shown:
-        ex, qty, cur = r.get("price_ex"), r.get("price_qty"), r.get("currency_no") or "THB"
+        ex, qty = r.get("price_ex"), r.get("price_qty")
         if not (ex and float(ex) > 0):
-            ex, qty, cur = r.get("mid_total_ex_vat"), r.get("mid_qty"), "THB"
-        price = f"{_money(ex)} {cur}" if ex and float(ex) > 0 else "ยังไม่มีราคา"
+            ex, qty = r.get("mid_total_ex_vat"), r.get("mid_qty")
+        # baht for every job; an export job also shows what it is in the customer's currency
+        # (it showed "580,637.94 USD" for 580,637.94 baht, 2026-11-18)
+        fx = _fx(r)
+        price = (f"{_money(ex)} THB" + (f" (≈ {fx[0]:,.2f} {fx[1]})" if fx else "")
+                 if ex and float(ex) > 0 else "ยังไม่มีราคา")
         when = r.get("estimate_date") if approve else (r.get("updated") or r.get("created"))
         body.append(f"| {_cell(r.get('job_id'), 14)} | {_cell(r.get('job_name'))} | {_cell(r.get('custName'), 40)} | "
                     f"{_qty(qty)} | {price} | {_when(when)} |")
@@ -388,17 +573,30 @@ def list_table(p: dict, rows: list[dict], count: int, title: str | None = None) 
     return (f"**{title}**\n\n" if title else "") + head + "\n" + "\n".join(body)
 
 
+def _fx(r: dict) -> tuple[float, str, float] | None:
+    """(amount in the customer's currency, currency, baht per unit) for an export
+    job priced in USD / EUR — its stored price is baht at its own rate."""
+    cur = (r.get("currency_no") or "THB").strip().upper()
+    ex, rate = _f(r.get("price_ex")), _f(r.get("exchange_rate"))
+    if cur == "THB" or not ex or ex <= 0 or not rate or rate <= 0:
+        return None
+    return ex / rate, cur, rate
+
+
 def _price_text(r: dict) -> str:
-    """The price line for one job, before tax: the selling price at its main
-    quantity (old-system price lines, tax taken off), else the new system's
-    ex-VAT price at its middle quantity. Both systems agree on this basis."""
+    """The price line for one job, before tax and in baht: the selling price at
+    its main quantity (old-system price lines, tax taken off), else the new
+    system's ex-VAT price at its middle quantity. Both systems agree on this basis."""
     ex, qty = r.get("price_ex"), r.get("price_qty")
     if ex and float(ex) > 0:
-        cur = r.get("currency_no") or "THB"
-        per = f" (≈ {float(ex) / float(qty):,.2f} {cur}/ชิ้น)" if qty else ""
+        per = f" (≈ {float(ex) / float(qty):,.2f} บาท/ชิ้น)" if qty else ""
         tiers = r.get("tiers") or 0
         more = f" · มีราคาทั้งหมด {tiers} ระดับจำนวน" if tiers and int(tiers) > 1 else ""
-        return f"{_money(ex)} {cur} ก่อน VAT ที่จำนวน {_qty(qty)} ชิ้น{per}{more}"
+        fx = _fx(r)
+        export = (f" · เสนอลูกค้าเป็น {fx[1]}: ≈ {fx[0]:,.2f} {fx[1]}"
+                  + (f" (≈ {fx[0] / float(qty):,.4f} {fx[1]}/ชิ้น)" if qty else "")
+                  + f" ที่อัตรา {fx[2]:,.2f} บาท/{fx[1]}" if fx else "")
+        return f"{_money(ex)} บาท ก่อน VAT ที่จำนวน {_qty(qty)} ชิ้น{per}{export}{more}"
     mid_total, mid_qty = r.get("mid_total_ex_vat"), r.get("mid_qty")
     if mid_total and float(mid_total) > 0:
         per = f" (≈ {float(mid_total) / float(mid_qty):,.2f} บาท/ชิ้น)" if mid_qty else ""
@@ -437,6 +635,9 @@ def describe_filters(p: dict) -> str:
 def to_context(p: dict, data: dict) -> str:
     now = _bangkok_now().strftime("%Y-%m-%d %H:%M")
     head = f"ข้อมูลจากระบบประเมินราคา (ทั้งระบบเดิมและระบบใหม่ MI2) ณ {now}\n"
+    if data.get("legacy_missing"):
+        head = (f"ข้อมูลจากระบบประเมินราคาใหม่ MI2 เท่านั้น ณ {now} — อ่านฐานข้อมูลระบบประเมินราคาเดิมไม่ได้ "
+                "(อาจถูกปิดหรือย้ายไปแล้ว) ตัวเลขด้านล่างจึงไม่รวมใบจากระบบเดิม: ต้องบอกผู้ใช้ข้อนี้ในประโยคแรก\n")
     if "prices" in data:
         if not data["rows"]:
             return head + f"ไม่พบใบประเมินราคา {p.get('doc_id') or p.get('quotation_id')} ในระบบ"
@@ -445,7 +646,7 @@ def to_context(p: dict, data: dict) -> str:
             first = data["prices"][0]
             r.update(price_qty=first.get("qty"), price_ex=first.get("price_ex"),
                      total_price=first.get("total_price"), currency_no=first.get("currency_no"),
-                     tiers=len(data["prices"]))
+                     exchange_rate=first.get("exchange_rate"), tiers=len(data["prices"]))
         if data.get("detail"):
             r.update(mid_qty=data["detail"][0].get("mid_qty"), mid_total_ex_vat=data["detail"][0].get("mid_total_ex_vat"))
         out = [head, "ใบประเมินราคา:", _row_text(r)]
@@ -453,9 +654,12 @@ def to_context(p: dict, data: dict) -> str:
             out.append(f"  เครดิต: {r['credit_term_name']}")
         if data["prices"]:
             out.append("ราคาขายตามจำนวน:")
-            out += [f"  - {_qty(x.get('qty'))} ชิ้น: {_money(x.get('price_ex'))} {x.get('currency_no') or 'THB'} ก่อน VAT"
-                    + (f" (≈ {float(x['price_ex']) / float(x['qty']):,.2f} ต่อชิ้น)" if x.get("price_ex") and x.get("qty")
-                       else "") for x in data["prices"]]
+            for x in data["prices"]:
+                fx = _fx(x)
+                out.append(f"  - {_qty(x.get('qty'))} ชิ้น: {_money(x.get('price_ex'))} บาท ก่อน VAT"
+                           + (f" (≈ {float(x['price_ex']) / float(x['qty']):,.2f} บาท/ชิ้น)"
+                              if x.get("price_ex") and x.get("qty") else "")
+                           + (f" · ≈ {fx[0]:,.2f} {fx[1]}" if fx else ""))
         if data.get("detail"):
             d = data["detail"][0]
             out.append(f"รายละเอียดในระบบใหม่: จำนวนที่ขอราคา {d.get('qty_list') or '-'} · งานพิมพ์ {d.get('print_type') or '-'} "
@@ -476,23 +680,28 @@ def to_context(p: dict, data: dict) -> str:
                      "(Approved ในระบบประเมินราคา) — ยังไม่ใช่งานที่ลูกค้าสั่ง")
     lines.append(f"พบทั้งหมด: {data['count']} งาน")
     if data["count"]:
-        lines.append(f"มูลค่ารวม (ผลรวมราคาประเมินก่อน VAT ที่จำนวนหลักของแต่ละงาน รวมเฉพาะ {data['priced']} งาน"
-                     f"ที่มีราคาเป็นบาท — เป็นมูลค่าราคาที่เสนอ ไม่ใช่ยอดขายจริง): {_money(data['total'])} บาท")
+        unpriced = data["count"] - data["priced"]
+        lines.append(f"มูลค่ารวม (ผลรวมราคาประเมินก่อน VAT เป็นเงินบาท ที่จำนวนหลักของแต่ละงาน จาก {data['priced']} งาน"
+                     f"ที่มีราคา{f' — อีก {unpriced} งานยังไม่มีราคา' if unpriced > 0 else ''} — เป็นมูลค่าราคาที่เสนอ "
+                     f"ไม่ใช่ยอดขายจริง): {_money(data['total'])} บาท")
         if data.get("other_currency"):
-            lines.append(f"มี {data['other_currency']} งานที่ราคาเป็นสกุลเงินอื่น ไม่ได้รวมในยอดบาทข้างบน")
+            lines.append(f"ในจำนวนนี้มี {data['other_currency']} งานที่เสนอราคาลูกค้าเป็นเงินต่างประเทศ (USD/EUR) — "
+                         "ระบบเก็บราคาของงานเหล่านี้เป็นเงินบาทตามอัตราแลกเปลี่ยนในใบประเมินอยู่แล้ว "
+                         "จึงรวมอยู่ในมูลค่าบาทข้างบนด้วย")
         if data.get("by_type"):
             lines.append("แยกตามประเภทงาน: " + " · ".join(
                 f"{b.get('est_type') or '-'} {b.get('n') or 0} งาน "
-                + (f"(มูลค่า {_money(b.get('total'))} บาท)" if b.get("total") else "(ราคาไม่ได้เป็นเงินบาท)")
+                + (f"(มูลค่า {_money(b.get('total'))} บาท)" if b.get("total") else "(ยังไม่มีราคา)")
                 for b in data["by_type"]))
         if len(data.get("by_currency") or []) > 1:
-            # counts only: "USD 52 งาน รวม 41,110,437.31 USD" (2026-11-18) is ~790k USD a job — the
-            # amount is probably in baht with a foreign currency label. Not shown until checked.
-            lines.append("แยกตามสกุลเงิน (จำนวนงาน): " + " · ".join(
-                f"{b.get('currency') or 'THB'} {b.get('n') or 0} งาน" for b in data["by_currency"])
-                + " — ยังไม่แสดงมูลค่าของสกุลเงินอื่น")
+            # total is baht for every currency (export jobs keep baht at their own rate, 2026-11-18)
+            lines.append("แยกตามสกุลเงินที่เสนอลูกค้า: " + " · ".join(
+                f"{b.get('currency') or 'THB'} {b.get('n') or 0} งาน ({_money(b.get('total'))} บาท"
+                + (f" ≈ {_money(b.get('total_fx'))} {b.get('currency')}"
+                   if (b.get("currency") or "THB") != "THB" and b.get("total_fx") else "") + ")"
+                for b in data["by_currency"]))
         if data.get("top_customers"):
-            lines.append("ลูกค้าที่มูลค่ารวมสูงสุด (เฉพาะราคาเป็นบาท): " + " · ".join(
+            lines.append("ลูกค้าที่มูลค่ารวมสูงสุด: " + " · ".join(
                 f"{i}) {(b.get('customer') or '-').strip()}"
                 + (" (รวมลูกค้าที่ยังไม่ลงทะเบียนหลายราย)" if b.get("customer_id") == "C9999998" else "")
                 + f" {b.get('n') or 0} งาน {_money(b.get('total'))} บาท"
@@ -516,7 +725,7 @@ def to_context(p: dict, data: dict) -> str:
                          "ตรง ๆ เช่น 'ใช่ค่ะ…' แล้วอธิบายสั้น ๆ ว่าตัวเลขนี้นับอะไร ห้ามทวนคำตอบเดิมทั้งหมด "
                          "และไม่ต้องแสดงรายการหรือตาราง)")
         if data.get("priciest"):
-            lines.append(f"5 งานที่ราคาสูงสุดในเงื่อนไขนี้ (เทียบจากทั้งหมด {data['count']} งาน เฉพาะราคาเป็นบาท — "
+            lines.append(f"5 งานที่ราคาสูงสุดในเงื่อนไขนี้ (เทียบเป็นเงินบาทจากทั้งหมด {data['count']} งาน — "
                          "ใช้ตอบ 'งานไหนแพงสุด'):")
             lines += [_row_text(r) for r in data["priciest"]]
         rows = data["rows"][:MAX_ROWS]   # a full list goes to the table, not to the model
