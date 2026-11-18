@@ -199,7 +199,10 @@ def _run(sqls: list[str]) -> list[list[dict]]:
 
 
 # the price shown for a job: the line at its main quantity, else its smallest quantity
-_PRICE_APPLY = f"""OUTER APPLY (SELECT TOP 1 x.qty AS price_qty, x.unit_price, x.total_price, x.currency_no
+# price_ex: the old system stores the price WITH its tax line (E26110464: 27,094.95 = 26,305.78 + 789.17
+# tax), the new one before it (mid_total_ex_vat 26,305.78) — both are shown before tax.
+_PRICE_APPLY = f"""OUTER APPLY (SELECT TOP 1 x.qty AS price_qty, x.total_price - ISNULL(x.tax, 0) AS price_ex,
+            x.total_price, x.currency_no
         FROM {_PRICE} x WITH (NOLOCK) WHERE x.job_id = l.job_id
         ORDER BY CASE WHEN x.qty = x.main_qty THEN 0 ELSE 1 END, x.qty) p
     OUTER APPLY (SELECT COUNT(*) AS tiers FROM {_PRICE} y WITH (NOLOCK) WHERE y.job_id = l.job_id) t
@@ -237,9 +240,9 @@ def build_search(p: dict) -> tuple[str, str]:
                      f"OR l.job_id = '{kw}')")
     base = (f"FROM {_LIST} l WITH (NOLOCK) LEFT JOIN mi.dbo.customer c WITH (NOLOCK) ON c.custID = l.customer_id "
             f"{_PRICE_APPLY} WHERE {' AND '.join(where)}")
-    rows_sql = (f"SELECT TOP {MAX_ROWS} {_LIST_COLS}, p.price_qty, p.unit_price, p.total_price, p.currency_no, "
+    rows_sql = (f"SELECT TOP {MAX_ROWS} {_LIST_COLS}, p.price_qty, p.price_ex, p.total_price, p.currency_no, "
                 f"t.tiers, v.mid_qty, v.mid_total_ex_vat {base} ORDER BY {date_col} DESC")
-    amount = "COALESCE(p.total_price, v.mid_total_ex_vat)"
+    amount = "COALESCE(p.price_ex, v.mid_total_ex_vat)"
     totals_sql = (f"SELECT COUNT(*) AS n, "
                   f"SUM(CASE WHEN ISNULL(p.currency_no, 'THB') = 'THB' AND {amount} > 0 THEN {amount} END) AS total, "
                   f"SUM(CASE WHEN ISNULL(p.currency_no, 'THB') = 'THB' AND {amount} > 0 THEN 1 ELSE 0 END) AS priced, "
@@ -279,7 +282,7 @@ def lookup_doc(doc_id: str | None, quotation_id: str | None) -> dict:
     rows, prices, history, detail, quotes = _run([
         f"SELECT TOP 1 {_LIST_COLS}, l.credit_term_name FROM {_LIST} l WITH (NOLOCK) "
         f"LEFT JOIN mi.dbo.customer c WITH (NOLOCK) ON c.custID = l.customer_id WHERE l.job_id = '{doc_id}'",
-        f"SELECT TOP 12 qty, unit_price, total_price, currency_no FROM {_PRICE} WITH (NOLOCK) "
+        f"SELECT TOP 12 qty, total_price - ISNULL(tax, 0) AS price_ex, total_price, currency_no FROM {_PRICE} WITH (NOLOCK) "
         f"WHERE job_id = '{doc_id}' ORDER BY qty",
         f"SELECT TOP 20 from_status_id, to_status_id, created FROM {_LOG} WITH (NOLOCK) "
         f"WHERE job_id = '{doc_id}' ORDER BY created",
@@ -318,15 +321,16 @@ def _qty(v) -> str:
 
 
 def _price_text(r: dict) -> str:
-    """The price line for one job: the selling price at its main quantity (old-
-    system price lines), else the new system's ex-VAT price at its middle quantity."""
-    total, qty = r.get("total_price"), r.get("price_qty")
-    if total and float(total) > 0:
+    """The price line for one job, before tax: the selling price at its main
+    quantity (old-system price lines, tax taken off), else the new system's
+    ex-VAT price at its middle quantity. Both systems agree on this basis."""
+    ex, qty = r.get("price_ex"), r.get("price_qty")
+    if ex and float(ex) > 0:
         cur = r.get("currency_no") or "THB"
-        per = f" (≈ {float(r['unit_price']):,.2f} {cur}/ชิ้น)" if r.get("unit_price") else ""
+        per = f" (≈ {float(ex) / float(qty):,.2f} {cur}/ชิ้น)" if qty else ""
         tiers = r.get("tiers") or 0
         more = f" · มีราคาทั้งหมด {tiers} ระดับจำนวน" if tiers and int(tiers) > 1 else ""
-        return f"{_money(total)} {cur} ที่จำนวน {_qty(qty)} ชิ้น{per}{more}"
+        return f"{_money(ex)} {cur} ก่อน VAT ที่จำนวน {_qty(qty)} ชิ้น{per}{more}"
     mid_total, mid_qty = r.get("mid_total_ex_vat"), r.get("mid_qty")
     if mid_total and float(mid_total) > 0:
         per = f" (≈ {float(mid_total) / float(mid_qty):,.2f} บาท/ชิ้น)" if mid_qty else ""
@@ -341,7 +345,7 @@ def _row_text(r: dict) -> str:
     # one labelled field per line: a one-line "a | b | c" record got copied
     # into the answer as is (prod, 2026-11-18)
     return "\n".join([
-        f"[ใบประเมิน {r.get('job_id')}] {(r.get('job_name') or '-').strip()}",
+        f"[{r.get('job_id')}] {(r.get('job_name') or '-').strip()}",   # no "ใบประเมิน": it wrapped the number column
         f"  ลูกค้า: {(r.get('custName') or '-').strip()} ({r.get('customer_id') or '-'})",
         f"  ประเภทงาน: {r.get('est_type') or '-'} · บันทึกใน: {system}",
         f"  สถานะ: {status}{approved}",
@@ -371,7 +375,7 @@ def to_context(p: dict, data: dict) -> str:
         r = dict(data["rows"][0])
         if data["prices"]:
             first = data["prices"][0]
-            r.update(price_qty=first.get("qty"), unit_price=first.get("unit_price"),
+            r.update(price_qty=first.get("qty"), price_ex=first.get("price_ex"),
                      total_price=first.get("total_price"), currency_no=first.get("currency_no"),
                      tiers=len(data["prices"]))
         if data.get("detail"):
@@ -381,8 +385,9 @@ def to_context(p: dict, data: dict) -> str:
             out.append(f"  เครดิต: {r['credit_term_name']}")
         if data["prices"]:
             out.append("ราคาขายตามจำนวน:")
-            out += [f"  - {_qty(x.get('qty'))} ชิ้น: {_money(x.get('total_price'))} {x.get('currency_no') or 'THB'} "
-                    f"(≈ {_money(x.get('unit_price'))} ต่อชิ้น)" for x in data["prices"]]
+            out += [f"  - {_qty(x.get('qty'))} ชิ้น: {_money(x.get('price_ex'))} {x.get('currency_no') or 'THB'} ก่อน VAT"
+                    + (f" (≈ {float(x['price_ex']) / float(x['qty']):,.2f} ต่อชิ้น)" if x.get("price_ex") and x.get("qty")
+                       else "") for x in data["prices"]]
         if data.get("detail"):
             d = data["detail"][0]
             out.append(f"รายละเอียดในระบบใหม่: จำนวนที่ขอราคา {d.get('qty_list') or '-'} · งานพิมพ์ {d.get('print_type') or '-'} "
