@@ -223,8 +223,12 @@ def _not_test_sql() -> str:
     return " AND ".join(parts)
 
 
-def build_search(p: dict) -> tuple[str, str]:
-    """(rows SQL, totals SQL) for a list question — values inlined, all validated."""
+_AMOUNT = "COALESCE(p.price_ex, v.mid_total_ex_vat)"
+_AMOUNT_THB = f"CASE WHEN ISNULL(p.currency_no, 'THB') = 'THB' AND {_AMOUNT} > 0 THEN {_AMOUNT} END"
+
+
+def _base(p: dict) -> tuple[str, str]:
+    """(FROM … WHERE … for a list question, its date column) — values inlined, all validated."""
     import factory
 
     status = p.get("status") if p.get("status") in _DATE_COL else "any"
@@ -240,20 +244,40 @@ def build_search(p: dict) -> tuple[str, str]:
                      f"OR l.job_id = '{kw}')")
     base = (f"FROM {_LIST} l WITH (NOLOCK) LEFT JOIN mi.dbo.customer c WITH (NOLOCK) ON c.custID = l.customer_id "
             f"{_PRICE_APPLY} WHERE {' AND '.join(where)}")
+    return base, date_col
+
+
+def build_search(p: dict) -> tuple[str, str]:
+    """(rows SQL, totals SQL) for a list question."""
+    base, date_col = _base(p)
     rows_sql = (f"SELECT TOP {MAX_ROWS} {_LIST_COLS}, p.price_qty, p.price_ex, p.total_price, p.currency_no, "
                 f"t.tiers, v.mid_qty, v.mid_total_ex_vat {base} ORDER BY {date_col} DESC")
-    amount = "COALESCE(p.price_ex, v.mid_total_ex_vat)"
-    totals_sql = (f"SELECT COUNT(*) AS n, "
-                  f"SUM(CASE WHEN ISNULL(p.currency_no, 'THB') = 'THB' AND {amount} > 0 THEN {amount} END) AS total, "
-                  f"SUM(CASE WHEN ISNULL(p.currency_no, 'THB') = 'THB' AND {amount} > 0 THEN 1 ELSE 0 END) AS priced, "
+    totals_sql = (f"SELECT COUNT(*) AS n, SUM({_AMOUNT_THB}) AS total, "
+                  f"SUM(CASE WHEN ISNULL(p.currency_no, 'THB') = 'THB' AND {_AMOUNT} > 0 THEN 1 ELSE 0 END) AS priced, "
                   f"SUM(CASE WHEN ISNULL(p.currency_no, 'THB') <> 'THB' THEN 1 ELSE 0 END) AS other_currency "
                   f"{base}")
     return rows_sql, totals_sql
 
 
+def build_breakdowns(p: dict) -> list[str]:
+    """For a long list (660 approvals in half a month): counts and values by job
+    type, by currency, and the five customers with the highest value."""
+    base, _ = _base(p)
+    return [
+        f"SELECT ISNULL(l.est_type, '-') AS est_type, COUNT(*) AS n, SUM({_AMOUNT_THB}) AS total {base} "
+        f"GROUP BY ISNULL(l.est_type, '-') ORDER BY COUNT(*) DESC",
+        f"SELECT ISNULL(p.currency_no, 'THB') AS currency, COUNT(*) AS n, "
+        f"SUM(CASE WHEN {_AMOUNT} > 0 THEN {_AMOUNT} END) AS total {base} "
+        f"GROUP BY ISNULL(p.currency_no, 'THB') ORDER BY COUNT(*) DESC",
+        f"SELECT TOP 5 ISNULL(c.custName, l.customer_id) AS customer, MAX(l.customer_id) AS customer_id, "
+        f"COUNT(*) AS n, SUM({_AMOUNT_THB}) AS total {base} "
+        f"GROUP BY ISNULL(c.custName, l.customer_id) ORDER BY SUM({_AMOUNT_THB}) DESC",
+    ]
+
+
 def search(p: dict) -> dict:
     rows_sql, totals_sql = build_search(p)
-    sqls = [rows_sql, totals_sql]
+    sqls = [rows_sql, totals_sql] + build_breakdowns(p)
     if p.get("date_from") or p.get("date_to"):
         # in case nothing is in that range: the newest matching ones instead of a bare "0"
         latest_sql, _ = build_search(dict(p, date_from=None, date_to=None))
@@ -261,9 +285,11 @@ def search(p: dict) -> dict:
     got = _run(sqls)
     rows, tot = got[0], (got[1] or [{}])[0]
     out = {"rows": rows, "count": int(tot.get("n") or 0), "total": tot.get("total"),
-           "priced": int(tot.get("priced") or 0), "other_currency": int(tot.get("other_currency") or 0)}
-    if not out["count"] and len(got) > 2:
-        out["latest"] = got[2]
+           "priced": int(tot.get("priced") or 0), "other_currency": int(tot.get("other_currency") or 0),
+           "by_type": got[2] if len(got) > 2 else [], "by_currency": got[3] if len(got) > 3 else [],
+           "top_customers": got[4] if len(got) > 4 else []}
+    if not out["count"] and len(got) > 5:
+        out["latest"] = got[5]
     return out
 
 
@@ -405,13 +431,25 @@ def to_context(p: dict, data: dict) -> str:
     lines = [head, f"เงื่อนไขที่ค้น: {describe_filters(p)} (ไม่รวมรายการทดสอบ)",
              f"พบทั้งหมด: {data['count']} งาน"]
     if data["count"]:
-        lines.append(f"มูลค่ารวม (ราคาที่จำนวนหลักของแต่ละงาน รวมเฉพาะ {data['priced']} งานที่มีราคาเป็นบาท): "
-                     f"{_money(data['total'])} บาท")
+        lines.append(f"มูลค่ารวม (ผลรวมราคาประเมินก่อน VAT ที่จำนวนหลักของแต่ละงาน รวมเฉพาะ {data['priced']} งาน"
+                     f"ที่มีราคาเป็นบาท — เป็นมูลค่าราคาที่เสนอ ไม่ใช่ยอดขายจริง): {_money(data['total'])} บาท")
         if data.get("other_currency"):
-            lines.append(f"(มี {data['other_currency']} งานที่ราคาเป็นสกุลเงินอื่น ไม่ได้รวมในยอดนี้)")
-        if data["count"] > len(data["rows"]):
-            lines.append(f"(แสดงรายละเอียด {len(data['rows'])} งานล่าสุด)")
-        lines.append("รายการ:")
+            lines.append(f"มี {data['other_currency']} งานที่ราคาเป็นสกุลเงินอื่น ไม่ได้รวมในยอดบาทข้างบน")
+        if data.get("by_type"):
+            lines.append("แยกตามประเภทงาน: " + " · ".join(
+                f"{b.get('est_type') or '-'} {b.get('n') or 0} งาน (มูลค่า {_money(b.get('total'))} บาท)"
+                for b in data["by_type"]))
+        if len(data.get("by_currency") or []) > 1:
+            lines.append("แยกตามสกุลเงิน: " + " · ".join(
+                f"{b.get('currency') or 'THB'} {b.get('n') or 0} งาน รวม {_money(b.get('total'))} {b.get('currency') or 'THB'}"
+                for b in data["by_currency"]))
+        if data.get("top_customers"):
+            lines.append("ลูกค้าที่มูลค่ารวมสูงสุด (เฉพาะราคาเป็นบาท): " + " · ".join(
+                f"{i}) {(b.get('customer') or '-').strip()}"
+                + (" (รวมลูกค้าที่ยังไม่ลงทะเบียนหลายราย)" if b.get("customer_id") == "C9999998" else "")
+                + f" {b.get('n') or 0} งาน {_money(b.get('total'))} บาท"
+                for i, b in enumerate(data["top_customers"], 1)))
+        lines.append(f"รายการด้านล่าง: {len(data['rows'])} งานล่าสุด จากทั้งหมด {data['count']} งาน")
         lines += [_row_text(r) for r in data["rows"]]
     elif data.get("latest"):
         lines.append("งานล่าสุดที่ตรงสถานะ/คำค้นนี้ (อยู่นอกช่วงวันที่ที่ถาม):")
