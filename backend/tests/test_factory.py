@@ -263,7 +263,7 @@ def test_priced_jobs_empty_range_gives_the_latest(monkeypatch):
             return [{"n": 0, "total": None, "priced": 0}]
         return [] if "l.estimate_date >=" in sql else [{"job_id": "E26110464", "job_name": "Rep.SRP (Tray)",
                                                          "status_id": 3, "source_system": "V1", "price_qty": 3000,
-                                                         "unit_price": 9.03, "total_price": 27094.95,
+                                                         "price_ex": 26305.78, "total_price": 27094.95,
                                                          "currency_no": "THB", "tiers": 1}]
 
     monkeypatch.setattr(pj, "_run", lambda sqls: [fake_query(s) for s in sqls])   # one session, three queries

@@ -28,14 +28,14 @@ ROW = {  # old system (V1), price from tb_rfq_price1
     "job_id": "E26110464", "job_name": "Rep.SRP (Tray) - Can Pack 24 x 7", "customer_id": "C2014056",
     "custName": "โชติวัฒน์อุตสาหกรรมการผลิต", "est_type": "packaging", "status_id": 3, "source_system": "V1",
     "estimate_date": dt.datetime(2026, 11, 18, 11, 25, 28), "created": dt.datetime(2026, 11, 17, 15, 41, 25),
-    "updated": dt.datetime(2026, 11, 18, 11, 25, 28), "price_qty": 3000, "unit_price": 9.03,
+    "updated": dt.datetime(2026, 11, 18, 11, 25, 28), "price_qty": 3000, "price_ex": 26305.78,
     "total_price": 27094.95, "currency_no": "THB", "tiers": 1, "mid_qty": None, "mid_total_ex_vat": None,
 }
 ROW_V2 = {  # new system (V2): no price lines in the old table → its ex-VAT middle-quantity price
     "job_id": "E26110334", "job_name": "กล่อง Jaelek", "customer_id": "C9999998", "custName": "ลูกค้าใหม่",
     "est_type": "packaging", "status_id": 3, "source_system": "V2",
     "estimate_date": dt.datetime(2026, 11, 13, 11, 18, 45), "created": dt.datetime(2026, 11, 12, 14, 28, 23),
-    "updated": dt.datetime(2026, 11, 13, 11, 18, 45), "price_qty": None, "unit_price": None, "total_price": None,
+    "updated": dt.datetime(2026, 11, 13, 11, 18, 45), "price_qty": None, "price_ex": None, "total_price": None,
     "currency_no": None, "tiers": 0, "mid_qty": 500, "mid_total_ex_vat": Decimal("25832.50"),
 }
 PLAN_USAGE = {"model": "gpt-4o-mini", "prompt_tokens": 400, "completion_tokens": 40, "cost_usd": 0.0001}
@@ -105,6 +105,8 @@ def test_search_reads_the_master_list_of_both_systems():
             assert col not in sql, col
     assert rows_sql.startswith(f"SELECT TOP {pj.MAX_ROWS} ")
     assert "ORDER BY CASE WHEN x.qty = x.main_qty THEN 0 ELSE 1 END, x.qty" in rows_sql   # price at the main qty
+    assert "x.total_price - ISNULL(x.tax, 0) AS price_ex" in rows_sql                     # before tax, like MI2
+    assert "COALESCE(p.price_ex, v.mid_total_ex_vat)" in totals_sql
     assert "ISNULL(p.currency_no, 'THB') = 'THB'" in totals_sql                              # only baht is summed
 
 
@@ -147,17 +149,18 @@ def test_doc_lookup_validates_numbers(monkeypatch):
 
 def test_list_context_has_count_total_and_prices():
     p = {"status": "approve", "date_from": dt.date(2026, 11, 16), "date_to": dt.date(2026, 11, 17), "keyword": None}
-    free = dict(ROW, job_id="E26110465", total_price=None, tiers=0)
+    free = dict(ROW, job_id="E26110465", price_ex=None, total_price=None, tiers=0)
     text = pj.to_context(p, {"rows": [ROW, ROW_V2, free], "count": 5, "total": 52927.45, "priced": 2,
                              "other_currency": 1})
     assert "พบทั้งหมด: 5 งาน" in text and "52,927.45 บาท" in text and "1 งานที่ราคาเป็นสกุลเงินอื่น" in text
-    assert "27,094.95 THB ที่จำนวน 3,000 ชิ้น (≈ 9.03 THB/ชิ้น)" in text            # old system: no VAT claim
+    # old system: its tax line taken off — 27,094.95 incl. 789.17 tax = the new system's 26,305.78 ex VAT
+    assert "26,305.78 THB ก่อน VAT ที่จำนวน 3,000 ชิ้น (≈ 8.77 THB/ชิ้น)" in text and "27,094.95" not in text
     assert "25,832.50 บาท ก่อน VAT ที่จำนวน 500 ชิ้น" in text                       # new system: ex VAT
     assert "ยังไม่มีราคา" in text and "แสดงรายละเอียด 3 งานล่าสุด" in text
     assert "ระบบประเมินราคาเดิม" in text and "ระบบประเมินราคาใหม่ (MI2)" in text
     assert "อนุมัติแล้ว (เคาะราคาแล้ว) · อนุมัติเมื่อ 2026-11-18 11:25" in text
     # one labelled field per line — a one-line "a | b | c" record got copied into an answer
-    assert ("[ใบประเมิน E26110464] Rep.SRP (Tray) - Can Pack 24 x 7\n"
+    assert ("[E26110464] Rep.SRP (Tray) - Can Pack 24 x 7\n"
             "  ลูกค้า: โชติวัฒน์อุตสาหกรรมการผลิต (C2014056)") in text
     assert " | " not in text
 
@@ -167,12 +170,12 @@ def test_empty_and_single_document_contexts():
     assert "พบทั้งหมด: 0 งาน" in pj.to_context(p, {"rows": [], "count": 0, "total": None, "priced": 0})
     one = pj.to_context({"doc_id": "E26110464"}, {
         "rows": [dict(ROW, credit_term_name="เครดิต 30 วัน")],
-        "prices": [{"qty": 3000, "unit_price": 9.03, "total_price": 27094.95, "currency_no": "THB"},
-                   {"qty": 5000, "unit_price": 8.1, "total_price": 40500.0, "currency_no": "THB"}],
+        "prices": [{"qty": 3000, "price_ex": 26305.78, "total_price": 27094.95, "currency_no": "THB"},
+                   {"qty": 5000, "price_ex": 40500.0, "total_price": 41715.0, "currency_no": "THB"}],
         "history": [{"from_status_id": 0, "to_status_id": 1, "created": dt.datetime(2026, 11, 17, 16, 19)},
                     {"from_status_id": 1, "to_status_id": 3, "created": dt.datetime(2026, 11, 18, 11, 25)}],
         "detail": [], "quotes": [], "doc_id": "E26110464"})
-    assert "3,000 ชิ้น: 27,094.95 THB" in one and "5,000 ชิ้น: 40,500.00 THB" in one
+    assert "3,000 ชิ้น: 26,305.78 THB ก่อน VAT (≈ 8.77 ต่อชิ้น)" in one and "5,000 ชิ้น: 40,500.00 THB ก่อน VAT" in one
     assert "มีราคาทั้งหมด 2 ระดับจำนวน" in one and "เครดิต 30 วัน" in one
     assert "2026-11-18 11:25: อนุมัติแล้ว (เคาะราคาแล้ว)" in one
     quote = {"quotation_id": "QE2600190", "revision": 0, "status_label": "Approved", "currency": "THB",
