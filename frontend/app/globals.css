@@ -95,3 +95,18 @@ body {
 @keyframes shimmer {
   100% { transform: translateX(100%); }
 }
+
+/* Answer lists, ChatGPT-style: each nesting level gets its own marker so the
+   structure reads at a glance — • then ◦ then ▪ for bullets, 1. then a. for
+   numbers — in the text colour instead of one purple dot everywhere. */
+.md-lists ul { list-style-type: disc; }
+.md-lists ol { list-style-type: decimal; }
+.md-lists ol ul { list-style-type: disc; }
+.md-lists ul ul, .md-lists ol ul ul { list-style-type: circle; }
+.md-lists ul ul ul { list-style-type: square; }
+.md-lists ol ol { list-style-type: lower-alpha; }
+.md-lists li::marker { color: rgb(var(--c-content2)); }
+.md-lists ol > li::marker { font-weight: 600; }
+.md-lists > :is(ul, ol) > li { margin-top: 0.4rem; margin-bottom: 0.4rem; }
+.md-lists li > :is(ul, ol) { margin-top: 0.2rem; margin-bottom: 0.2rem; }
+.md-lists li li { margin-top: 0.15rem; margin-bottom: 0.15rem; }

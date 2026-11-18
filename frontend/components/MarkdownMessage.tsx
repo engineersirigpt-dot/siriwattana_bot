@@ -21,7 +21,7 @@ export function MarkdownMessage({ text: raw }: Props) {
       // used by the live streaming/typing bubble so text doesn't resize on done.
       style={{ fontSize: "15px" }}
       className="
-        prose prose-sm max-w-none
+        md-lists prose prose-sm max-w-none
         text-content leading-relaxed
         prose-headings:font-semibold prose-headings:text-content
         prose-h1:text-xl prose-h1:mt-4 prose-h1:mb-2
@@ -33,7 +33,7 @@ export function MarkdownMessage({ text: raw }: Props) {
         prose-em:text-content
         prose-a:text-purple-600 prose-a:no-underline hover:prose-a:underline
         prose-ul:my-2 prose-ol:my-2
-        prose-li:my-0.5 prose-li:marker:text-purple-500
+        prose-li:my-0.5
         prose-blockquote:border-l-4 prose-blockquote:border-purple-300
         prose-blockquote:bg-purple-50/50 prose-blockquote:py-1 prose-blockquote:px-3
         prose-blockquote:rounded-r prose-blockquote:not-italic

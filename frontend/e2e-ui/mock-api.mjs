@@ -232,6 +232,15 @@ async function streamAnswer(req, res, user, message, sid, cid) {
     done({ source: "document", attachments: [meta(502), meta(503)] });
     return res.end();
   }
+  if (message.includes("รายการซ้อน")) { // nested lists: each level its own marker (• ◦ ▪ / 1. a.)
+    startAnswer();
+    delta("### ภาพรวม\n- **เป้าหมาย:** รักษาความสะอาดและความเที่ยงตรง\n  - Blanket: ตรวจผิว ไม่มีคราบหมึก\n"
+      + "    - เช็ดด้วยน้ำยาที่เหมาะสม\n  - Plate: ดูคราบออกไซด์\n- **หลัก 3 ข้อ:** สะอาด หล่อลื่น ตั้งค่า\n\n"
+      + "### ขั้นตอนประจำวัน\n1. ทำความสะอาดจุดหลัก\n   - ลูกกลิ้งหมึก\n   - ถาดน้ำฟาวน์เทน\n2. หล่อลื่น\n"
+      + "   1. เกียร์\n   2. โซ่และรางสไลด์\n3. ทดสอบปุ่มหยุดฉุกเฉิน");
+    done();
+    return res.end();
+  }
   const slow = message.includes("ช้า") || message.includes("ค่อย ๆ");
   const text = message.includes("ค่อย ๆ") ? "คำตอบยาวที่ส่งมาช้า ๆ ".repeat(20) + "จบคำตอบแล้ว"
     : slow ? "คำตอบยาวที่ส่งมาช้า ๆ ".repeat(60) : message.includes("ตาราง") ? RICH_ANSWER : "ได้เลยค่ะ นี่คือคำตอบสำหรับคำถามของคุณ พร้อม **ตัวหนา** และรายการ:\n\n- ข้อหนึ่ง\n- ข้อสอง";
