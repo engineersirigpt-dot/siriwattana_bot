@@ -214,8 +214,8 @@ def test_offers_and_promises_are_trimmed_from_data_answers():
     got = tidy("มีใบแจ้งซ่อมค้าง 140 ใบ\n- MR1 ...\n\nหมายเหตุ\n"
                "- หากต้องการรายชื่อครบทุกเครื่อง แจ้งได้เลยครับ จะสรุปให้เป็นชุดถัดไป")
     assert got == "มีใบแจ้งซ่อมค้าง 140 ใบ\n- MR1 ..."
-    plain = "สัปดาห์นี้มีงานต้องส่ง 229 งาน\n| เลขงาน | ชื่องาน |"
-    assert tidy(plain) == plain
+    plain = "สัปดาห์นี้มีงานต้องส่ง 229 งาน\n\n| เลขงาน | ชื่องาน |\n|---|---|\n| J82602753 | กล่อง |"
+    assert tidy(plain) == plain                              # a well-formed table is left alone
     # prod 2026-11-18: an offer phrased with verbs the first list didn't have
     got = tidy("เดือนนี้ยังไม่มีงานเคาะราคาเลยค่ะ\n- ระบบระบุว่าพบทั้งหมด 0 งาน\n"
                "หากต้องการดูย้อนหลังมากกว่านี้หรือเปลี่ยนช่วงวันที่ สามารถระบุช่วงใหม่เพื่อให้ดึงข้อมูลเพิ่มเติมได้ค่ะ")
@@ -240,6 +240,27 @@ def test_a_record_copied_as_one_piped_bullet_is_split():
     table = "สัปดาห์นี้ 2 งาน\n\n| เลขที่ | ชื่องาน | จำนวน |\n|---|---|---|\n| E1 | กล่อง | 100 |\n| E2 | ซอง | 50 |"
     assert main._tidy_data_answer(table) == table              # real tables stay as they are
     assert main._tidy_data_answer("- ส่งแล้ว 2,350 | เหลือ 0") == "- ส่งแล้ว 2,350 | เหลือ 0"   # one bar: left alone
+
+
+def test_ops_tables_are_built_in_code():
+    due = fx.ops_table({"kind": "due"}, {"count": 229, "rows": [
+        {"jobid": "J82602753", "job_name": "กล่อง | A", "custName": "ลูกค้า ก", "qty1": 5000, "delivered": None,
+         "printDate": "2026-11-19", "due1": "2026-11-20"}]})
+    assert due.startswith("**รายการ 1 จากทั้งหมด 229**\n\n| เลขงาน | ชื่องาน | ลูกค้า | สั่ง | ส่งแล้ว |")
+    assert "|---|---|---|---:|---:|---|---|" in due
+    assert "| J82602753 | กล่อง / A | ลูกค้า ก | 5,000 | 0 | 2026-11-19 | 2026-11-20 |" in due
+    rep = fx.ops_table({"kind": "repairs"}, {"counts": {0: 1}, "rows": [
+        {"ma_id": "MR26110135", "machine_name": "L444SP", "problem": "กดลิฟไม่ได้ (ณรงค์ศักดิ์)", "ma_status": 0,
+         "notify_datetime": dt.datetime(2026, 11, 13, 11, 7)}]})
+    assert "| MR26110135 | L444SP | กดลิฟไม่ได้ | แจ้งซ่อม (ยังไม่เสร็จ) | 2026-11-13 11:07 |" in rep
+    assert "ณรงค์ศักดิ์" not in rep and "จากทั้งหมด" not in rep
+    assert fx.ops_table({"kind": "qc"}, {"rows": [{"x": 1}]}) == ""
+    assert fx.ops_table({"kind": "due"}, {"count": 0, "rows": []}) == ""
+
+
+def test_a_model_table_without_its_separator_is_repaired():
+    got = main._tidy_data_answer("สรุป 2 งานค่ะ\nตาราง:\n| เลขที่ | ราคา |\n| E1 | 100 |\n| E2 | 200 |")
+    assert got == "สรุป 2 งานค่ะ\nตาราง:\n\n| เลขที่ | ราคา |\n|---|---|\n| E1 | 100 |\n| E2 | 200 |"
 
 
 def test_off_switch(monkeypatch):

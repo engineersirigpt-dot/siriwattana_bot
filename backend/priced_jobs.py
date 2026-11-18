@@ -346,6 +346,34 @@ def _qty(v) -> str:
         return "-"
 
 
+def _cell(v, width: int = 60) -> str:
+    return re.sub(r"\s+", " ", str(v if v not in (None, "") else "-")).replace("|", "/").strip()[:width]
+
+
+def list_table(p: dict, rows: list[dict], count: int, title: str | None = None) -> str:
+    """A Markdown table of a list answer, built here rather than by the model:
+    on prod the model wrote one without its |---| line and it showed as a
+    paragraph of bars (2026-11-18). 15 or fewer → all; more → the newest 10."""
+    if not rows:
+        return ""
+    shown = rows if count <= 15 else rows[:10]
+    approve = p.get("status") == "approve"
+    head = (f"| เลขที่ | ชื่องาน | ลูกค้า | จำนวน | ราคา (ก่อน VAT) | {'อนุมัติเมื่อ' if approve else 'วันที่'} |\n"
+            "|---|---|---|---:|---:|---|")
+    body = []
+    for r in shown:
+        ex, qty, cur = r.get("price_ex"), r.get("price_qty"), r.get("currency_no") or "THB"
+        if not (ex and float(ex) > 0):
+            ex, qty, cur = r.get("mid_total_ex_vat"), r.get("mid_qty"), "THB"
+        price = f"{_money(ex)} {cur}" if ex and float(ex) > 0 else "ยังไม่มีราคา"
+        when = r.get("estimate_date") if approve else (r.get("updated") or r.get("created"))
+        body.append(f"| {_cell(r.get('job_id'), 14)} | {_cell(r.get('job_name'))} | {_cell(r.get('custName'), 40)} | "
+                    f"{_qty(qty)} | {price} | {_when(when)} |")
+    if title is None and count > len(shown):
+        title = f"รายการล่าสุด {len(shown)} จากทั้งหมด {count:,} งาน"
+    return (f"**{title}**\n\n" if title else "") + head + "\n" + "\n".join(body)
+
+
 def _price_text(r: dict) -> str:
     """The price line for one job, before tax: the selling price at its main
     quantity (old-system price lines, tax taken off), else the new system's
@@ -440,19 +468,25 @@ def to_context(p: dict, data: dict) -> str:
             lines.append(f"มี {data['other_currency']} งานที่ราคาเป็นสกุลเงินอื่น ไม่ได้รวมในยอดบาทข้างบน")
         if data.get("by_type"):
             lines.append("แยกตามประเภทงาน: " + " · ".join(
-                f"{b.get('est_type') or '-'} {b.get('n') or 0} งาน (มูลค่า {_money(b.get('total'))} บาท)"
+                f"{b.get('est_type') or '-'} {b.get('n') or 0} งาน "
+                + (f"(มูลค่า {_money(b.get('total'))} บาท)" if b.get("total") else "(ราคาไม่ได้เป็นเงินบาท)")
                 for b in data["by_type"]))
         if len(data.get("by_currency") or []) > 1:
-            lines.append("แยกตามสกุลเงิน: " + " · ".join(
-                f"{b.get('currency') or 'THB'} {b.get('n') or 0} งาน รวม {_money(b.get('total'))} {b.get('currency') or 'THB'}"
-                for b in data["by_currency"]))
+            # counts only: "USD 52 งาน รวม 41,110,437.31 USD" (2026-11-18) is ~790k USD a job — the
+            # amount is probably in baht with a foreign currency label. Not shown until checked.
+            lines.append("แยกตามสกุลเงิน (จำนวนงาน): " + " · ".join(
+                f"{b.get('currency') or 'THB'} {b.get('n') or 0} งาน" for b in data["by_currency"])
+                + " — ยังไม่แสดงมูลค่าของสกุลเงินอื่น")
         if data.get("top_customers"):
             lines.append("ลูกค้าที่มูลค่ารวมสูงสุด (เฉพาะราคาเป็นบาท): " + " · ".join(
                 f"{i}) {(b.get('customer') or '-').strip()}"
                 + (" (รวมลูกค้าที่ยังไม่ลงทะเบียนหลายราย)" if b.get("customer_id") == "C9999998" else "")
                 + f" {b.get('n') or 0} งาน {_money(b.get('total'))} บาท"
                 for i, b in enumerate(data["top_customers"], 1)))
-        lines.append(f"รายการด้านล่าง: {len(data['rows'])} งานล่าสุด จากทั้งหมด {data['count']} งาน")
+        lines.append("(ระบบจะแนบตารางรายการงานต่อท้ายคำตอบให้เอง — ห้ามเขียนตารางหรือไล่รายการงานทีละงานเอง "
+                     "ให้เขียนแค่สรุป)")
+        lines.append(f"รายการด้านล่าง (ไว้ตอบคำถามเจาะจง เช่น งานไหนแพงสุด): {len(data['rows'])} งานล่าสุด "
+                     f"จากทั้งหมด {data['count']} งาน")
         lines += [_row_text(r) for r in data["rows"]]
     elif data.get("latest"):
         lines.append("งานล่าสุดที่ตรงสถานะ/คำค้นนี้ (อยู่นอกช่วงวันที่ที่ถาม):")

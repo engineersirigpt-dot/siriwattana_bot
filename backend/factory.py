@@ -547,11 +547,43 @@ def scrub_names(text: str | None) -> str:
     return re.sub(r"\s{2,}", " ", t).strip(" -,") or "-"
 
 
+def _cell(v, width: int = 60) -> str:
+    return re.sub(r"\s+", " ", str(v if v not in (None, "") else "-")).replace("|", "/").strip()[:width]
+
+
+def ops_table(p: dict, data: dict) -> str:
+    """The list part of a due-date / repair answer as a Markdown table, built in
+    code — a model-written table lost its |---| line on prod (2026-11-18).
+    Up to 15 rows, in the order the query gave them."""
+    kind = p.get("kind")
+    rows = (data or {}).get("rows") or []
+    if kind not in {"due", "overdue", "repairs"} or not rows:
+        return ""
+    shown = rows[:15]
+    if kind == "repairs":
+        total = sum(((data or {}).get("counts") or {}).values())
+        head = "| เลขที่ใบ | เครื่อง | อาการ | สถานะ | แจ้งเมื่อ |\n|---|---|---|---|---|"
+        body = [f"| {_cell(r.get('ma_id'), 14)} | {_cell(r.get('machine_name') or r.get('machine_id'), 40)} | "
+                f"{_cell(scrub_names(r.get('problem')), 80)} | {MA_STATUS.get(r.get('ma_status'), '-')} | "
+                f"{_when(r.get('notify_datetime'))} |" for r in shown]
+    else:
+        total = (data or {}).get("count") or len(rows)
+        head = "| เลขงาน | ชื่องาน | ลูกค้า | สั่ง | ส่งแล้ว | กำหนดพิมพ์ | กำหนดส่ง |\n|---|---|---|---:|---:|---|---|"
+        body = [f"| {_cell(r.get('jobid'), 14)} | {_cell(r.get('job_name'))} | {_cell(r.get('custName'), 40)} | "
+                f"{_n(r.get('qty1'))} | {_n(r.get('delivered') or 0)} | {_cell(r.get('printDate'), 10)} | "
+                f"{_cell(r.get('due1'), 10)} |" for r in shown]
+    title = f"**รายการ {len(shown)} จากทั้งหมด {total:,}**\n\n" if total > len(shown) else ""
+    return title + head + "\n" + "\n".join(body)
+
+
 def ops_context(p: dict, data: dict, today: dt.date | None = None) -> str:
     d_from, d_to = effective_range(p, today or _bangkok_today())
     rng = f"{_day(d_from)} ถึง {_day(d_to)}"
     kw = f" · คำค้น: {p['keyword']}" if p.get("keyword") else ""
     lines = [_head()]
+    if p.get("kind") in {"due", "overdue", "repairs"} and data.get("rows"):
+        lines.append("(ระบบจะแนบตารางรายการต่อท้ายคำตอบให้เอง — ห้ามเขียนตารางหรือไล่รายการทีละรายการเอง "
+                     "ให้เขียนแค่สรุป)")
     if p["kind"] in {"due", "overdue"}:
         what = ("งานที่เลยกำหนดส่งแล้วแต่ยอดในใบส่งของยังไม่ครบตามจำนวนสั่ง (ยังไม่ปิดงาน, ไม่รวมงานยกเลิก, "
                 "ดูเฉพาะกำหนดส่งในช่วงนี้ — งานบางงานอาจส่งด้วยวิธีอื่นที่ไม่ได้ออกใบส่งของ)"

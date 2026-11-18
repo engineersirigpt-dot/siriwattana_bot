@@ -2124,6 +2124,30 @@ def _unpipe(line: str) -> str:
     return "\n".join([head] + [f"{indent}  - {p}" for p in parts])
 
 
+_TABLE_ROW = re.compile(r"^\s*\|.*\|\s*$")
+_TABLE_SEP = re.compile(r"^\s*\|?\s*:?-{3,}")
+
+
+def _fix_tables(text: str) -> str:
+    """A model-written table without its |---| line (or glued to the line above)
+    renders as a paragraph of bars (prod, 2026-11-18): add the separator and a
+    blank line before the header."""
+    lines, out = text.split("\n"), []
+    for i, ln in enumerate(lines):
+        header = _TABLE_ROW.match(ln) and ln.count("|") >= 3 and not (i and _TABLE_ROW.match(lines[i - 1]))
+        if header and not _TABLE_SEP.match(ln):
+            if out and out[-1].strip():
+                out.append("")
+            out.append(ln)
+            nxt = lines[i + 1] if i + 1 < len(lines) else ""
+            if not _TABLE_SEP.match(nxt):
+                cells = ln.strip().strip("|").count("|") + 1
+                out.append("|" + "---|" * cells)
+            continue
+        out.append(ln)
+    return "\n".join(out)
+
+
 def _tidy_data_answer(answer: str) -> str:
     """Answers built from MI data must not end with offers ('หากต้องการ… แจ้งได้')
     or promises to follow up — the bot can't — and 'ครับ/ค่ะ' reads oddly. Only
@@ -2143,7 +2167,7 @@ def _tidy_data_answer(answer: str) -> str:
         if cut == text:
             break
         text = cut
-    text = text.replace("ครับ/ค่ะ", "ค่ะ").replace("ค่ะ/ครับ", "ค่ะ")
+    text = _fix_tables(text.replace("ครับ/ค่ะ", "ค่ะ").replace("ค่ะ/ครับ", "ค่ะ"))
     return re.sub(r"\n{3,}", "\n\n", text).strip() or (answer or "").strip()
 
 
@@ -2248,6 +2272,14 @@ def _try_priced_jobs_answer(
         return None  # fall through to the normal pipeline
 
     answer = _tidy_data_answer(answer)
+    if "prices" not in data:  # a list question: the table is built in code, not by the model
+        if data.get("count"):
+            table = priced_jobs.list_table(p, data.get("rows") or [], int(data["count"]))
+        else:
+            table = priced_jobs.list_table(p, data.get("latest") or [], len(data.get("latest") or []),
+                                           title="งานล่าสุดที่ตรงเงื่อนไข (นอกช่วงวันที่ที่ถาม)")
+        if table:
+            answer = f"{answer.rstrip()}\n\n{table}"
     usage_row = accumulate_usage(plan_usage, answer_usage, primary_model=(answer_usage or {}).get("model"))
     mid = save_chat_message_pg(
         user_id=user["id"], session_id=sid, question=question, answer=answer,
@@ -2379,6 +2411,10 @@ def _try_factory_answer(
                   detail={"session_id": sid, "kind": kind, "error": f"answer: {type(e).__name__}: {str(e)[:200]}"})
         return None
     answer = _tidy_data_answer(answer)
+    if kind == "ops":  # due dates / repairs: the list table is built in code, not by the model
+        table = factory.ops_table(target, data)
+        if table:
+            answer = f"{answer.rstrip()}\n\n{table}"
     source = "factory_job" if kind == "job" else "factory"
     mid = save_chat_message_pg(user_id=user["id"], session_id=sid, question=question, answer=answer, source=source,
                                knowledge_id=None, mode=mode, usage=accumulate_usage(
