@@ -255,6 +255,10 @@ def test_ops_tables_are_built_in_code():
     assert "| MR26110135 | L444SP | กดลิฟไม่ได้ | แจ้งซ่อม (ยังไม่เสร็จ) | 2026-11-13 11:07 |" in rep
     assert "ณรงค์ศักดิ์" not in rep and "จากทั้งหมด" not in rep
     assert fx.ops_table({"kind": "qc"}, {"rows": [{"x": 1}]}) == ""
+    # a check on the last answer ("มีเยอะขนาดนั้นเลยหรอ") gets no table again
+    assert fx.ops_table({"kind": "due", "show_list": False}, {"count": 229, "rows": [{"jobid": "J1"}]}) == ""
+    assert fx._clean_plan({"kind": "due"})["show_list"] is True
+    assert fx._clean_plan({"kind": "due", "show_list": False})["show_list"] is False
     assert fx.ops_table({"kind": "due"}, {"count": 0, "rows": []}) == ""
 
 

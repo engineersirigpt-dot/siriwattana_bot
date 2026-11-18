@@ -355,7 +355,8 @@ def _bangkok_today() -> dt.date:
 _PLAN_PROMPT = (
     "คุณเป็นตัวแยกคำสั่งของ chatbot ภายในโรงพิมพ์ ระบบดูข้อมูลโรงงานได้ 4 แบบ ตอบ JSON เท่านั้น:\n"
     '{"kind": "due"|"overdue"|"repairs"|"qc"|"none", "date_from": "YYYY-MM-DD"|null, '
-    '"date_to": "YYYY-MM-DD"|null, "keyword": string|null, "status": "open"|"done"|"cancelled"|"any"}\n'
+    '"date_to": "YYYY-MM-DD"|null, "keyword": string|null, "status": "open"|"done"|"cancelled"|"any", '
+    '"show_list": true|false}\n'
     "- due: งานที่ถึงกำหนดส่ง/ต้องส่งในช่วงเวลาหนึ่ง (เช่น 'สัปดาห์นี้มีงานต้องส่งกี่งาน')\n"
     "- overdue: งานที่เลยกำหนดส่งแล้วแต่ยังส่งไม่ครบ\n"
     "- repairs: ใบแจ้งซ่อมเครื่องจักร (status: open=ยังไม่เสร็จ/ค้างซ่อม, done=ซ่อมเสร็จ, cancelled=ยกเลิก, any)\n"
@@ -363,7 +364,8 @@ _PLAN_PROMPT = (
     "- none: อย่างอื่น เช่น ถามวิธีซ่อม ความรู้ทั่วไป ขอให้เขียน/คำนวณ หรือไม่ได้ถามข้อมูลที่บันทึกในระบบ\n"
     "วันที่ (รวมวันสุดท้าย) ใช้ตามนี้: {anchors}. พ.ศ. ให้ลบ 543. ไม่ระบุช่วง → null ทั้งคู่\n"
     "keyword: ชื่อเครื่อง ชื่อลูกค้า ชื่องาน หรือเลขงาน ที่ผู้ใช้ต้องการกรอง ไม่มี → null\n"
-    "ถ้ามี 'คำถามก่อนหน้า' และคำถามนี้ถามต่อ (เช่น 'แล้วเดือนที่แล้วล่ะ') ให้ใช้ kind/เงื่อนไขเดิมเว้นแต่เปลี่ยน"
+    "ถ้ามี 'คำถามก่อนหน้า' และคำถามนี้ถามต่อ (เช่น 'แล้วเดือนที่แล้วล่ะ') ให้ใช้ kind/เงื่อนไขเดิมเว้นแต่เปลี่ยน\n"
+    "show_list: true เมื่อต้องการดูรายการ (ถามใหม่หรือเปลี่ยนเงื่อนไข); false เมื่อถามยืนยัน/สงสัยคำตอบก่อนหน้า (เช่น 'มีเยอะขนาดนั้นเลยหรอ') หรือถามเจาะจงข้อเดียว (เช่น 'เครื่องไหนค้างนานสุด')"
 )
 
 
@@ -401,7 +403,8 @@ def _clean_plan(data: dict) -> dict | None:
         d_from, d_to = d_to, d_from
     status = str(data.get("status") or "any").lower()
     return {"kind": kind, "date_from": d_from, "date_to": d_to, "keyword": safe_keyword(data.get("keyword")),
-            "status": status if status in {"open", "done", "cancelled", "any"} else "any"}
+            "status": status if status in {"open", "done", "cancelled", "any"} else "any",
+            "show_list": data.get("show_list") is not False}
 
 
 @lru_cache(maxsize=256)
@@ -557,7 +560,7 @@ def ops_table(p: dict, data: dict) -> str:
     Up to 15 rows, in the order the query gave them."""
     kind = p.get("kind")
     rows = (data or {}).get("rows") or []
-    if kind not in {"due", "overdue", "repairs"} or not rows:
+    if kind not in {"due", "overdue", "repairs"} or not rows or p.get("show_list") is False:
         return ""
     shown = rows[:15]
     if kind == "repairs":
@@ -582,8 +585,12 @@ def ops_context(p: dict, data: dict, today: dt.date | None = None) -> str:
     kw = f" · คำค้น: {p['keyword']}" if p.get("keyword") else ""
     lines = [_head()]
     if p.get("kind") in {"due", "overdue", "repairs"} and data.get("rows"):
-        lines.append("(ระบบจะแนบตารางรายการต่อท้ายคำตอบให้เอง — ห้ามเขียนตารางหรือไล่รายการทีละรายการเอง "
-                     "ให้เขียนแค่สรุป)")
+        if p.get("show_list", True):
+            lines.append("(ระบบจะแนบตารางรายการต่อท้ายคำตอบให้เอง — ห้ามเขียนตารางหรือไล่รายการทีละรายการเอง "
+                         "ให้เขียนแค่สรุป)")
+        else:
+            lines.append("(ผู้ใช้ไม่ได้ขอดูรายการ — ตอบเฉพาะสิ่งที่ถามจากคำตอบก่อนหน้าตรง ๆ ห้ามทวนคำตอบเดิมทั้งหมด "
+                         "และไม่ต้องแสดงรายการหรือตาราง)")
     if p["kind"] in {"due", "overdue"}:
         what = ("งานที่เลยกำหนดส่งแล้วแต่ยอดในใบส่งของยังไม่ครบตามจำนวนสั่ง (ยังไม่ปิดงาน, ไม่รวมงานยกเลิก, "
                 "ดูเฉพาะกำหนดส่งในช่วงนี้ — งานบางงานอาจส่งด้วยวิธีอื่นที่ไม่ได้ออกใบส่งของ)"

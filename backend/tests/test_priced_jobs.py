@@ -296,6 +296,29 @@ def test_priced_jobs_question_is_answered_from_the_estimate_system(live):
     assert saved["usage"]["cost_usd"] == pytest.approx(0.0041)   # planner + answer
 
 
+def test_a_check_on_the_last_answer_is_answered_not_repeated(live, monkeypatch):
+    # prod 2026-11-18: "ของเดือนนี้มี 661 ใบเลยหรอ" got the whole answer and its table again
+    monkeypatch.setattr(pj, "plan", lambda q, previous="": (
+        {"doc_id": None, "quotation_id": None, "status": "approve", "date_from": dt.date(2026, 11, 1),
+         "date_to": dt.date(2026, 11, 18), "keyword": None, "show_list": False}, dict(PLAN_USAGE)))
+    live.history = [{"role": "user", "content": "เดือนนี้มีงานเคาะราคาแล้วกี่งาน"},
+                    {"role": "assistant", "content": "661 ใบค่ะ …"}]
+    events = stream("ของเดือนนี้มี 661 ใบเลยหรอ")
+    shown = "".join(e.get("v", "") for e in events if e["type"] == "delta")
+    assert events[-1]["source"] == "priced_jobs" and "| เลขที่ |" not in shown      # no table again
+    docs, _ = live.contexts[-1]
+    assert "ผู้ใช้ไม่ได้ขอดูรายการ" in docs[0][1] and "ระบบจะแนบตาราง" not in docs[0][1]
+
+
+def test_show_list_defaults_on_and_a_check_turns_it_off():
+    assert pj._clean_plan({"lookup": True})["show_list"] is True
+    assert pj._clean_plan({"lookup": True, "show_list": False})["show_list"] is False
+    text = pj.to_context({"status": "approve", "date_from": dt.date(2026, 11, 1), "date_to": dt.date(2026, 11, 18),
+                          "keyword": None},
+                         {"rows": [ROW], "count": 661, "total": 1.0, "priced": 598, "customers": 214})
+    assert "เฉลี่ยวันละ 36.7 งาน (ช่วง 18 วัน) · ลูกค้า 214 ราย · นับทุกใบที่อนุมัติ รวมใบแก้ไข/หลายเวอร์ชัน" in text
+
+
 def test_a_follow_up_keeps_the_previous_question(live):
     live.history = [{"role": "user", "content": "งานที่เคาะราคาแล้วเดือนนี้มีอะไรบ้าง"},
                     {"role": "assistant", "content": "มี 3 งาน …"}]
