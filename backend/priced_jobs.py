@@ -91,7 +91,7 @@ _PLAN_PROMPT = (
     "หรือรายละเอียดใบใดใบหนึ่ง) แล้วตอบ JSON เท่านั้น:\n"
     '{"lookup": true|false, "doc_id": "E…/EB…/EP…"|null, "quotation_id": "QE…"|null, '
     '"status": "approve"|"pending"|"reject"|"draft"|"any", "date_from": "YYYY-MM-DD"|null, '
-    '"date_to": "YYYY-MM-DD"|null, "keyword": string|null}\n'
+    '"date_to": "YYYY-MM-DD"|null, "keyword": string|null, "show_list": true|false}\n'
     "กติกา:\n"
     "- lookup=false ถ้าผู้ใช้ขอให้คำนวณ/ประเมินราคาเอง, ร่างหรือเขียนใบเสนอราคา, ถามความหมาย/วิธีทำ, "
     "หรือถามความรู้ทั่วไป\n"
@@ -104,6 +104,7 @@ _PLAN_PROMPT = (
     "ไม่ใส่คำบอกสถานะหรือเวลาใน keyword ถ้าไม่มีให้ null\n"
     "- ถ้ามี 'คำถามก่อนหน้า' และคำถามนี้เป็นคำถามต่อเนื่อง (เช่น 'แล้วเดือนที่แล้วล่ะ', 'อันไหนแพงสุด', "
     "'มีของลูกค้า X ไหม') ให้ lookup=true และใช้เงื่อนไขเดิมเว้นแต่ผู้ใช้เปลี่ยน"
+    "\n- show_list: true เมื่อผู้ใช้ต้องการดูรายการงาน (ถามใหม่ หรือเปลี่ยนเงื่อนไข เช่น ช่วงเวลา/สถานะ/ลูกค้า); false เมื่อถามยืนยันหรือสงสัยคำตอบก่อนหน้า (เช่น 'มี 661 ใบเลยหรอ', 'จริงเหรอ', 'ทำไมเยอะจัง') หรือถามเจาะจงข้อเดียว (เช่น 'อันไหนแพงสุด', 'ลูกค้าไหนเยอะสุด', 'รวมเท่าไหร่') — ยังต้อง lookup=true"
 )
 
 
@@ -130,6 +131,9 @@ def _clean_plan(data: dict) -> dict | None:
         "doc_id": doc.upper() if isinstance(doc, str) and DOC_RE.fullmatch(doc.strip()) else None,
         "quotation_id": quote.upper() if isinstance(quote, str) and QUOTE_RE.fullmatch(quote.strip()) else None,
         "status": status, "date_from": d_from, "date_to": d_to, "keyword": kw,
+        # false: a check or a pointed question about the last answer ("มี 661 ใบเลยหรอ") —
+        # answer it, don't repeat the whole list and its table (prod, 2026-11-18)
+        "show_list": data.get("show_list") is not False,
     }
 
 
@@ -161,7 +165,7 @@ def plan(question: str, previous: str = "") -> tuple[dict | None, dict]:
     doc, quote = DOC_RE.search(question or ""), QUOTE_RE.search(question or "")
     if (doc or quote) and p is None:
         p = {"doc_id": None, "quotation_id": None, "status": "any", "date_from": None, "date_to": None,
-             "keyword": None}
+             "keyword": None, "show_list": True}
     if p is not None:
         if doc:
             p["doc_id"] = doc.group(0).upper()
@@ -252,7 +256,7 @@ def build_search(p: dict) -> tuple[str, str]:
     base, date_col = _base(p)
     rows_sql = (f"SELECT TOP {MAX_ROWS} {_LIST_COLS}, p.price_qty, p.price_ex, p.total_price, p.currency_no, "
                 f"t.tiers, v.mid_qty, v.mid_total_ex_vat {base} ORDER BY {date_col} DESC")
-    totals_sql = (f"SELECT COUNT(*) AS n, SUM({_AMOUNT_THB}) AS total, "
+    totals_sql = (f"SELECT COUNT(*) AS n, COUNT(DISTINCT l.customer_id) AS customers, SUM({_AMOUNT_THB}) AS total, "
                   f"SUM(CASE WHEN ISNULL(p.currency_no, 'THB') = 'THB' AND {_AMOUNT} > 0 THEN 1 ELSE 0 END) AS priced, "
                   f"SUM(CASE WHEN ISNULL(p.currency_no, 'THB') <> 'THB' THEN 1 ELSE 0 END) AS other_currency "
                   f"{base}")
@@ -286,6 +290,7 @@ def search(p: dict) -> dict:
     rows, tot = got[0], (got[1] or [{}])[0]
     out = {"rows": rows, "count": int(tot.get("n") or 0), "total": tot.get("total"),
            "priced": int(tot.get("priced") or 0), "other_currency": int(tot.get("other_currency") or 0),
+           "customers": int(tot.get("customers") or 0),
            "by_type": got[2] if len(got) > 2 else [], "by_currency": got[3] if len(got) > 3 else [],
            "top_customers": got[4] if len(got) > 4 else []}
     if not out["count"] and len(got) > 5:
@@ -483,8 +488,19 @@ def to_context(p: dict, data: dict) -> str:
                 + (" (รวมลูกค้าที่ยังไม่ลงทะเบียนหลายราย)" if b.get("customer_id") == "C9999998" else "")
                 + f" {b.get('n') or 0} งาน {_money(b.get('total'))} บาท"
                 for i, b in enumerate(data["top_customers"], 1)))
-        lines.append("(ระบบจะแนบตารางรายการงานต่อท้ายคำตอบให้เอง — ห้ามเขียนตารางหรือไล่รายการงานทีละงานเอง "
-                     "ให้เขียนแค่สรุป)")
+        days = ((p["date_to"] - p["date_from"]).days + 1) if isinstance(p.get("date_from"), dt.date) \
+            and isinstance(p.get("date_to"), dt.date) else 0
+        if days > 1:
+            lines.append(f"เฉลี่ยวันละ {data['count'] / days:,.1f} งาน (ช่วง {days} วัน)"
+                         + (f" · ลูกค้า {data['customers']:,} ราย" if data.get("customers") else "")
+                         + " · นับทุกใบที่อนุมัติ รวมใบแก้ไข/หลายเวอร์ชันของงานเดียวกัน")
+        if p.get("show_list", True):
+            lines.append("(ระบบจะแนบตารางรายการงานต่อท้ายคำตอบให้เอง — ห้ามเขียนตารางหรือไล่รายการงานทีละงานเอง "
+                         "ให้เขียนแค่สรุป)")
+        else:
+            lines.append("(ผู้ใช้ไม่ได้ขอดูรายการ — เขาถามยืนยันหรือถามเจาะจงจากคำตอบก่อนหน้า: ตอบเฉพาะสิ่งที่ถาม "
+                         "ตรง ๆ เช่น 'ใช่ค่ะ…' แล้วอธิบายสั้น ๆ ว่าตัวเลขนี้นับอะไร ห้ามทวนคำตอบเดิมทั้งหมด "
+                         "และไม่ต้องแสดงรายการหรือตาราง)")
         lines.append(f"รายการด้านล่าง (ไว้ตอบคำถามเจาะจง เช่น งานไหนแพงสุด): {len(data['rows'])} งานล่าสุด "
                      f"จากทั้งหมด {data['count']} งาน")
         lines += [_row_text(r) for r in data["rows"]]

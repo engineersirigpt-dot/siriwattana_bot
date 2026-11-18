@@ -2272,7 +2272,7 @@ def _try_priced_jobs_answer(
         return None  # fall through to the normal pipeline
 
     answer = _tidy_data_answer(answer)
-    if "prices" not in data:  # a list question: the table is built in code, not by the model
+    if "prices" not in data and p.get("show_list", True):  # a list: the table is built in code
         if data.get("count"):
             table = priced_jobs.list_table(p, data.get("rows") or [], int(data["count"]))
         else:
