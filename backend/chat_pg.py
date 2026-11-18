@@ -70,9 +70,46 @@ def get_session_history_pg(
 
     for row in reversed(rows):
         history.append({"role": "user", "content": row[1]})
-        history.append({"role": "assistant", "content": row[2]})
+        history.append({"role": "assistant", "content": trim_long_tables(row[2])})
 
     return history
+
+
+HISTORY_TABLE_ROWS = 15
+
+
+def trim_long_tables(text: str | None, keep: int = HISTORY_TABLE_ROWS) -> str:
+    """An answer as the model sees it in later turns: Markdown tables cut to
+    their first `keep` rows. A "show all" answer carries up to 1,000 rows
+    (~60k tokens), and every later question in that chat would pay for them
+    again. What the user sees and exports is the saved answer, untouched."""
+    if not text or text.count("\n|") <= keep + 2:
+        return text or ""
+    out: list[str] = []
+    body = cut = 0
+
+    def flush() -> None:
+        nonlocal cut
+        if cut:
+            out.append(f"(ตารางนี้มีทั้งหมด {body - 1:,} แถว — ในประวัติแชทเหลือ {keep} แถวแรก)")
+        cut = 0
+
+    for line in text.split("\n"):
+        if line.lstrip().startswith("|"):
+            if line.replace("|", "").replace("-", "").replace(":", "").strip() == "":
+                out.append(line)                      # the |---| separator
+                continue
+            body += 1
+            if body <= keep + 1:                      # header + `keep` rows
+                out.append(line)
+            else:
+                cut += 1
+            continue
+        flush()
+        body = 0
+        out.append(line)
+    flush()
+    return "\n".join(out)
 
 
 def save_chat_message_pg(

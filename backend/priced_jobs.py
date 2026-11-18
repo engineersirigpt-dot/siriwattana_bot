@@ -22,6 +22,8 @@ import os
 import re
 from functools import lru_cache
 
+import factory
+
 PRICED_JOBS_MODE = os.getenv("PRICED_JOBS_MODE", "on").strip().lower()
 TEST_CUSTOMERS = tuple(
     c.strip() for c in os.getenv("PRICED_JOBS_TEST_CUSTOMERS", "").split(",") if c.strip()
@@ -170,9 +172,8 @@ def plan(question: str, previous: str = "") -> tuple[dict | None, dict]:
         if quote:
             p["quotation_id"] = quote.group(0).upper()
         # a check on the last answer ("…เลยหรอ") gets no table; anything else does
-        from factory import wants_list
-
-        p["show_list"] = wants_list(question)
+        p["full_list"] = factory.wants_all(question)
+        p["show_list"] = p["full_list"] or factory.wants_list(question)
     return p, usage
 
 
@@ -229,6 +230,7 @@ def _not_test_sql() -> str:
     return " AND ".join(parts)
 
 
+_ROW_COLS = f"{_LIST_COLS}, p.price_qty, p.price_ex, p.total_price, p.currency_no, t.tiers, v.mid_qty, v.mid_total_ex_vat"
 _AMOUNT = "COALESCE(p.price_ex, v.mid_total_ex_vat)"
 _AMOUNT_THB = f"CASE WHEN ISNULL(p.currency_no, 'THB') = 'THB' AND {_AMOUNT} > 0 THEN {_AMOUNT} END"
 
@@ -256,8 +258,8 @@ def _base(p: dict) -> tuple[str, str]:
 def build_search(p: dict) -> tuple[str, str]:
     """(rows SQL, totals SQL) for a list question."""
     base, date_col = _base(p)
-    rows_sql = (f"SELECT TOP {MAX_ROWS} {_LIST_COLS}, p.price_qty, p.price_ex, p.total_price, p.currency_no, "
-                f"t.tiers, v.mid_qty, v.mid_total_ex_vat {base} ORDER BY {date_col} DESC")
+    top = factory.FULL_MAX if p.get("full_list") else MAX_ROWS   # "ขอดูทั้งหมด" → every row for the table
+    rows_sql = (f"SELECT TOP {top} {_ROW_COLS} {base} ORDER BY {date_col} DESC")
     totals_sql = (f"SELECT COUNT(*) AS n, COUNT(DISTINCT l.customer_id) AS customers, SUM({_AMOUNT_THB}) AS total, "
                   f"SUM(CASE WHEN ISNULL(p.currency_no, 'THB') = 'THB' AND {_AMOUNT} > 0 THEN 1 ELSE 0 END) AS priced, "
                   f"SUM(CASE WHEN ISNULL(p.currency_no, 'THB') <> 'THB' THEN 1 ELSE 0 END) AS other_currency "
@@ -278,6 +280,8 @@ def build_breakdowns(p: dict) -> list[str]:
         f"SELECT TOP 5 ISNULL(c.custName, l.customer_id) AS customer, MAX(l.customer_id) AS customer_id, "
         f"COUNT(*) AS n, SUM({_AMOUNT_THB}) AS total {base} "
         f"GROUP BY ISNULL(c.custName, l.customer_id) ORDER BY SUM({_AMOUNT_THB}) DESC",
+        # "อันไหนแพงสุด" over the whole range — the model only sees the newest MAX_ROWS rows
+        f"SELECT TOP 5 {_ROW_COLS} {base} ORDER BY {_AMOUNT_THB} DESC",
     ]
 
 
@@ -286,17 +290,17 @@ def search(p: dict) -> dict:
     sqls = [rows_sql, totals_sql] + build_breakdowns(p)
     if p.get("date_from") or p.get("date_to"):
         # in case nothing is in that range: the newest matching ones instead of a bare "0"
-        latest_sql, _ = build_search(dict(p, date_from=None, date_to=None))
+        latest_sql, _ = build_search(dict(p, date_from=None, date_to=None, full_list=False))
         sqls.append(latest_sql.replace(f"TOP {MAX_ROWS} ", "TOP 3 ", 1))
     got = _run(sqls)
+    got += [[]] * (7 - len(got))
     rows, tot = got[0], (got[1] or [{}])[0]
     out = {"rows": rows, "count": int(tot.get("n") or 0), "total": tot.get("total"),
            "priced": int(tot.get("priced") or 0), "other_currency": int(tot.get("other_currency") or 0),
            "customers": int(tot.get("customers") or 0),
-           "by_type": got[2] if len(got) > 2 else [], "by_currency": got[3] if len(got) > 3 else [],
-           "top_customers": got[4] if len(got) > 4 else []}
-    if not out["count"] and len(got) > 5:
-        out["latest"] = got[5]
+           "by_type": got[2], "by_currency": got[3], "top_customers": got[4], "priciest": got[5]}
+    if not out["count"] and got[6]:
+        out["latest"] = got[6]
     return out
 
 
@@ -360,10 +364,11 @@ def _cell(v, width: int = 60) -> str:
 def list_table(p: dict, rows: list[dict], count: int, title: str | None = None) -> str:
     """A Markdown table of a list answer, built here rather than by the model:
     on prod the model wrote one without its |---| line and it showed as a
-    paragraph of bars (2026-11-18). 15 or fewer → all; more → the newest 10."""
+    paragraph of bars (2026-11-18). 15 or fewer → all; more → the newest 10;
+    every row fetched when the user asked for everything (full_list)."""
     if not rows:
         return ""
-    shown = rows if count <= 15 else rows[:10]
+    shown = rows if count <= 15 or p.get("full_list") else rows[:10]
     approve = p.get("status") == "approve"
     head = (f"| เลขที่ | ชื่องาน | ลูกค้า | จำนวน | ราคา (ก่อน VAT) | {'อนุมัติเมื่อ' if approve else 'วันที่'} |\n"
             "|---|---|---|---:|---:|---|")
@@ -377,7 +382,9 @@ def list_table(p: dict, rows: list[dict], count: int, title: str | None = None) 
         body.append(f"| {_cell(r.get('job_id'), 14)} | {_cell(r.get('job_name'))} | {_cell(r.get('custName'), 40)} | "
                     f"{_qty(qty)} | {price} | {_when(when)} |")
     if title is None and count > len(shown):
-        title = f"รายการล่าสุด {len(shown)} จากทั้งหมด {count:,} งาน"
+        title = f"รายการล่าสุด {len(shown):,} จากทั้งหมด {count:,} งาน"
+    elif title is None and p.get("full_list"):
+        title = f"รายการทั้งหมด {count:,} งาน"
     return (f"**{title}**\n\n" if title else "") + head + "\n" + "\n".join(body)
 
 
@@ -421,7 +428,7 @@ def describe_filters(p: dict) -> str:
     if p.get("date_from") or p.get("date_to"):
         parts.append(f"ช่วงวันที่: {p.get('date_from') or 'เริ่มต้น'} ถึง {p.get('date_to') or 'วันนี้'}")
     else:
-        parts.append(f"ช่วงวันที่: ไม่ระบุ (แสดงล่าสุดไม่เกิน {MAX_ROWS} รายการ)")
+        parts.append("ช่วงวันที่: ไม่ระบุ (ทุกช่วงเวลา)")
     if p.get("keyword"):
         parts.append(f"คำค้น: {p['keyword']}")
     return " · ".join(parts)
@@ -496,16 +503,26 @@ def to_context(p: dict, data: dict) -> str:
             lines.append(f"เฉลี่ยวันละ {data['count'] / days:,.1f} งาน (ช่วง {days} วัน)"
                          + (f" · ลูกค้า {data['customers']:,} ราย" if data.get("customers") else "")
                          + " · นับทุกใบที่อนุมัติ รวมใบแก้ไข/หลายเวอร์ชันของงานเดียวกัน")
-        if p.get("show_list", True):
+        if p.get("full_list"):
+            lines.append(f"(ผู้ใช้ขอดูรายการทั้งหมด — ระบบจะแนบตารางครบทุกงาน (สูงสุด {factory.FULL_MAX:,} งาน) "
+                         "ต่อท้ายคำตอบให้เอง และผู้ใช้กดปุ่ม Excel ใต้คำตอบเพื่อโหลดเป็นไฟล์ได้: ตอบสั้น ๆ ไม่เกิน "
+                         "2 ประโยค เช่น 'ได้ค่ะ นี่คือรายการทั้งหมด … งาน (ช่วง …)' ไม่ต้องแจกแจงประเภท/สกุลเงิน/ลูกค้าซ้ำ "
+                         "ห้ามเขียนตาราง ห้ามบอกว่าแสดงได้ไม่ครบ)")
+        elif p.get("show_list", True):
             lines.append("(ระบบจะแนบตารางรายการงานต่อท้ายคำตอบให้เอง — ห้ามเขียนตารางหรือไล่รายการงานทีละงานเอง "
                          "ให้เขียนแค่สรุป)")
         else:
             lines.append("(ผู้ใช้ไม่ได้ขอดูรายการ — เขาถามยืนยันหรือถามเจาะจงจากคำตอบก่อนหน้า: ตอบเฉพาะสิ่งที่ถาม "
                          "ตรง ๆ เช่น 'ใช่ค่ะ…' แล้วอธิบายสั้น ๆ ว่าตัวเลขนี้นับอะไร ห้ามทวนคำตอบเดิมทั้งหมด "
                          "และไม่ต้องแสดงรายการหรือตาราง)")
-        lines.append(f"รายการด้านล่าง (ไว้ตอบคำถามเจาะจง เช่น งานไหนแพงสุด): {len(data['rows'])} งานล่าสุด "
-                     f"จากทั้งหมด {data['count']} งาน")
-        lines += [_row_text(r) for r in data["rows"]]
+        if data.get("priciest"):
+            lines.append(f"5 งานที่ราคาสูงสุดในเงื่อนไขนี้ (เทียบจากทั้งหมด {data['count']} งาน เฉพาะราคาเป็นบาท — "
+                         "ใช้ตอบ 'งานไหนแพงสุด'):")
+            lines += [_row_text(r) for r in data["priciest"]]
+        rows = data["rows"][:MAX_ROWS]   # a full list goes to the table, not to the model
+        lines.append(f"ข้อมูลประกอบ: {len(rows)} งานล่าสุด (ไว้ตอบคำถามเรื่องงานล่าสุด — เป็นข้อมูลภายใน "
+                     "ห้ามบอกผู้ใช้ว่าระบบดึงหรือแสดงได้แค่จำนวนนี้)")
+        lines += [_row_text(r) for r in rows]
     elif data.get("latest"):
         lines.append("งานล่าสุดที่ตรงสถานะ/คำค้นนี้ (อยู่นอกช่วงวันที่ที่ถาม):")
         lines += [_row_text(r) for r in data["latest"]]

@@ -120,7 +120,20 @@ def test_long_lists_get_breakdowns_in_the_same_session(monkeypatch):
     monkeypatch.setattr(pj, "_run", lambda qs: batches.append(qs) or [[] for _ in qs])
     pj.search({"status": "approve", "date_from": dt.date(2026, 11, 1), "date_to": dt.date(2026, 11, 18),
                "keyword": None})
-    assert len(batches) == 1 and len(batches[0]) == 6      # rows, totals, 3 breakdowns, latest — one connection
+    # rows, totals, 3 breakdowns, the 5 priciest, latest — one connection
+    assert len(batches) == 1 and len(batches[0]) == 7
+    assert sqls[3].startswith("SELECT TOP 5 l.job_id") and "ORDER BY CASE WHEN ISNULL(p.currency_no, 'THB')" in sqls[3]
+
+
+def test_a_full_list_fetches_every_row_but_the_fallback_stays_small(monkeypatch):
+    # prod 2026-11-18: "ถ้าให้แสดงมาทั้ง 661 งานเลยได้มั้ย" got the same newest-10 table again
+    p = {"status": "approve", "date_from": dt.date(2026, 11, 1), "date_to": dt.date(2026, 11, 18), "keyword": None,
+         "full_list": True}
+    batches = []
+    monkeypatch.setattr(pj, "_run", lambda qs: batches.append(qs) or [[] for _ in qs])
+    pj.search(p)
+    assert batches[0][0].startswith("SELECT TOP 1000 ") and batches[0][-1].startswith("SELECT TOP 3 ")
+    assert pj.build_search(dict(p, full_list=False))[0].startswith(f"SELECT TOP {pj.MAX_ROWS} ")
 
 
 def test_live_approvals_of_new_customers_count_and_the_it_test_does_not():
@@ -186,7 +199,9 @@ def test_list_context_has_count_total_and_prices():
     # old system: its tax line taken off — 27,094.95 incl. 789.17 tax = the new system's 26,305.78 ex VAT
     assert "26,305.78 THB ก่อน VAT ที่จำนวน 3,000 ชิ้น (≈ 8.77 THB/ชิ้น)" in text and "27,094.95" not in text
     assert "25,832.50 บาท ก่อน VAT ที่จำนวน 500 ชิ้น" in text                       # new system: ex VAT
-    assert "ยังไม่มีราคา" in text and "3 งานล่าสุด จากทั้งหมด 5 งาน" in text
+    assert "ยังไม่มีราคา" in text and "ข้อมูลประกอบ: 3 งานล่าสุด" in text
+    # the bot told users "ระบบแสดงเฉพาะรายการล่าสุด 40 งาน" — the row cap is internal now
+    assert "ห้ามบอกผู้ใช้ว่าระบบดึงหรือแสดงได้แค่จำนวนนี้" in text and "ไม่เกิน 40" not in text
     assert "ระบบจะแนบตารางรายการงานต่อท้ายคำตอบให้เอง" in text      # the model must not write its own table
     assert "ระบบประเมินราคาเดิม" in text and "ระบบประเมินราคาใหม่ (MI2)" in text
     assert "อนุมัติแล้ว (เคาะราคาแล้ว) · อนุมัติเมื่อ 2026-11-18 11:25" in text
@@ -212,6 +227,23 @@ def test_list_table_is_built_in_code():
     assert pj.list_table({"status": "approve"}, [ROW] * 12, 12).count("| E26110464 |") == 12
     assert "**" not in pj.list_table({"status": "approve"}, [ROW], 1)   # all shown → no "x จากทั้งหมด"
     assert pj.list_table({"status": "approve"}, [], 0) == ""
+    # "ขอดูทั้งหมด": every fetched row, and the title says so
+    full = pj.list_table({"status": "approve", "full_list": True}, [ROW] * 661, 661)
+    assert full.count("| E26110464 |") == 661 and full.startswith("**รายการทั้งหมด 661 งาน**")
+    capped = pj.list_table({"status": "approve", "full_list": True}, [ROW] * 1000, 52000)
+    assert capped.count("| E26110464 |") == 1000 and capped.startswith("**รายการล่าสุด 1,000 จากทั้งหมด 52,000 งาน**")
+
+
+def test_full_list_and_priciest_in_the_context():
+    p = {"status": "approve", "date_from": dt.date(2026, 11, 1), "date_to": dt.date(2026, 11, 18), "keyword": None,
+         "full_list": True}
+    dear = dict(ROW, job_id="E26119999", price_ex=Decimal("1500000"), price_qty=10000)
+    text = pj.to_context(p, {"rows": [ROW] * 661, "count": 661, "total": 1.0, "priced": 598,
+                             "priciest": [dear]})
+    assert "ผู้ใช้ขอดูรายการทั้งหมด" in text and "ห้ามบอกว่าแสดงได้ไม่ครบ" in text
+    assert text.count("[E26110464]") == pj.MAX_ROWS            # the model still sees only MAX_ROWS rows
+    # "อันไหนแพงสุด" is answered over the whole range, not over the newest rows
+    assert "5 งานที่ราคาสูงสุดในเงื่อนไขนี้ (เทียบจากทั้งหมด 661 งาน" in text and "[E26119999]" in text
 
 
 def test_empty_and_single_document_contexts():
@@ -319,6 +351,20 @@ def test_show_list_is_decided_by_rule_not_by_the_planner(monkeypatch):
     assert pj.plan("ของเดือนนี้มี 661 ใบเลยหรอ")[0]["show_list"] is False
     assert pj.plan("ทำไมตาราง excel ไม่ออกมาด้วยครับ")[0]["show_list"] is True
     assert pj.plan("E26110334 ราคาเท่าไหร่")[0]["show_list"] is True
+    assert pj.plan("ถ้าให้แสดงมาทั้ง 661 งานเลยได้มั้ยครับ")[0]["full_list"] is True
+    assert pj.plan("ของเดือนตุลาคมหล่ะ")[0]["full_list"] is False
+
+
+def test_asking_for_everything_gets_every_row(live, monkeypatch):
+    monkeypatch.setattr(pj, "plan", lambda q, previous="": (
+        {"doc_id": None, "quotation_id": None, "status": "approve", "date_from": dt.date(2026, 11, 1),
+         "date_to": dt.date(2026, 11, 18), "keyword": None, "show_list": True, "full_list": True}, dict(PLAN_USAGE)))
+    monkeypatch.setattr(pj, "search", lambda p: {"rows": [ROW] * 30, "count": 30, "total": 1.0, "priced": 30})
+    live.history = [{"role": "user", "content": "เดือนนี้มีงานเคาะราคาแล้วกี่งาน"},
+                    {"role": "assistant", "content": "30 งานค่ะ …"}]
+    events = stream("ถ้าให้แสดงมาทั้ง 30 งานเลยได้มั้ยครับ")
+    shown = "".join(e.get("v", "") for e in events if e["type"] == "delta")
+    assert "**รายการทั้งหมด 30 งาน**" in shown and shown.count("| E26110464 |") == 30
     text = pj.to_context({"status": "approve", "date_from": dt.date(2026, 11, 1), "date_to": dt.date(2026, 11, 18),
                           "keyword": None},
                          {"rows": [ROW], "count": 661, "total": 1.0, "priced": 598, "customers": 214})
