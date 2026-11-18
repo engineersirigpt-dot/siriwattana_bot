@@ -5,6 +5,7 @@ session and the AI planner/answer are faked.
 """
 
 import datetime as dt
+import json
 from decimal import Decimal
 
 import pytest
@@ -257,9 +258,36 @@ def test_ops_tables_are_built_in_code():
     assert fx.ops_table({"kind": "qc"}, {"rows": [{"x": 1}]}) == ""
     # a check on the last answer ("มีเยอะขนาดนั้นเลยหรอ") gets no table again
     assert fx.ops_table({"kind": "due", "show_list": False}, {"count": 229, "rows": [{"jobid": "J1"}]}) == ""
-    assert fx._clean_plan({"kind": "due"})["show_list"] is True
-    assert fx._clean_plan({"kind": "due", "show_list": False})["show_list"] is False
     assert fx.ops_table({"kind": "due"}, {"count": 0, "rows": []}) == ""
+
+
+@pytest.mark.parametrize("question, table", [
+    ("เดือนนี้มีงานเคาะราคาแล้วกี่งาน", True),
+    ("ของเดือนตุลาคมหล่ะ", True),
+    ("แล้วเดือนที่แล้วล่ะ", True),
+    ("มีของลูกค้า AROMA ไหม", True),
+    ("มีงานต้องส่งพรุ่งนี้หรือเปล่า", True),
+    ("ทำไมตาราง excel ไม่ออกมาด้วยครับ", True),
+    ("ขอเป็นตาราง excel", True),
+    ("ขอดูรายการทั้งหมด", True),
+    ("ของเดือนนี้มี 661 ใบเลยหรอ", False),
+    ("มี 661 ใบเลยหรอครับ", False),
+    ("จริงเหรอ", False),
+    ("ตัวเลขนี้ถูกต้องไหม", False),
+    ("งานค้างซ่อมมีเยอะขนาดนั้นเลยหรอ", False),
+    ("อันไหนแพงสุด", False),
+    ("ลูกค้าไหนมีงานมากที่สุด", False),
+    ("เครื่องไหนค้างซ่อมนานสุด", False),
+])
+def test_the_table_rule(question, table):
+    assert fx.wants_list(question) is table
+
+
+def test_plan_sets_show_list_from_the_question(monkeypatch):
+    raw = json.dumps({"kind": "due", "show_list": False})
+    monkeypatch.setattr(fx, "_plan_cached", lambda q, prev, today: (raw, "{}"))
+    assert fx.plan("สัปดาห์หน้าล่ะ")[0]["show_list"] is True
+    assert fx.plan("มีเยอะขนาดนั้นเลยหรอ")[0]["show_list"] is False
 
 
 def test_a_model_table_without_its_separator_is_repaired():

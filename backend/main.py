@@ -2171,23 +2171,24 @@ def _tidy_data_answer(answer: str) -> str:
     return re.sub(r"\n{3,}", "\n\n", text).strip() or (answer or "").strip()
 
 
-def _priced_jobs_previous(session_id: int | None, user_id: int) -> str:
-    """The most recent estimate question in this chat (one of the last 3 user
-    turns), so a short follow-up ('แล้วเดือนที่แล้วล่ะ') keeps its filters."""
-    if not session_id:
-        return ""
-    try:
-        from chat_pg import get_session_history_pg
-        from priced_jobs import mentions
-
-        hist = get_session_history_pg(session_id=session_id, user_id=user_id, limit=HISTORY_TURNS)
-    except Exception:
-        return ""
-    asked = [m.get("content") or "" for m in (hist or []) if m.get("role") == "user"][-3:]
-    for q in reversed(asked):
-        if mentions(q):
-            return q
+def _question_chain(asked: list[str], starts) -> str:
+    """The follow-up chain for a planner: the latest earlier question that named
+    the topic plus every question after it, oldest first ("เดือนนี้มีงานเคาะราคา…
+    → มี 661 ใบเลยหรอ → ของเดือนตุลาคมหล่ะ"). Only the topic question used to be
+    passed, so a later follow-up fell back to its filters (answered November
+    right after October, prod 2026-11-18)."""
+    for i in range(len(asked) - 1, -1, -1):
+        if starts(asked[i]):
+            return " → ".join(" ".join(q.split())[:200] for q in asked[i:] if q.strip())
     return ""
+
+
+def _priced_jobs_previous(session_id: int | None, user_id: int) -> str:
+    """The estimate questions so far in this chat (within the last 4 user turns),
+    so a short follow-up ('แล้วเดือนที่แล้วล่ะ') keeps the latest filters."""
+    from priced_jobs import mentions
+
+    return _question_chain(_recent_user_questions(session_id, user_id, 4), mentions)
 
 
 def _resolve_priced_jobs(question: str, session_id: int | None, user_id: int) -> tuple[dict | None, dict]:
@@ -2334,7 +2335,7 @@ def _resolve_factory(question: str, session_id: int | None, user_id: int) -> tup
     job = _factory_job(question, session_id, user_id)
     if job:
         return "job", job, {}
-    previous = next((q for q in reversed(_recent_user_questions(session_id, user_id, 3)) if factory.mentions_ops(q)), "")
+    previous = _question_chain(_recent_user_questions(session_id, user_id, 4), factory.mentions_ops)
     if factory.mentions_ops(question) or (previous and len(question.strip()) <= 80):
         p, usage = factory.plan(question, previous)
         if p is not None:
