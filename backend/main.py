@@ -2097,6 +2097,35 @@ def _try_linsip_answer(
     }
 
 
+_OFFER_START = re.compile(r"(หากต้องการ|ถ้าต้องการ|ต้องการให้(?:ผม|ดิฉัน|ระบบ)?\S{0,4}(?:สรุป|ช่วย|จัด|ตรวจ))")
+_OFFER = re.compile(
+    r"(หากต้องการ|ถ้าต้องการ).{0,120}(แจ้ง|บอก|สรุป|ช่วย|จัด|ตรวจ|ส่ง)|แจ้งได้(?:เลย)?\s*(?:ครับ|ค่ะ|นะ)|"
+    r"บอกได้(?:เลย)?\s*(?:ครับ|ค่ะ)|ยินดีช่วย|จะ(?:ตรวจเช็ค|ตรวจสอบ|ติดตาม|อัปเดต)ให้(?:ต่อเนื่อง|ภายหลัง|ทันที)?"
+)
+_DANGLING_NOTE = re.compile(r"(?:\n|^)[ \t>*_#-]*หมายเหตุ[^\n]{0,15}[:：]?[*_ \t]*$")
+
+
+def _tidy_data_answer(answer: str) -> str:
+    """Answers built from MI data must not end with offers ('หากต้องการ… แจ้งได้')
+    or promises to follow up — the bot can't — and 'ครับ/ค่ะ' reads oddly. Only
+    the last 6 lines are touched; facts before an offer on the same line stay."""
+    lines = (answer or "").rstrip().split("\n")
+    for i in range(len(lines) - 1, max(-1, len(lines) - 7), -1):
+        if not _OFFER.search(lines[i]):
+            continue
+        m = _OFFER_START.search(lines[i])
+        head = lines[i][:m.start()].rstrip() if m else ""
+        lines[i] = head if len(re.sub(r"[\W_]", "", head)) > 8 else ""
+    text = "\n".join(lines).rstrip()
+    while True:
+        cut = _DANGLING_NOTE.sub("", text).rstrip()
+        if cut == text:
+            break
+        text = cut
+    text = text.replace("ครับ/ค่ะ", "ค่ะ").replace("ค่ะ/ครับ", "ค่ะ")
+    return re.sub(r"\n{3,}", "\n\n", text).strip() or (answer or "").strip()
+
+
 def _priced_jobs_previous(session_id: int | None, user_id: int) -> str:
     """The most recent estimate question in this chat (one of the last 3 user
     turns), so a short follow-up ('แล้วเดือนที่แล้วล่ะ') keeps its filters."""
@@ -2197,6 +2226,7 @@ def _try_priced_jobs_answer(
                   detail={"session_id": sid, "error": f"answer: {type(e).__name__}: {str(e)[:200]}"})
         return None  # fall through to the normal pipeline
 
+    answer = _tidy_data_answer(answer)
     usage_row = accumulate_usage(plan_usage, answer_usage, primary_model=(answer_usage or {}).get("model"))
     mid = save_chat_message_pg(
         user_id=user["id"], session_id=sid, question=question, answer=answer,
@@ -2327,6 +2357,7 @@ def _try_factory_answer(
         audit_log("factory_failed", user=user, request=request,
                   detail={"session_id": sid, "kind": kind, "error": f"answer: {type(e).__name__}: {str(e)[:200]}"})
         return None
+    answer = _tidy_data_answer(answer)
     source = "factory_job" if kind == "job" else "factory"
     mid = save_chat_message_pg(user_id=user["id"], session_id=sid, question=question, answer=answer, source=source,
                                knowledge_id=None, mode=mode, usage=accumulate_usage(
