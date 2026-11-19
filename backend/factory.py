@@ -260,18 +260,19 @@ def job_queries(job: str) -> dict[str, str]:
                 SUM(CASE WHEN issue_status = 1 THEN 1 ELSE 0 END) AS issued,
                 SUM(CASE WHEN issue_status = 1 THEN qty_pieces ELSE 0 END) AS issued_pieces
             FROM mi.dbo.FG_Product_Pallet WITH (NOLOCK) WHERE job_id = {j}""",
-        # tb_qc_head has no job index: look only at the newest 20,000 inspections (~2 years)
+        # QC_MASTER is small (183k heads, 144k details, 2026-11-19): no id window. The old
+        # "newest 20,000 heads" window missed part of 2026 (23,165 heads dated this year).
+        # problem_all = pieces sampled (AQL), problem_fail = pieces with a MAJOR defect
+        # (equal to the major count on 137 of 144 inspections); minor defects are not fails.
         "qc": f"""SELECT COUNT(*) AS inspections, SUM(problem_all) AS checked, SUM(problem_fail) AS failed,
+                SUM(CASE WHEN problem_fail > 0 THEN 1 ELSE 0 END) AS failed_inspections,
                 MIN(qc_datetime) AS first_date, MAX(qc_datetime) AS last_date
-            FROM QC_MASTER.dbo.tb_qc_head WITH (NOLOCK)
-            WHERE job_id = {j} AND qc_head_id > (SELECT MAX(qc_head_id) - 20000 FROM QC_MASTER.dbo.tb_qc_head)""",
+            FROM QC_MASTER.dbo.tb_qc_head WITH (NOLOCK) WHERE job_id = {j}""",
         "qc_problems": f"""SELECT TOP 5 p.problem_name, SUM(d.major_count) AS major, SUM(d.minor_count) AS minor
             FROM QC_MASTER.dbo.tb_qc_detail d WITH (NOLOCK)
             JOIN QC_MASTER.dbo.tb_qc_head h WITH (NOLOCK) ON h.qc_head_id = d.qc_head_id
             LEFT JOIN QC_MASTER.dbo.tb_qc_problem p WITH (NOLOCK) ON p.problem_id = d.problem_id
-            WHERE h.job_id = {j} AND h.qc_head_id > (SELECT MAX(qc_head_id) - 20000 FROM QC_MASTER.dbo.tb_qc_head)
-              AND d.qc_detail_id > (SELECT MAX(qc_detail_id) - 60000 FROM QC_MASTER.dbo.tb_qc_detail)
-              AND (d.major_count > 0 OR d.minor_count > 0)
+            WHERE h.job_id = {j} AND (d.major_count > 0 OR d.minor_count > 0)
             GROUP BY p.problem_name ORDER BY SUM(d.major_count) + SUM(d.minor_count) DESC""",
         "checklists": f"""SELECT COUNT(*) AS n, SUM(CASE WHEN status_approved = '1' THEN 1 ELSE 0 END) AS approved,
                 MAX(doc_date) AS last_date
@@ -402,38 +403,41 @@ def repairs(p: dict, today: dt.date | None = None) -> dict:
 
 # ── 6: QC overview ──────────────────────────────────────────────────────────
 
-def qc_queries(p: dict, today: dt.date) -> tuple[str, str, str]:
+def qc_queries(p: dict, today: dt.date) -> tuple[str, str, str, str]:
     kw = safe_keyword(p.get("keyword"))
     d_from, d_to = effective_range(dict(p, kind="qc"), today)
-    where = [f"h.qc_datetime >= '{_day(d_from)}'", f"h.qc_datetime < '{_day(d_to + dt.timedelta(days=1))}'",
-             "h.qc_head_id > (SELECT MAX(qc_head_id) - 20000 FROM QC_MASTER.dbo.tb_qc_head)"]
+    where = [f"h.qc_datetime >= '{_day(d_from)}'", f"h.qc_datetime < '{_day(d_to + dt.timedelta(days=1))}'"]
     if kw:
         where.append(f"(h.job_id = '{kw}' OR h.machine_id = '{kw}' OR h.job_description LIKE N'%{kw}%')")
     w = " AND ".join(where)
     summary = (f"SELECT COUNT(*) AS inspections, COUNT(DISTINCT h.job_id) AS jobs, SUM(h.problem_all) AS checked, "
-               f"SUM(h.problem_fail) AS failed FROM QC_MASTER.dbo.tb_qc_head h WITH (NOLOCK) WHERE {w}")
+               f"SUM(h.problem_fail) AS failed, SUM(CASE WHEN h.problem_fail > 0 THEN 1 ELSE 0 END) AS failed_inspections "
+               f"FROM QC_MASTER.dbo.tb_qc_head h WITH (NOLOCK) WHERE {w}")
+    defects = (f"SELECT SUM(d.major_count) AS major, SUM(d.minor_count) AS minor "
+               f"FROM QC_MASTER.dbo.tb_qc_detail d WITH (NOLOCK) "
+               f"JOIN QC_MASTER.dbo.tb_qc_head h WITH (NOLOCK) ON h.qc_head_id = d.qc_head_id WHERE {w}")
     problems = f"""SELECT TOP 10 p.problem_name, COUNT(*) AS times, SUM(d.major_count) AS major, SUM(d.minor_count) AS minor
         FROM QC_MASTER.dbo.tb_qc_detail d WITH (NOLOCK)
         JOIN QC_MASTER.dbo.tb_qc_head h WITH (NOLOCK) ON h.qc_head_id = d.qc_head_id
         LEFT JOIN QC_MASTER.dbo.tb_qc_problem p WITH (NOLOCK) ON p.problem_id = d.problem_id
-        WHERE {w} AND d.qc_detail_id > (SELECT MAX(qc_detail_id) - 60000 FROM QC_MASTER.dbo.tb_qc_detail)
-          AND (d.major_count > 0 OR d.minor_count > 0)
+        WHERE {w} AND (d.major_count > 0 OR d.minor_count > 0)
         GROUP BY p.problem_name ORDER BY COUNT(*) DESC"""
     jobs = f"""SELECT TOP 10 h.job_id, MAX(h.job_description) AS job_name, COUNT(*) AS inspections,
             SUM(h.problem_fail) AS failed
         FROM QC_MASTER.dbo.tb_qc_head h WITH (NOLOCK) WHERE {w} AND h.problem_fail > 0
         GROUP BY h.job_id ORDER BY SUM(h.problem_fail) DESC"""
-    return summary, problems, jobs
+    return summary, problems, jobs, defects
 
 
 def qc_overview(p: dict, today: dt.date | None = None) -> dict:
     today = today or _bangkok_today()
-    summary_sql, problems_sql, jobs_sql = qc_queries(p, today)
+    summary_sql, problems_sql, jobs_sql, defects_sql = qc_queries(p, today)
     with session() as s:
         summary = (s.run(summary_sql) or [{}])[0]
         problems = s.run(problems_sql)
         jobs = s.run(jobs_sql)
-    return {"summary": summary, "problems": problems, "jobs": jobs}
+        defects = (s.run(defects_sql) or [{}])[0]
+    return {"summary": summary, "problems": problems, "jobs": jobs, "defects": defects}
 
 
 # ── planner for the non-job questions (small AI call, cached) ───────────────
@@ -631,7 +635,9 @@ def job_context(o: dict) -> str:
     qc = (o.get("qc") or [{}])[0]
     if qc.get("inspections"):
         out.append(f"QC: ตรวจ {qc['inspections']} ครั้ง ({_when(qc.get('first_date'), False)} ถึง "
-                   f"{_when(qc.get('last_date'), False)}) · สุ่มตรวจ {_n(qc.get('checked'))} · ไม่ผ่าน {_n(qc.get('failed'))}")
+                   f"{_when(qc.get('last_date'), False)}) · สุ่มตรวจ {_n(qc.get('checked'))} ชิ้น · "
+                   f"ไม่ผ่าน (ข้อบกพร่องร้ายแรง major) {_n(qc.get('failed'))} ชิ้น"
+                   + (f" ใน {qc['failed_inspections']} ครั้ง" if qc.get("failed_inspections") else ""))
         probs = o.get("qc_problems") or []
         if probs:
             out.append("ปัญหา QC ที่พบ: " + ", ".join(
@@ -776,16 +782,21 @@ def ops_context(p: dict, data: dict, today: dt.date | None = None) -> str:
                 f" | เสร็จ: {_when(r.get('ma_complete_date'))} | ต้องการให้เสร็จ: {_when(r.get('need_datetime'))}"
                 f" | อาการ: {scrub_names(r.get('problem'))} | การแก้ไข: {scrub_names(r.get('solution'))}")
     else:
-        s = data["summary"]
+        s, dfx = data["summary"], data.get("defects") or {}
         lines += [f"เรื่อง: ผลตรวจ QC · ช่วงวันที่: {rng}{kw}",
-                  f"สรุป: ตรวจ {s.get('inspections') or 0} ครั้ง · {s.get('jobs') or 0} งาน · "
-                  f"สุ่มตรวจ {_n(s.get('checked'))} · ไม่ผ่าน {_n(s.get('failed'))}"]
+                  "สรุปผลตรวจ (เขียนเป็นข้อย่อย ข้อละบรรทัด):",
+                  f"- ตรวจ {s.get('inspections') or 0} ครั้ง จาก {s.get('jobs') or 0} งาน",
+                  f"- สุ่มตรวจรวม {_n(s.get('checked'))} ชิ้น (ตามเกณฑ์ AQL)",
+                  f"- ชิ้นที่ไม่ผ่าน (พบข้อบกพร่องร้ายแรง major): {_n(s.get('failed'))} ชิ้น "
+                  f"ใน {s.get('failed_inspections') or 0} ครั้งที่ตรวจ"]
+        if dfx.get("minor"):
+            lines.append(f"- ข้อบกพร่องเล็กน้อย (minor) ที่บันทึกไว้: {_n(dfx.get('minor'))} จุด — ไม่นับเป็นชิ้นไม่ผ่าน")
         if data["problems"]:
-            lines.append("ปัญหาที่พบบ่อย:")
+            lines.append("ปัญหาที่พบบ่อย (จำนวนครั้งที่พบ):")
             lines += [f"- {r.get('problem_name') or 'อื่นๆ'}: {r.get('times')} ครั้ง (major {r.get('major') or 0}, "
                       f"minor {r.get('minor') or 0})" for r in data["problems"]]
         if data["jobs"]:
-            lines.append("งานที่ไม่ผ่าน QC มากที่สุด:")
-            lines += [f"- {r.get('job_id')} | ประเภทงาน: {r.get('job_name') or '-'} | ตรวจ {r.get('inspections')} ครั้ง | "
-                      f"ไม่ผ่าน {_n(r.get('failed'))}" for r in data["jobs"]]
+            lines.append("งานที่มีชิ้นไม่ผ่านมากที่สุด:")
+            lines += [f"- {r.get('job_id')} ({r.get('job_name') or '-'}): ตรวจ {r.get('inspections')} ครั้ง, "
+                      f"ไม่ผ่าน {_n(r.get('failed'))} ชิ้น" for r in data["jobs"]]
     return "\n".join(lines)
