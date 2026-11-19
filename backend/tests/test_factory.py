@@ -71,6 +71,9 @@ def test_values_put_into_sql_are_made_safe():
     assert fx.safe_keyword("AROMA'; DROP TABLE x--%_[") == "AROMA DROP TABLE x--"
     assert fx.safe_keyword("เครื่อง L444APC (ตัวที่ 2)") == "เครื่อง L444APC (ตัวที่ 2)"
     assert fx.safe_keyword("  ") is None
+    # "ใบแจ้งซ่อมรหัสอนุมัติ 3" → keyword "3" filtered every ticket holding a 3 (prod 2026-11-19)
+    assert fx.safe_keyword("3") is None and fx.safe_keyword("12") is None and fx.safe_keyword("ก") is None
+    assert fx.safe_keyword("3826") == "3826" and fx.safe_keyword("L4") == "L4" and fx.safe_keyword("ปก") == "ปก"
 
 
 def test_openquery_wrapping_doubles_quotes(monkeypatch):
