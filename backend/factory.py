@@ -169,6 +169,10 @@ def safe_keyword(text: str | None) -> str | None:
         return None
     kept = re.sub(r"[^0-9A-Za-z฀-๿ \-./()&+]", "", str(text)).strip()
     kept = re.sub(r"\s+", " ", kept)[:40]
+    # a lone character or a 1–2 digit number filters nothing real: "ใบแจ้งซ่อมรหัสอนุมัติ 3" became
+    # keyword "3", i.e. every ticket whose machine or note holds a 3 (prod 2026-11-19)
+    if len(kept.replace(" ", "")) < 2 or (kept.isdigit() and len(kept) < 3):
+        return None
     return kept or None
 
 
