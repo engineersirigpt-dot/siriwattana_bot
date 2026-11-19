@@ -225,6 +225,14 @@ def test_ops_contexts():
     assert "ปกยับ: 78 ครั้ง" in qc and "- J52600854 (สมุด): ตรวจ 10 ครั้ง, ไม่ผ่าน 14 ชิ้น" in qc
 
 
+def test_qc_and_repair_ranges_end_today():
+    # "สัปดาห์นี้ (16–22 พ.ย.)" was shown on the 19th (prod 2026-11-19); due dates still look ahead
+    week = {"date_from": dt.date(2026, 11, 16), "date_to": dt.date(2026, 11, 22)}
+    assert fx.effective_range(dict(week, kind="qc"), TODAY) == (dt.date(2026, 11, 16), TODAY)
+    assert fx.effective_range(dict(week, kind="repairs"), TODAY) == (dt.date(2026, 11, 16), TODAY)
+    assert fx.effective_range(dict(week, kind="due"), TODAY) == (dt.date(2026, 11, 16), dt.date(2026, 11, 22))
+
+
 def test_names_in_repair_notes_are_dropped():
     assert fx.scrub_names("-สั่งซื้อ Proximity Sensor PE-B7D จำนวน 2 ตัว(ณรงค์ศักดิ์)") == \
         "สั่งซื้อ Proximity Sensor PE-B7D จำนวน 2 ตัว"

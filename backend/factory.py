@@ -307,11 +307,13 @@ def effective_range(p: dict, today: dt.date) -> tuple[dt.date, dt.date]:
     if kind == "overdue":   # due dates years ago on recent jobs are data-entry noise: the last 30 days only
         yesterday = today - dt.timedelta(days=1)
         return p.get("date_from") or today - dt.timedelta(days=30), min(p.get("date_to") or yesterday, yesterday)
+    # repairs and QC are records of what happened: a range never runs past today
+    # ("สัปดาห์นี้ (16–22 พ.ย.)" was shown on the 19th, prod 2026-11-19)
     if kind == "repairs":
         back = 90 if p.get("status") == "open" else 7
-        return p.get("date_from") or today - dt.timedelta(days=back), p.get("date_to") or today
+        return p.get("date_from") or today - dt.timedelta(days=back), min(p.get("date_to") or today, today)
     if kind == "qc":
-        return p.get("date_from") or today - dt.timedelta(days=7), p.get("date_to") or today
+        return p.get("date_from") or today - dt.timedelta(days=7), min(p.get("date_to") or today, today)
     return p.get("date_from") or today, p.get("date_to") or today + dt.timedelta(days=7)
 
 
