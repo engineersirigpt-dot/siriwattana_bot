@@ -51,8 +51,32 @@ OPS_TRIGGER_RE = re.compile(
     re.IGNORECASE,
 )
 
-MA_STATUS = {0: "แจ้งซ่อม (ยังไม่เสร็จ)", 1: "ซ่อมเสร็จแล้ว", 2: "ยกเลิก"}
-MA_APPROVE = {0: "รออนุมัติ", 1: "อนุมัติแล้ว", 2: "ไม่อนุมัติ", 3: "ส่งให้ช่างแล้ว"}
+# Stages of a machine repair ticket, checked on the live data (2026-11-19):
+# ma_status 1 = repaired (every one has ma_complete_date), 2 = cancelled (82 of the
+# 94 in 90 days say "ยกเลิก" in their notes, 18 "ซ้ำ"), 0 = not finished — which also
+# keeps the tickets a head REJECTED (approve_status 2, ~1,900 since 2014): those are
+# not open work. An open ticket waits for approval, is approved and waits for a
+# technician (assign_status 0), or has one (assign_status 1).
+REPAIR_STAGE_SQL = ("CASE WHEN r.ma_status = 1 THEN 'done' WHEN r.ma_status = 2 THEN 'cancelled' "
+                    "WHEN r.approve_status = 2 THEN 'rejected' "
+                    "WHEN ISNULL(r.approve_status, 0) = 0 THEN 'wait_approve' "
+                    "WHEN r.approve_status = 1 AND ISNULL(r.assign_status, 0) = 0 THEN 'wait_assign' "
+                    "WHEN r.approve_status = 1 THEN 'assigned' ELSE 'other_open' END")
+REPAIR_STAGE = {"wait_approve": "รออนุมัติ", "wait_assign": "อนุมัติแล้ว รอมอบหมายช่าง",
+                "assigned": "มอบหมายช่างแล้ว (กำลังดำเนินการ)", "other_open": "อยู่ระหว่างดำเนินการ",
+                "rejected": "ไม่อนุมัติ", "done": "ซ่อมเสร็จแล้ว", "cancelled": "ยกเลิก"}
+OPEN_STAGES = ("wait_approve", "wait_assign", "assigned", "other_open")
+_OPEN_SQL = "r.ma_status = 0 AND ISNULL(r.approve_status, 0) <> 2"
+
+
+def repair_total(p: dict, counts: dict) -> int:
+    """Tickets matching the status asked about (the whole period when none)."""
+    status = p.get("status")
+    if status == "open":
+        return sum(counts.get(s, 0) for s in OPEN_STAGES)
+    if status in ("done", "cancelled"):
+        return counts.get(status, 0)
+    return sum(counts.values())
 
 
 def enabled() -> bool:
@@ -355,11 +379,12 @@ def repair_queries(p: dict, today: dt.date) -> tuple[str, str]:
         LEFT JOIN MAINTENANCE_MACHINE.dbo.v_machine m WITH (NOLOCK)
           ON m.machine_id COLLATE DATABASE_DEFAULT = r.machine_id COLLATE DATABASE_DEFAULT"""
     # the counts cover the whole period (so "ค้างซ่อม 140" sits next to how many were done)
-    counts = f"SELECT r.ma_status, COUNT(*) AS n {joins} WHERE {' AND '.join(where)} GROUP BY r.ma_status"
+    counts = (f"SELECT {REPAIR_STAGE_SQL} AS stage, COUNT(*) AS n {joins} WHERE {' AND '.join(where)} "
+              f"GROUP BY {REPAIR_STAGE_SQL}")
     if status in {"open", "done", "cancelled"}:
-        where.append(f"r.ma_status = {({'open': 0, 'done': 1, 'cancelled': 2})[status]}")
+        where.append({"open": _OPEN_SQL, "done": "r.ma_status = 1", "cancelled": "r.ma_status = 2"}[status])
     rows = (f"SELECT TOP {FULL_MAX if p.get('full_list') else MAX_ROWS} r.ma_id, r.notify_datetime, r.need_datetime, r.machine_id, m.machine_name, "
-            f"r.ma_status, r.approve_status, r.ma_complete_date, "
+            f"{REPAIR_STAGE_SQL} AS stage, r.ma_complete_date, "
             f"LEFT(CAST(r.ma_remark AS nvarchar(max)), 200) AS problem, "
             f"LEFT(CAST(r.ma_solution_ma AS nvarchar(max)), 200) AS solution {joins} WHERE {' AND '.join(where)} "
             f"ORDER BY r.notify_datetime DESC")
@@ -371,7 +396,7 @@ def repairs(p: dict, today: dt.date | None = None) -> dict:
     rows_sql, counts_sql = repair_queries(p, today)
     with session() as s:
         rows = s.run(rows_sql)
-        counts = {int(r["ma_status"] or 0): int(r["n"]) for r in s.run(counts_sql)}
+        counts = {str(r["stage"]): int(r["n"] or 0) for r in s.run(counts_sql)}
     return {"rows": rows, "counts": counts}
 
 
@@ -649,10 +674,11 @@ def ops_table(p: dict, data: dict) -> str:
         return ""
     shown = rows if p.get("full_list") else rows[:15]
     if kind == "repairs":
-        total = sum(((data or {}).get("counts") or {}).values())
+        # the title counts what was asked: "รายการ 15 จากทั้งหมด 827" sat over 133 open tickets
+        total = repair_total(p, (data or {}).get("counts") or {})
         head = "| เลขที่ใบ | เครื่อง | อาการ | สถานะ | แจ้งเมื่อ |\n|---|---|---|---|---|"
         body = [f"| {_cell(r.get('ma_id'), 14)} | {_cell(r.get('machine_name') or r.get('machine_id'), 40)} | "
-                f"{_cell(scrub_names(r.get('problem')), 80)} | {MA_STATUS.get(r.get('ma_status'), '-')} | "
+                f"{_cell(scrub_names(r.get('problem')), 80)} | {REPAIR_STAGE.get(r.get('stage'), '-')} | "
                 f"{_when(r.get('notify_datetime'))} |" for r in shown]
     else:
         total = (data or {}).get("count") or len(rows)
@@ -727,12 +753,18 @@ def ops_context(p: dict, data: dict, today: dt.date | None = None) -> str:
                          f"กำหนดพิมพ์ {r.get('printDate') or '-'} | กำหนดส่ง {r.get('due1') or '-'}")
     elif p["kind"] == "repairs":
         c = data["counts"]
+        open_n = sum(c.get(s, 0) for s in OPEN_STAGES)
         lines += [f"เรื่อง: ใบแจ้งซ่อมเครื่องจักร · ช่วงวันที่แจ้ง: {rng}{kw}",
-                  f"สรุปใบที่แจ้งในช่วงนี้: ทั้งหมด {sum(c.values())} ใบ · ยังไม่เสร็จ {c.get(0, 0)} · "
-                  f"ซ่อมเสร็จ {c.get(1, 0)} · ยกเลิก {c.get(2, 0)}"]
+                  f"ใบที่แจ้งในช่วงนี้ทั้งหมด: {sum(c.values())} ใบ",
+                  "สถานะ (เขียนเป็นข้อย่อย ข้อละบรรทัด ตามนี้):",
+                  f"- ยังไม่เสร็จ: {open_n} ใบ"]
+        lines += [f"  - {REPAIR_STAGE[s]}: {c[s]} ใบ" for s in OPEN_STAGES if c.get(s)]
+        lines += [f"- ซ่อมเสร็จแล้ว: {c.get('done', 0)} ใบ", f"- ยกเลิก: {c.get('cancelled', 0)} ใบ"]
+        if c.get("rejected"):
+            lines.append(f"- ไม่อนุมัติ: {c['rejected']} ใบ (หัวหน้าไม่อนุมัติให้ซ่อม จึงไม่นับเป็นงานค้าง)")
         if p.get("status") in {"open", "done", "cancelled"}:
             label = {"open": "ยังไม่เสร็จ", "done": "ซ่อมเสร็จแล้ว", "cancelled": "ยกเลิก"}[p["status"]]
-            shown = {"open": c.get(0, 0), "done": c.get(1, 0), "cancelled": c.get(2, 0)}[p["status"]]
+            shown = repair_total(p, c)
             lines.append(f"ผู้ใช้ถามเฉพาะใบที่{label}: {shown} ใบ")
             if shown > len(rows):
                 lines.append(f"(ข้อมูลประกอบด้านล่าง: {len(rows)} ใบล่าสุด — เป็นข้อมูลภายใน "
@@ -740,7 +772,7 @@ def ops_context(p: dict, data: dict, today: dt.date | None = None) -> str:
         for r in rows:
             lines.append(
                 f"- {r.get('ma_id')} | แจ้ง {_when(r.get('notify_datetime'))} | เครื่อง: {r.get('machine_name') or r.get('machine_id') or '-'}"
-                f" | สถานะ: {MA_STATUS.get(r.get('ma_status'), '-')} ({MA_APPROVE.get(r.get('approve_status'), '-')})"
+                f" | สถานะ: {REPAIR_STAGE.get(r.get('stage'), '-')}"
                 f" | เสร็จ: {_when(r.get('ma_complete_date'))} | ต้องการให้เสร็จ: {_when(r.get('need_datetime'))}"
                 f" | อาการ: {scrub_names(r.get('problem'))} | การแก้ไข: {scrub_names(r.get('solution'))}")
     else:
