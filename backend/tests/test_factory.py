@@ -122,9 +122,11 @@ def test_due_overdue_repair_and_qc_queries():
             "ELSE ISNULL(f.issued, 0) END < m.qty1") in rows
     assert "ISNULL(k.canceled, 0) = 0" in rows and "fp.issue_status = 1" in rows
     rows, counts = fx.repair_queries({"kind": "repairs", "status": "open"}, TODAY)
-    assert "r.ma_status = 0" in rows and "r.notify_datetime >= '2026-08-20'" in rows   # open: last 90 days
-    assert "COLLATE DATABASE_DEFAULT" in rows and "emp" not in rows and "GROUP BY r.ma_status" in counts
-    assert "r.ma_status = 0" not in counts       # counts cover every status in the period
+    # open: last 90 days, and not the tickets a head rejected (they keep ma_status 0, ~1,900 since 2014)
+    assert "r.ma_status = 0 AND ISNULL(r.approve_status, 0) <> 2" in rows and "r.notify_datetime >= '2026-08-20'" in rows
+    assert "COLLATE DATABASE_DEFAULT" in rows and "emp" not in rows and "GROUP BY CASE WHEN r.ma_status = 1" in counts
+    assert "AND ISNULL(r.approve_status, 0) <> 2" not in counts       # counts cover every stage in the period
+    assert "WHEN r.approve_status = 1 AND ISNULL(r.assign_status, 0) = 0 THEN 'wait_assign'" in rows
     summary, problems, jobs = fx.qc_queries({"kind": "qc", "date_from": dt.date(2026, 11, 1)}, TODAY)
     assert "h.qc_datetime >= '2026-11-01'" in summary and "MAX(qc_head_id) - 20000" in problems
 
@@ -192,14 +194,21 @@ def test_ops_contexts():
     assert "- มีบันทึกการส่งแล้วแต่ยังไม่ครบ: 146 งาน" in late
     assert "ยอดส่งแล้ว = ยอดที่มากกว่าระหว่างใบส่งของกับพาเลทที่เบิกออกจากคลัง" in late
     open_ = fx.ops_context({"kind": "repairs", "status": "open"},
-                           {"counts": {0: 140, 1: 168, 2: 31}, "rows": [{"ma_id": "MR1", "ma_status": 0}]}, today=TODAY)
-    assert "ทั้งหมด 339 ใบ · ยังไม่เสร็จ 140 · ซ่อมเสร็จ 168" in open_
-    assert "ผู้ใช้ถามเฉพาะใบที่ยังไม่เสร็จ: 140 ใบ" in open_ and "ห้ามบอกผู้ใช้ว่าระบบแสดงหรือดึงได้แค่กี่ใบ" in open_
+                           {"counts": {"wait_approve": 1, "wait_assign": 11, "assigned": 120, "other_open": 1,
+                                       "done": 597, "cancelled": 94, "rejected": 3},
+                            "rows": [{"ma_id": "MR1", "stage": "assigned"}]}, today=TODAY)
+    assert "ใบที่แจ้งในช่วงนี้ทั้งหมด: 827 ใบ" in open_ and "- ยังไม่เสร็จ: 133 ใบ" in open_
+    assert "  - รออนุมัติ: 1 ใบ\n  - อนุมัติแล้ว รอมอบหมายช่าง: 11 ใบ\n  - มอบหมายช่างแล้ว (กำลังดำเนินการ): 120 ใบ" in open_
+    assert "- ซ่อมเสร็จแล้ว: 597 ใบ\n- ยกเลิก: 94 ใบ" in open_
+    assert "- ไม่อนุมัติ: 3 ใบ (หัวหน้าไม่อนุมัติให้ซ่อม จึงไม่นับเป็นงานค้าง)" in open_
+    assert "ผู้ใช้ถามเฉพาะใบที่ยังไม่เสร็จ: 133 ใบ" in open_
+    assert "ห้ามบอกผู้ใช้ว่าระบบแสดงหรือดึงได้แค่กี่ใบ" in open_
     rep = fx.ops_context({"kind": "repairs", "date_from": None, "date_to": None, "keyword": "L444"},
-                         {"counts": {0: 2, 1: 5}, "rows": [{"ma_id": "MR26110178", "notify_datetime": dt.datetime(2026, 11, 17, 15, 36),
-                                                            "machine_name": "L444SP", "ma_status": 0, "approve_status": 1,
+                         {"counts": {"assigned": 2, "done": 5}, "rows": [{"ma_id": "MR26110178", "notify_datetime": dt.datetime(2026, 11, 17, 15, 36),
+                                                            "machine_name": "L444SP", "stage": "assigned",
                                                             "problem": "ตรวจเช็คไฟฟ้าสถิต", "solution": None}]})
-    assert "ทั้งหมด 7 ใบ · ยังไม่เสร็จ 2 · ซ่อมเสร็จ 5" in rep and "แจ้งซ่อม (ยังไม่เสร็จ) (อนุมัติแล้ว)" in rep
+    assert "ใบที่แจ้งในช่วงนี้ทั้งหมด: 7 ใบ" in rep and "- ยังไม่เสร็จ: 2 ใบ" in rep and "- ซ่อมเสร็จแล้ว: 5 ใบ" in rep
+    assert "สถานะ: มอบหมายช่างแล้ว (กำลังดำเนินการ)" in rep and "ไม่อนุมัติ" not in rep
     qc = fx.ops_context({"kind": "qc", "date_from": dt.date(2026, 11, 1), "date_to": TODAY, "keyword": None},
                         {"summary": {"inspections": 663, "jobs": 101, "checked": 90000, "failed": 536},
                          "problems": [{"problem_name": "ปกยับ", "times": 78, "major": 16, "minor": 302}],
@@ -213,8 +222,8 @@ def test_names_in_repair_notes_are_dropped():
     assert "สมชาย" not in fx.scrub_names("แจ้งคุณสมชายให้เปลี่ยนลูกปืนแล้ว")
     assert fx.scrub_names("ชุดลูกกลิ้งส่งงานเข้าฉากไม่ทำงาน") == "ชุดลูกกลิ้งส่งงานเข้าฉากไม่ทำงาน"
     assert fx.scrub_names(None) == "-"
-    rep = fx.ops_context({"kind": "repairs", "status": "any"}, {"counts": {1: 1}, "rows": [
-        {"ma_id": "MR1", "machine_name": "L444SP", "ma_status": 1, "approve_status": 1,
+    rep = fx.ops_context({"kind": "repairs", "status": "any"}, {"counts": {"done": 1}, "rows": [
+        {"ma_id": "MR1", "machine_name": "L444SP", "stage": "done",
          "problem": "กดลิฟไม่ได้", "solution": "เปลี่ยน sensor (ณรงค์ศักดิ์)"}]}, today=TODAY)
     assert "ณรงค์ศักดิ์" not in rep and "ช่วงวันที่แจ้ง: 2026-11-11 ถึง 2026-11-18" in rep
 
@@ -306,10 +315,15 @@ def test_ops_tables_are_built_in_code():
     assert due.startswith("**รายการ 1 จากทั้งหมด 229**\n\n| เลขงาน | ชื่องาน | ลูกค้า | สั่ง | ส่งแล้ว |")
     assert "|---|---|---|---:|---:|---|---|" in due
     assert "| J82602753 | กล่อง / A | ลูกค้า ก | 5,000 | 0 | 2026-11-19 | 2026-11-20 |" in due
-    rep = fx.ops_table({"kind": "repairs"}, {"counts": {0: 1}, "rows": [
-        {"ma_id": "MR26110135", "machine_name": "L444SP", "problem": "กดลิฟไม่ได้ (ณรงค์ศักดิ์)", "ma_status": 0,
+    rep = fx.ops_table({"kind": "repairs"}, {"counts": {"wait_assign": 1}, "rows": [
+        {"ma_id": "MR26110135", "machine_name": "L444SP", "problem": "กดลิฟไม่ได้ (ณรงค์ศักดิ์)", "stage": "wait_assign",
          "notify_datetime": dt.datetime(2026, 11, 13, 11, 7)}]})
-    assert "| MR26110135 | L444SP | กดลิฟไม่ได้ | แจ้งซ่อม (ยังไม่เสร็จ) | 2026-11-13 11:07 |" in rep
+    assert "| MR26110135 | L444SP | กดลิฟไม่ได้ | อนุมัติแล้ว รอมอบหมายช่าง | 2026-11-13 11:07 |" in rep
+    # the title counts what was asked: "จากทั้งหมด 827" sat over 133 open tickets
+    many = [{"ma_id": f"MR{i}", "stage": "assigned"} for i in range(40)]
+    title = fx.ops_table({"kind": "repairs", "status": "open"},
+                         {"counts": {"assigned": 133, "done": 597, "cancelled": 94}, "rows": many})
+    assert title.startswith("**รายการ 15 จากทั้งหมด 133**")
     assert "ณรงค์ศักดิ์" not in rep and "จากทั้งหมด" not in rep
     assert fx.ops_table({"kind": "qc"}, {"rows": [{"x": 1}]}) == ""
     # a check on the last answer ("มีเยอะขนาดนั้นเลยหรอ") gets no table again
