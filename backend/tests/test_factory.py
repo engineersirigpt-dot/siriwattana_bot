@@ -221,7 +221,10 @@ def test_ops_contexts():
                          "defects": {"major": 540, "minor": 2100},
                          "problems": [{"problem_name": "ปกยับ", "times": 78, "major": 16, "minor": 302}],
                          "jobs": [{"job_id": "J52600854", "job_name": "สมุด", "inspections": 10, "failed": 14}]})
-    assert "- ตรวจ 663 ครั้ง จาก 101 งาน\n- สุ่มตรวจรวม 90,000 ชิ้น (ตามเกณฑ์ AQL)" in qc
+    assert "- ตรวจ 663 ครั้ง จาก 101 งาน\n- สุ่มตรวจรวม 90,000 ชิ้น (ขนาดตัวอย่างตามตาราง AQL)" in qc
+    # no lot verdict in the data: the model said "งานส่วนใหญ่ผ่านเกณฑ์ AQL" (prod 2026-11-19)
+    import llm
+    assert "ห้ามสรุปว่า 'ผ่านเกณฑ์' หรือ 'ไม่ผ่านเกณฑ์'" in llm.SYSTEM_PROMPT_FACTORY
     # "ไม่ผ่าน" is pieces with a MAJOR defect (= the major count on 137 of 144 inspections); minor ones aren't fails
     assert "- ชิ้นที่ไม่ผ่าน (พบข้อบกพร่องร้ายแรง major): 536 ชิ้น ใน 80 ครั้งที่ตรวจ" in qc
     assert "- ข้อบกพร่องเล็กน้อย (minor) ที่บันทึกไว้: 2,100 จุด — ไม่นับเป็นชิ้นไม่ผ่าน" in qc

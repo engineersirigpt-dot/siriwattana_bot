@@ -792,7 +792,8 @@ def ops_context(p: dict, data: dict, today: dt.date | None = None) -> str:
         lines += [f"เรื่อง: ผลตรวจ QC · ช่วงวันที่: {rng}{kw}",
                   "สรุปผลตรวจ (เขียนเป็นข้อย่อย ข้อละบรรทัด):",
                   f"- ตรวจ {s.get('inspections') or 0} ครั้ง จาก {s.get('jobs') or 0} งาน",
-                  f"- สุ่มตรวจรวม {_n(s.get('checked'))} ชิ้น (ตามเกณฑ์ AQL)",
+                  # "(ตามเกณฑ์ AQL)" led to "งานส่วนใหญ่ผ่านเกณฑ์ AQL" — there is no lot verdict (2026-11-19)
+                  f"- สุ่มตรวจรวม {_n(s.get('checked'))} ชิ้น (ขนาดตัวอย่างตามตาราง AQL)",
                   f"- ชิ้นที่ไม่ผ่าน (พบข้อบกพร่องร้ายแรง major): {_n(s.get('failed'))} ชิ้น "
                   f"ใน {s.get('failed_inspections') or 0} ครั้งที่ตรวจ"]
         if dfx.get("minor"):
