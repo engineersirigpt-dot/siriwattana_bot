@@ -99,7 +99,9 @@ def test_job_queries_use_indexes_bounds_and_no_personal_columns():
     assert "handwork_plan_id IN (SELECT id FROM mi.dbo.Si_jobopen_man WITH (NOLOCK) WHERE JobID = 'J52600854')"         in qs["production"]
     assert "packing_plan_id IN (SELECT id FROM mi.dbo.Si_jobopen_packing WITH (NOLOCK) WHERE jobID = 'J52600854')"         in qs["production"]
     assert "issued_pieces" in qs["pallets"]
-    assert "MAX(qc_head_id) - 20000" in qs["qc"]                  # tb_qc_head has no job index
+    # QC_MASTER is small: no "newest 20,000" window (it missed part of 2026, 2026-11-19)
+    assert "MAX(qc_head_id)" not in qs["qc"] and "MAX(qc_detail_id)" not in qs["qc_problems"]
+    assert "failed_inspections" in qs["qc"]
     assert "ISNULL(k.canceled, 0) = 0" in qs["delivered"]
     every = " ".join(qs.values()).lower()
     for col in ("contact", "emp_id", "worker", "address", "destination", "price", "wage", "remark"):
@@ -127,8 +129,9 @@ def test_due_overdue_repair_and_qc_queries():
     assert "COLLATE DATABASE_DEFAULT" in rows and "emp" not in rows and "GROUP BY CASE WHEN r.ma_status = 1" in counts
     assert "AND ISNULL(r.approve_status, 0) <> 2" not in counts       # counts cover every stage in the period
     assert "WHEN r.approve_status = 1 AND ISNULL(r.assign_status, 0) = 0 THEN 'wait_assign'" in rows
-    summary, problems, jobs = fx.qc_queries({"kind": "qc", "date_from": dt.date(2026, 11, 1)}, TODAY)
-    assert "h.qc_datetime >= '2026-11-01'" in summary and "MAX(qc_head_id) - 20000" in problems
+    summary, problems, jobs, defects = fx.qc_queries({"kind": "qc", "date_from": dt.date(2026, 11, 1)}, TODAY)
+    assert "h.qc_datetime >= '2026-11-01'" in summary and "MAX(qc_head_id)" not in problems + summary + jobs
+    assert "SUM(d.minor_count) AS minor" in defects and "h.qc_datetime >= '2026-11-01'" in defects
 
 
 # ── planner ─────────────────────────────────────────────────────────────────
@@ -210,10 +213,16 @@ def test_ops_contexts():
     assert "ใบที่แจ้งในช่วงนี้ทั้งหมด: 7 ใบ" in rep and "- ยังไม่เสร็จ: 2 ใบ" in rep and "- ซ่อมเสร็จแล้ว: 5 ใบ" in rep
     assert "สถานะ: มอบหมายช่างแล้ว (กำลังดำเนินการ)" in rep and "ไม่อนุมัติ" not in rep
     qc = fx.ops_context({"kind": "qc", "date_from": dt.date(2026, 11, 1), "date_to": TODAY, "keyword": None},
-                        {"summary": {"inspections": 663, "jobs": 101, "checked": 90000, "failed": 536},
+                        {"summary": {"inspections": 663, "jobs": 101, "checked": 90000, "failed": 536,
+                                     "failed_inspections": 80},
+                         "defects": {"major": 540, "minor": 2100},
                          "problems": [{"problem_name": "ปกยับ", "times": 78, "major": 16, "minor": 302}],
                          "jobs": [{"job_id": "J52600854", "job_name": "สมุด", "inspections": 10, "failed": 14}]})
-    assert "ตรวจ 663 ครั้ง · 101 งาน" in qc and "ปกยับ: 78 ครั้ง" in qc and "J52600854" in qc
+    assert "- ตรวจ 663 ครั้ง จาก 101 งาน\n- สุ่มตรวจรวม 90,000 ชิ้น (ตามเกณฑ์ AQL)" in qc
+    # "ไม่ผ่าน" is pieces with a MAJOR defect (= the major count on 137 of 144 inspections); minor ones aren't fails
+    assert "- ชิ้นที่ไม่ผ่าน (พบข้อบกพร่องร้ายแรง major): 536 ชิ้น ใน 80 ครั้งที่ตรวจ" in qc
+    assert "- ข้อบกพร่องเล็กน้อย (minor) ที่บันทึกไว้: 2,100 จุด — ไม่นับเป็นชิ้นไม่ผ่าน" in qc
+    assert "ปกยับ: 78 ครั้ง" in qc and "- J52600854 (สมุด): ตรวจ 10 ครั้ง, ไม่ผ่าน 14 ชิ้น" in qc
 
 
 def test_names_in_repair_notes_are_dropped():
